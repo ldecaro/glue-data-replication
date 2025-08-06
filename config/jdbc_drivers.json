@@ -1,0 +1,48 @@
+{
+  "jdbc_drivers": {
+    "oracle": {
+      "driver_name": "Oracle JDBC Driver",
+      "recommended_version": "21.7.0.0",
+      "jar_filename": "ojdbc11.jar",
+      "maven_coordinates": "com.oracle.database.jdbc:ojdbc11:21.7.0.0",
+      "download_url": "https://download.oracle.com/otn-pub/otn_software/jdbc/217/ojdbc11.jar",
+      "required_for_engines": ["oracle"]
+    },
+    "sqlserver": {
+      "driver_name": "Microsoft SQL Server JDBC Driver",
+      "recommended_version": "12.2.0.jre11",
+      "jar_filename": "mssql-jdbc-12.2.0.jre11.jar",
+      "maven_coordinates": "com.microsoft.sqlserver:mssql-jdbc:12.2.0.jre11",
+      "download_url": "https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar",
+      "required_for_engines": ["sqlserver"]
+    },
+    "postgresql": {
+      "driver_name": "PostgreSQL JDBC Driver",
+      "recommended_version": "42.6.0",
+      "jar_filename": "postgresql-42.6.0.jar",
+      "maven_coordinates": "org.postgresql:postgresql:42.6.0",
+      "download_url": "https://repo1.maven.org/maven2/org/postgresql/postgresql/42.6.0/postgresql-42.6.0.jar",
+      "required_for_engines": ["postgresql"]
+    },
+    "db2": {
+      "driver_name": "IBM Db2 JDBC Driver",
+      "recommended_version": "11.5.8.0",
+      "jar_filename": "db2jcc4.jar",
+      "maven_coordinates": "com.ibm.db2:jcc:11.5.8.0",
+      "download_url": "https://repo1.maven.org/maven2/com/ibm/db2/jcc/11.5.8.0/jcc-11.5.8.0.jar",
+      "required_for_engines": ["db2"]
+    }
+  },
+  "s3_storage": {
+    "bucket_structure": {
+      "description": "Recommended S3 bucket structure for JDBC drivers",
+      "path_template": "s3://{bucket}/jdbc-drivers/{engine}/{version}/{jar_filename}",
+      "example_paths": {
+        "oracle": "s3://my-glue-assets/jdbc-drivers/oracle/21.7.0.0/ojdbc11.jar",
+        "sqlserver": "s3://my-glue-assets/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar",
+        "postgresql": "s3://my-glue-assets/jdbc-drivers/postgresql/42.6.0/postgresql-42.6.0.jar",
+        "db2": "s3://my-glue-assets/jdbc-drivers/db2/11.5.8.0/db2jcc4.jar"
+      }
+    }
+  }
+}

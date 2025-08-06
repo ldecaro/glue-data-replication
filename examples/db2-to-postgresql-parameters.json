@@ -1,0 +1,66 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "db2-to-postgresql-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "db2"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "postgresql"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "SAMPLE"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "modernized_db"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "DB2INST1"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "public"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "EMPLOYEE,DEPARTMENT,PROJECT,ACT"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": "db2user"
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": "your-db2-password"
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": "postgres"
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": "your-postgresql-password"
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": "jdbc:db2://db2-host.example.com:50000/SAMPLE"
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": "jdbc:postgresql://postgresql-host.example.com:5432/modernized_db"
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/db2/11.5.8.0/db2jcc4.jar"
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/postgresql/42.6.0/postgresql-42.6.0.jar"
+  }
+]

@@ -1,0 +1,14 @@
+# Test dependencies for AWS Glue Data Replication project
+
+# Core testing framework
+unittest2>=1.1.0
+
+# AWS SDK and mocking
+boto3>=1.26.0
+moto[cloudformation,iam,glue,s3]>=4.2.0
+
+# YAML parsing for CloudFormation templates
+PyYAML>=6.0
+
+# Additional testing utilities
+mock>=4.0.3

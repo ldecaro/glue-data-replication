@@ -1,0 +1,66 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "oracle-to-postgresql-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "oracle"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "postgresql"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "ORCL"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "target_db"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "HR"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "public"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "employees,departments,locations,jobs"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": "hr_user"
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": "your-oracle-password"
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": "postgres"
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": "your-postgresql-password"
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": "jdbc:oracle:thin:@oracle-host.example.com:1521:ORCL"
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": "jdbc:postgresql://postgresql-host.example.com:5432/target_db"
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/oracle/21.7.0.0/ojdbc11.jar"
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/postgresql/42.6.0/postgresql-42.6.0.jar"
+  }
+]

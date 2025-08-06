@@ -1,0 +1,66 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "sqlserver-to-postgresql-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "sqlserver"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "postgresql"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "AdventureWorks"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "analytics_db"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "Sales"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "public"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "Customer,SalesOrderHeader,SalesOrderDetail,Product"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": "sales_reader"
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": "your-sqlserver-password"
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": "postgres"
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": "your-postgresql-password"
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": "jdbc:sqlserver://sqlserver-host.example.com:1433;databaseName=AdventureWorks"
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": "jdbc:postgresql://postgresql-host.example.com:5432/analytics_db"
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar"
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/postgresql/42.6.0/postgresql-42.6.0.jar"
+  }
+]

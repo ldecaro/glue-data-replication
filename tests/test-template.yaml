@@ -1,0 +1,34 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Test template'
+
+Parameters:
+  JobName:
+    Type: String
+    Default: 'test-job'
+
+Conditions:
+  HasSourceNetworkConfig: !Equals [!Ref JobName, 'test']
+
+Resources:
+  TestConnection:
+    Type: AWS::Glue::Connection
+    Condition: HasSourceNetworkConfig
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${JobName}-connection'
+        Description: 'Test connection'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: 'jdbc:postgresql://localhost:5432/test'
+          USERNAME: 'test'
+          PASSWORD: 'test'
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Select [0, !GetAZs '']
+          SecurityGroupIdList:
+            - 'sg-12345678'
+          SubnetId: 'subnet-12345678'
+
+Outputs:
+  TestOutput:
+    Value: 'test'

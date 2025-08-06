@@ -1,0 +1,28 @@
+{
+  "engines": {
+    "oracle": {
+      "driver_class": "oracle.jdbc.OracleDriver",
+      "url_template": "jdbc:oracle:thin:@{host}:{port}:{database}",
+      "default_port": 1521,
+      "supported_versions": ["11g", "12c", "18c", "19c", "21c"]
+    },
+    "sqlserver": {
+      "driver_class": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+      "url_template": "jdbc:sqlserver://{host}:{port};databaseName={database}",
+      "default_port": 1433,
+      "supported_versions": ["2012", "2014", "2016", "2017", "2019", "2022"]
+    },
+    "postgresql": {
+      "driver_class": "org.postgresql.Driver",
+      "url_template": "jdbc:postgresql://{host}:{port}/{database}",
+      "default_port": 5432,
+      "supported_versions": ["9.6", "10", "11", "12", "13", "14", "15"]
+    },
+    "db2": {
+      "driver_class": "com.ibm.db2.jcc.DB2Driver",
+      "url_template": "jdbc:db2://{host}:{port}/{database}",
+      "default_port": 50000,
+      "supported_versions": ["10.5", "11.1", "11.5"]
+    }
+  }
+}

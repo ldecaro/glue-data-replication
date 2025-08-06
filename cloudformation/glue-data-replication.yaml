@@ -1,0 +1,866 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Glue Data Replication Job - Supports full-load and incremental data migration across multiple database types'
+
+Parameters:
+  JobName:
+    Type: String
+    Description: 'Unique name for the Glue data replication job instance'
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: '^[a-zA-Z0-9_-]+$'
+    ConstraintDescription: 'Job name must contain only alphanumeric characters, hyphens, and underscores'
+  
+  SourceEngineType:
+    Type: String
+    Description: 'Source database engine type'
+    AllowedValues:
+      - oracle
+      - sqlserver
+      - postgresql
+      - db2
+    ConstraintDescription: 'Must be one of: oracle, sqlserver, postgresql, db2'
+  
+  TargetEngineType:
+    Type: String
+    Description: 'Target database engine type'
+    AllowedValues:
+      - oracle
+      - sqlserver
+      - postgresql
+      - db2
+    ConstraintDescription: 'Must be one of: oracle, sqlserver, postgresql, db2'
+  
+  SourceDatabase:
+    Type: String
+    Description: 'Source database name'
+    MinLength: 1
+    MaxLength: 128
+    AllowedPattern: '^[a-zA-Z0-9_.-]+$'
+    ConstraintDescription: 'Database name must contain only alphanumeric characters, hyphens, underscores, and periods'
+  
+  TargetDatabase:
+    Type: String
+    Description: 'Target database name'
+    MinLength: 1
+    MaxLength: 128
+    AllowedPattern: '^[a-zA-Z0-9_.-]+$'
+    ConstraintDescription: 'Database name must contain only alphanumeric characters, hyphens, underscores, and periods'
+  
+  SourceSchema:
+    Type: String
+    Description: 'Source database schema name'
+    MinLength: 1
+    MaxLength: 128
+    AllowedPattern: '^[a-zA-Z0-9_.-]+$'
+    ConstraintDescription: 'Schema name must contain only alphanumeric characters, hyphens, underscores, and periods'
+  
+  TargetSchema:
+    Type: String
+    Description: 'Target database schema name'
+    MinLength: 1
+    MaxLength: 128
+    AllowedPattern: '^[a-zA-Z0-9_.-]+$'
+    ConstraintDescription: 'Schema name must contain only alphanumeric characters, hyphens, underscores, and periods'
+  
+  TableNames:
+    Type: CommaDelimitedList
+    Description: 'Comma-separated list of table names to replicate (e.g., table1,table2,table3)'
+    ConstraintDescription: 'Must be a comma-separated list of valid table names'
+  
+  SourceDbUser:
+    Type: String
+    Description: 'Source database username'
+    MinLength: 1
+    MaxLength: 128
+    NoEcho: false
+    ConstraintDescription: 'Username must be between 1 and 128 characters'
+  
+  SourceDbPassword:
+    Type: String
+    Description: 'Source database password'
+    MinLength: 1
+    MaxLength: 128
+    NoEcho: true
+    ConstraintDescription: 'Password must be between 1 and 128 characters'
+  
+  TargetDbUser:
+    Type: String
+    Description: 'Target database username'
+    MinLength: 1
+    MaxLength: 128
+    NoEcho: false
+    ConstraintDescription: 'Username must be between 1 and 128 characters'
+  
+  TargetDbPassword:
+    Type: String
+    Description: 'Target database password'
+    MinLength: 1
+    MaxLength: 128
+    NoEcho: true
+    ConstraintDescription: 'Password must be between 1 and 128 characters'
+  
+  SourceConnectionString:
+    Type: String
+    Description: 'JDBC connection string for source database (format: jdbc:engine://host:port/database or jdbc:engine://host:port;databaseName=database)'
+    MinLength: 10
+    MaxLength: 512
+    AllowedPattern: '^jdbc:[a-zA-Z0-9]+://[a-zA-Z0-9.-]+:[0-9]+[/;].*$'
+    ConstraintDescription: 'Must be a valid JDBC connection string starting with jdbc:engine://host:port'
+  
+  TargetConnectionString:
+    Type: String
+    Description: 'JDBC connection string for target database (format: jdbc:engine://host:port/database or jdbc:engine://host:port;databaseName=database)'
+    MinLength: 10
+    MaxLength: 512
+    AllowedPattern: '^jdbc:[a-zA-Z0-9]+://[a-zA-Z0-9.-]+:[0-9]+[/;].*$'
+    ConstraintDescription: 'Must be a valid JDBC connection string starting with jdbc:engine://host:port'
+  
+  SourceJdbcDriverS3Path:
+    Type: String
+    Description: 'S3 path to source database JDBC driver JAR file (s3://bucket/path/driver.jar)'
+    MinLength: 10
+    MaxLength: 512
+    AllowedPattern: '^s3://[a-zA-Z0-9.-]+/.*\.jar$'
+    ConstraintDescription: 'Must be a valid S3 path ending with .jar (s3://bucket/path/driver.jar)'
+  
+  TargetJdbcDriverS3Path:
+    Type: String
+    Description: 'S3 path to target database JDBC driver JAR file (s3://bucket/path/driver.jar)'
+    MinLength: 10
+    MaxLength: 512
+    AllowedPattern: '^s3://[a-zA-Z0-9.-]+/.*\.jar$'
+    ConstraintDescription: 'Must be a valid S3 path ending with .jar (s3://bucket/path/driver.jar)'
+  
+  GlueJobScriptS3Path:
+    Type: String
+    Description: 'S3 path to the PySpark Glue job script (s3://bucket/path/script.py)'
+    MinLength: 10
+    MaxLength: 512
+    AllowedPattern: '^s3://[a-zA-Z0-9.-]+/.*\.py$'
+    ConstraintDescription: 'Must be a valid S3 path ending with .py (s3://bucket/path/script.py)'
+  
+  MaxRetries:
+    Type: Number
+    Description: 'Maximum number of retries for the Glue job'
+    Default: 1
+    MinValue: 0
+    MaxValue: 10
+    ConstraintDescription: 'Must be between 0 and 10'
+  
+  Timeout:
+    Type: Number
+    Description: 'Timeout for the Glue job in minutes'
+    Default: 2880
+    MinValue: 1
+    MaxValue: 2880
+    ConstraintDescription: 'Must be between 1 and 2880 minutes (48 hours)'
+  
+  MaxConcurrentRuns:
+    Type: Number
+    Description: 'Maximum number of concurrent runs for the Glue job'
+    Default: 1
+    MinValue: 1
+    MaxValue: 1000
+    ConstraintDescription: 'Must be between 1 and 1000'
+  
+  WorkerType:
+    Type: String
+    Description: 'Type of predefined worker for the Glue job'
+    Default: 'G.1X'
+    AllowedValues:
+      - 'Standard'
+      - 'G.1X'
+      - 'G.2X'
+      - 'G.025X'
+    ConstraintDescription: 'Must be one of: Standard, G.1X, G.2X, G.025X'
+  
+  NumberOfWorkers:
+    Type: Number
+    Description: 'Number of workers for the Glue job'
+    Default: 2
+    MinValue: 2
+    MaxValue: 299
+    ConstraintDescription: 'Must be between 2 and 299'
+  
+  # Source Network Configuration Parameters (Optional)
+  SourceVpcId:
+    Type: String
+    Description: 'VPC ID where source database resides (optional for cross-VPC access)'
+    Default: ''
+    AllowedPattern: '^(vpc-[a-zA-Z0-9]{8,17})?$'
+    ConstraintDescription: 'Must be a valid VPC ID (vpc-xxxxxxxx) or empty for same-VPC access'
+  
+  SourceSubnetIds:
+    Type: CommaDelimitedList
+    Description: 'Comma-separated list of subnet IDs for source database access (required if SourceVpcId is specified)'
+    Default: ''
+    ConstraintDescription: 'Must be a comma-separated list of valid subnet IDs (subnet-xxxxxxxx) or empty'
+  
+  SourceSecurityGroupIds:
+    Type: CommaDelimitedList
+    Description: 'Comma-separated list of security group IDs for source database access (required if SourceVpcId is specified)'
+    Default: ''
+    ConstraintDescription: 'Must be a comma-separated list of valid security group IDs (sg-xxxxxxxx) or empty'
+  
+  CreateSourceS3VpcEndpoint:
+    Type: String
+    Description: 'Create S3 VPC endpoint in source VPC for private subnet access to JDBC drivers'
+    Default: 'NO'
+    AllowedValues:
+      - 'YES'
+      - 'NO'
+    ConstraintDescription: 'Must be YES or NO'
+  
+  # Target Network Configuration Parameters (Optional)
+  TargetVpcId:
+    Type: String
+    Description: 'VPC ID where target database resides (optional for cross-VPC access)'
+    Default: ''
+    AllowedPattern: '^(vpc-[a-zA-Z0-9]{8,17})?$'
+    ConstraintDescription: 'Must be a valid VPC ID (vpc-xxxxxxxx) or empty for same-VPC access'
+  
+  TargetSubnetIds:
+    Type: CommaDelimitedList
+    Description: 'Comma-separated list of subnet IDs for target database access (required if TargetVpcId is specified)'
+    Default: ''
+    ConstraintDescription: 'Must be a comma-separated list of valid subnet IDs (subnet-xxxxxxxx) or empty'
+  
+  TargetSecurityGroupIds:
+    Type: CommaDelimitedList
+    Description: 'Comma-separated list of security group IDs for target database access (required if TargetVpcId is specified)'
+    Default: ''
+    ConstraintDescription: 'Must be a comma-separated list of valid security group IDs (sg-xxxxxxxx) or empty'
+  
+  CreateTargetS3VpcEndpoint:
+    Type: String
+    Description: 'Create S3 VPC endpoint in target VPC for private subnet access to JDBC drivers'
+    Default: 'NO'
+    AllowedValues:
+      - 'YES'
+      - 'NO'
+    ConstraintDescription: 'Must be YES or NO'
+
+Conditions:
+  IsStandardWorker: !Equals [!Ref WorkerType, 'Standard']
+  
+  # Network Configuration Conditions
+  HasSourceNetworkConfig: !Not [!Equals [!Ref SourceVpcId, '']]
+  HasTargetNetworkConfig: !Not [!Equals [!Ref TargetVpcId, '']]
+  HasBothNetworkConfigs: !And
+    - !Condition HasSourceNetworkConfig
+    - !Condition HasTargetNetworkConfig
+  HasOnlySourceNetworkConfig: !And
+    - !Condition HasSourceNetworkConfig
+    - !Not [!Condition HasTargetNetworkConfig]
+  HasOnlyTargetNetworkConfig: !And
+    - !Condition HasTargetNetworkConfig
+    - !Not [!Condition HasSourceNetworkConfig]
+  CreateSourceS3Endpoint: !And
+    - !Condition HasSourceNetworkConfig
+    - !Equals [!Ref CreateSourceS3VpcEndpoint, 'YES']
+  CreateTargetS3Endpoint: !And
+    - !Condition HasTargetNetworkConfig
+    - !Equals [!Ref CreateTargetS3VpcEndpoint, 'YES']
+  CreateAnyS3Endpoint: !Or
+    - !Condition CreateSourceS3Endpoint
+    - !Condition CreateTargetS3Endpoint
+  
+  # Parameter validation is handled through parameter constraints
+
+# Note: Parameter validation is handled through parameter constraints and conditions
+# Rules with !Join functions are not supported, so validation is done at deployment time
+
+Resources:
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${JobName}-glue-job-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: !Sub '${JobName}-glue-job-policy'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 permissions for JDBC drivers and job scripts
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Ref SourceJdbcDriverS3Path
+                  - !Ref TargetJdbcDriverS3Path
+                  - !Ref GlueJobScriptS3Path
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}'
+                    - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}'
+                    - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}'
+                    - BucketName: !Select [2, !Split ['/', !Ref GlueJobScriptS3Path]]
+              # S3 permissions for Glue temporary files and assets
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}'
+                  - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}/*'
+                  - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}'
+                  - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}/*'
+              # CloudWatch Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/${JobName}:*'
+              # Glue Job Bookmark permissions
+              - Effect: Allow
+                Action:
+                  - glue:GetJobBookmark
+                  - glue:UpdateJobBookmark
+                  - glue:ResetJobBookmark
+                Resource: !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${JobName}'
+              # Additional Glue permissions for job execution
+              - Effect: Allow
+                Action:
+                  - glue:GetJob
+                  - glue:GetJobRun
+                  - glue:GetJobRuns
+                  - glue:BatchStopJobRun
+                Resource: !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${JobName}'
+              # CloudWatch Metrics permissions
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 'AWS/Glue'
+
+              # Glue Connection permissions for cross-VPC access
+              - Effect: Allow
+                Action:
+                  - glue:GetConnection
+                  - glue:GetConnections
+                  - glue:CreateConnection
+                  - glue:UpdateConnection
+                  - glue:DeleteConnection
+                  - glue:TestConnection
+                Resource:
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-source-connection'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-target-connection'
+              # Enhanced EC2 permissions for VPC network interface management
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:AttachNetworkInterface
+                  - ec2:DetachNetworkInterface
+                  - ec2:ModifyNetworkInterfaceAttribute
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:DescribeTags
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeVpcEndpointServices
+                  - ec2:DescribeVpcEndpointConnections
+                  - ec2:DescribeVpcEndpointServiceConfigurations
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeVpcAttribute
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeNetworkAcls
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeNatGateways
+                  - ec2:DescribeVpnGateways
+                Resource: '*'
+              # VPC Endpoint access permissions for S3 connectivity
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}'
+                  - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}/*'
+                  - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}'
+                  - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}/*'
+                  # Additional S3 access for JDBC drivers through VPC endpoints
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}'
+                    - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}/*'
+                    - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}'
+                    - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}/*'
+                    - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
+
+
+  # Source Database Glue Connection for Cross-VPC Access
+  SourceGlueConnection:
+    Type: AWS::Glue::Connection
+    Condition: HasSourceNetworkConfig
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${JobName}-source-connection'
+        Description: !Sub 'Cross-VPC connection for source ${SourceEngineType} database access'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Ref SourceConnectionString
+          USERNAME: !Ref SourceDbUser
+          PASSWORD: !Ref SourceDbPassword
+          JDBC_ENFORCE_SSL: 'false'
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Select [0, !GetAZs '']
+          SecurityGroupIdList: !Ref SourceSecurityGroupIds
+          SubnetId: !Select [0, !Ref SourceSubnetIds]
+
+  # Target Database Glue Connection for Cross-VPC Access
+  TargetGlueConnection:
+    Type: AWS::Glue::Connection
+    Condition: HasTargetNetworkConfig
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${JobName}-target-connection'
+        Description: !Sub 'Cross-VPC connection for target ${TargetEngineType} database access'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Ref TargetConnectionString
+          USERNAME: !Ref TargetDbUser
+          PASSWORD: !Ref TargetDbPassword
+          JDBC_ENFORCE_SSL: 'false'
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Select [0, !GetAZs '']
+          SecurityGroupIdList: !Ref TargetSecurityGroupIds
+          SubnetId: !Select [0, !Ref TargetSubnetIds]
+
+  # Lambda function to look up route table IDs for source subnets
+  SourceRouteTableLookupFunction:
+    Type: AWS::Lambda::Function
+    Condition: CreateSourceS3Endpoint
+    Properties:
+      FunctionName: !Sub '${JobName}-source-route-table-lookup'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt RouteTableLookupRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+          
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  ec2 = boto3.client('ec2')
+                  subnet_ids = event['ResourceProperties']['SubnetIds']
+                  route_table_ids = set()
+                  
+                  for subnet_id in subnet_ids:
+                      # Get route table associations for the subnet
+                      response = ec2.describe_route_tables(
+                          Filters=[
+                              {'Name': 'association.subnet-id', 'Values': [subnet_id]}
+                          ]
+                      )
+                      
+                      if response['RouteTables']:
+                          # Subnet has explicit route table association
+                          route_table_ids.add(response['RouteTables'][0]['RouteTableId'])
+                      else:
+                          # Subnet uses main route table
+                          subnet_response = ec2.describe_subnets(SubnetIds=[subnet_id])
+                          vpc_id = subnet_response['Subnets'][0]['VpcId']
+                          
+                          main_rt_response = ec2.describe_route_tables(
+                              Filters=[
+                                  {'Name': 'vpc-id', 'Values': [vpc_id]},
+                                  {'Name': 'association.main', 'Values': ['true']}
+                              ]
+                          )
+                          
+                          if main_rt_response['RouteTables']:
+                              route_table_ids.add(main_rt_response['RouteTables'][0]['RouteTableId'])
+                  
+                  response_data = {
+                      'RouteTableIds': list(route_table_ids)
+                  }
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+                  
+              except Exception as e:
+                  print(f'Error: {str(e)}')
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  # Lambda function to look up route table IDs for target subnets
+  TargetRouteTableLookupFunction:
+    Type: AWS::Lambda::Function
+    Condition: CreateTargetS3Endpoint
+    Properties:
+      FunctionName: !Sub '${JobName}-target-route-table-lookup'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt RouteTableLookupRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+          
+          def lambda_handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  ec2 = boto3.client('ec2')
+                  subnet_ids = event['ResourceProperties']['SubnetIds']
+                  route_table_ids = set()
+                  
+                  for subnet_id in subnet_ids:
+                      # Get route table associations for the subnet
+                      response = ec2.describe_route_tables(
+                          Filters=[
+                              {'Name': 'association.subnet-id', 'Values': [subnet_id]}
+                          ]
+                      )
+                      
+                      if response['RouteTables']:
+                          # Subnet has explicit route table association
+                          route_table_ids.add(response['RouteTables'][0]['RouteTableId'])
+                      else:
+                          # Subnet uses main route table
+                          subnet_response = ec2.describe_subnets(SubnetIds=[subnet_id])
+                          vpc_id = subnet_response['Subnets'][0]['VpcId']
+                          
+                          main_rt_response = ec2.describe_route_tables(
+                              Filters=[
+                                  {'Name': 'vpc-id', 'Values': [vpc_id]},
+                                  {'Name': 'association.main', 'Values': ['true']}
+                              ]
+                          )
+                          
+                          if main_rt_response['RouteTables']:
+                              route_table_ids.add(main_rt_response['RouteTables'][0]['RouteTableId'])
+                  
+                  response_data = {
+                      'RouteTableIds': list(route_table_ids)
+                  }
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data)
+                  
+              except Exception as e:
+                  print(f'Error: {str(e)}')
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  # IAM role for route table lookup Lambda functions
+  RouteTableLookupRole:
+    Type: AWS::IAM::Role
+    Condition: CreateAnyS3Endpoint
+    Properties:
+      RoleName: !Sub '${JobName}-route-table-lookup-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RouteTableLookupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeRouteTables
+                  - ec2:DescribeSubnets
+                Resource: '*'
+
+  # Custom resource to invoke source route table lookup
+  SourceRouteTableLookup:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: CreateSourceS3Endpoint
+    Properties:
+      ServiceToken: !GetAtt SourceRouteTableLookupFunction.Arn
+      SubnetIds: !Ref SourceSubnetIds
+
+  # Custom resource to invoke target route table lookup
+  TargetRouteTableLookup:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: CreateTargetS3Endpoint
+    Properties:
+      ServiceToken: !GetAtt TargetRouteTableLookupFunction.Arn
+      SubnetIds: !Ref TargetSubnetIds
+
+  # S3 VPC Endpoint for Source Database VPC (for JDBC driver access from private subnets)
+  SourceS3VpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSourceS3Endpoint
+    Properties:
+      VpcId: !Ref SourceVpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds: !GetAtt SourceRouteTableLookup.RouteTableIds
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}'
+                - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}/*'
+                - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}'
+                - BucketName: !Select [2, !Split ['/', !Ref GlueJobScriptS3Path]]
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}/*'
+                - BucketName: !Select [2, !Split ['/', !Ref GlueJobScriptS3Path]]
+              - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}'
+              - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}/*'
+              - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}'
+              - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-source-s3-vpc-endpoint'
+        - Key: Purpose
+          Value: 'JDBC driver access for Glue job'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # S3 VPC Endpoint for Target Database VPC (for JDBC driver access from private subnets)
+  TargetS3VpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateTargetS3Endpoint
+    Properties:
+      VpcId: !Ref TargetVpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds: !GetAtt TargetRouteTableLookup.RouteTableIds
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}'
+                - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}/*'
+                - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}'
+                - BucketName: !Select [2, !Split ['/', !Ref GlueJobScriptS3Path]]
+              - !Sub
+                - 'arn:aws:s3:::${BucketName}/*'
+                - BucketName: !Select [2, !Split ['/', !Ref GlueJobScriptS3Path]]
+              - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}'
+              - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}/*'
+              - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}'
+              - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-target-s3-vpc-endpoint'
+        - Key: Purpose
+          Value: 'JDBC driver access for Glue job'
+        - Key: JobName
+          Value: !Ref JobName
+
+
+  GlueJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: !Ref JobName
+      Description: !Sub 'Data replication job from ${SourceEngineType} to ${TargetEngineType}'
+      Role: !GetAtt GlueJobRole.Arn
+      Command:
+        Name: glueetl
+        ScriptLocation: !Ref GlueJobScriptS3Path
+        PythonVersion: '3'
+      DefaultArguments:
+        '--job-bookmark-option': 'job-bookmark-enable'
+        '--enable-metrics': 'true'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-spark-ui': 'true'
+        '--spark-event-logs-path': !Sub 's3://aws-glue-assets-${AWS::AccountId}-${AWS::Region}/sparkHistoryLogs/'
+        '--extra-jars': !Sub '${SourceJdbcDriverS3Path},${TargetJdbcDriverS3Path}'
+        '--JOB_NAME': !Ref JobName
+        '--SOURCE_ENGINE_TYPE': !Ref SourceEngineType
+        '--TARGET_ENGINE_TYPE': !Ref TargetEngineType
+        '--SOURCE_DATABASE': !Ref SourceDatabase
+        '--TARGET_DATABASE': !Ref TargetDatabase
+        '--SOURCE_SCHEMA': !Ref SourceSchema
+        '--TARGET_SCHEMA': !Ref TargetSchema
+        '--TABLE_NAMES': !Join [',', !Ref TableNames]
+        '--SOURCE_DB_USER': !Ref SourceDbUser
+        '--SOURCE_DB_PASSWORD': !Ref SourceDbPassword
+        '--TARGET_DB_USER': !Ref TargetDbUser
+        '--TARGET_DB_PASSWORD': !Ref TargetDbPassword
+        '--SOURCE_CONNECTION_STRING': !Ref SourceConnectionString
+        '--TARGET_CONNECTION_STRING': !Ref TargetConnectionString
+        '--SOURCE_JDBC_DRIVER_S3_PATH': !Ref SourceJdbcDriverS3Path
+        '--TARGET_JDBC_DRIVER_S3_PATH': !Ref TargetJdbcDriverS3Path
+        '--SOURCE_VPC_ID': !Ref SourceVpcId
+        '--SOURCE_SUBNET_IDS': !Join [',', !Ref SourceSubnetIds]
+        '--SOURCE_SECURITY_GROUP_IDS': !Join [',', !Ref SourceSecurityGroupIds]
+        '--CREATE_SOURCE_S3_VPC_ENDPOINT': !Ref CreateSourceS3VpcEndpoint
+        '--TARGET_VPC_ID': !Ref TargetVpcId
+        '--TARGET_SUBNET_IDS': !Join [',', !Ref TargetSubnetIds]
+        '--TARGET_SECURITY_GROUP_IDS': !Join [',', !Ref TargetSecurityGroupIds]
+        '--CREATE_TARGET_S3_VPC_ENDPOINT': !Ref CreateTargetS3VpcEndpoint
+        '--SOURCE_GLUE_CONNECTION_NAME': !If [HasSourceNetworkConfig, !Sub '${JobName}-source-connection', '']
+        '--TARGET_GLUE_CONNECTION_NAME': !If [HasTargetNetworkConfig, !Sub '${JobName}-target-connection', '']
+        '--SOURCE_S3_VPC_ENDPOINT_ID': !If [CreateSourceS3Endpoint, !Ref SourceS3VpcEndpoint, '']
+        '--TARGET_S3_VPC_ENDPOINT_ID': !If [CreateTargetS3Endpoint, !Ref TargetS3VpcEndpoint, '']
+        '--VALIDATE_CONNECTIONS': 'true'
+        '--VALIDATE_VPC_ENDPOINTS': 'true'
+        '--CONNECTION_TIMEOUT_SECONDS': '30'
+      ExecutionProperty:
+        MaxConcurrentRuns: !Ref MaxConcurrentRuns
+      MaxRetries: !Ref MaxRetries
+      Timeout: !Ref Timeout
+      GlueVersion: '4.0'
+      Connections:
+        Connections: !If
+          - HasBothNetworkConfigs
+          - - !Sub '${JobName}-source-connection'
+            - !Sub '${JobName}-target-connection'
+          - !If
+            - HasOnlySourceNetworkConfig
+            - - !Sub '${JobName}-source-connection'
+            - !If
+              - HasOnlyTargetNetworkConfig
+              - - !Sub '${JobName}-target-connection'
+              - []
+      WorkerType: !If [IsStandardWorker, !Ref 'AWS::NoValue', !Ref WorkerType]
+      NumberOfWorkers: !If [IsStandardWorker, !Ref 'AWS::NoValue', !Ref NumberOfWorkers]
+      MaxCapacity: !If [IsStandardWorker, 10, !Ref 'AWS::NoValue']
+      Tags:
+        Environment: !Sub '${AWS::StackName}'
+        JobType: 'DataReplication'
+        SourceEngine: !Ref SourceEngineType
+        TargetEngine: !Ref TargetEngineType
+
+Outputs:
+  GlueJobName:
+    Description: 'Name of the created Glue job'
+    Value: !Ref GlueJob
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobName'
+  
+  GlueJobRoleArn:
+    Description: 'ARN of the IAM role used by the Glue job'
+    Value: !GetAtt GlueJobRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobRoleArn'
+  
+  SourceEngineType:
+    Description: 'Source database engine type'
+    Value: !Ref SourceEngineType
+    Export:
+      Name: !Sub '${AWS::StackName}-SourceEngineType'
+  
+  TargetEngineType:
+    Description: 'Target database engine type'
+    Value: !Ref TargetEngineType
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetEngineType'
+  
+  SourceGlueConnectionName:
+    Condition: HasSourceNetworkConfig
+    Description: 'Name of the source database Glue connection for cross-VPC access'
+    Value: !Ref SourceGlueConnection
+    Export:
+      Name: !Sub '${AWS::StackName}-SourceGlueConnectionName'
+  
+  TargetGlueConnectionName:
+    Condition: HasTargetNetworkConfig
+    Description: 'Name of the target database Glue connection for cross-VPC access'
+    Value: !Ref TargetGlueConnection
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGlueConnectionName'
+  
+  NetworkConfiguration:
+    Description: 'Summary of network configuration used'
+    Value: !Sub
+      - 'Source: ${SourceConfig}, Target: ${TargetConfig}'
+      - SourceConfig: !If [HasSourceNetworkConfig, 'Cross-VPC', 'Same-VPC']
+        TargetConfig: !If [HasTargetNetworkConfig, 'Cross-VPC', 'Same-VPC']
+    Export:
+      Name: !Sub '${AWS::StackName}-NetworkConfiguration'
+  
+  SourceS3VpcEndpointId:
+    Condition: CreateSourceS3Endpoint
+    Description: 'ID of the S3 VPC endpoint created in source database VPC'
+    Value: !Ref SourceS3VpcEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-SourceS3VpcEndpointId'
+  
+  TargetS3VpcEndpointId:
+    Condition: CreateTargetS3Endpoint
+    Description: 'ID of the S3 VPC endpoint created in target database VPC'
+    Value: !Ref TargetS3VpcEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetS3VpcEndpointId'
+  
+  S3VpcEndpointConfiguration:
+    Description: 'Summary of S3 VPC endpoint configuration'
+    Value: !Sub
+      - 'Source S3 Endpoint: ${SourceEndpoint}, Target S3 Endpoint: ${TargetEndpoint}'
+      - SourceEndpoint: !If [CreateSourceS3Endpoint, 'Created', 'Not Created']
+        TargetEndpoint: !If [CreateTargetS3Endpoint, 'Created', 'Not Created']
+    Export:
+      Name: !Sub '${AWS::StackName}-S3VpcEndpointConfiguration'

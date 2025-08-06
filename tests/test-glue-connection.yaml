@@ -1,0 +1,54 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Test Glue Connection'
+
+Parameters:
+  JobName:
+    Type: String
+    Default: 'test-job'
+  SourceVpcId:
+    Type: String
+    Default: ''
+  SourceSubnetIds:
+    Type: CommaDelimitedList
+    Default: 'subnet-12345678'
+  SourceSecurityGroupIds:
+    Type: CommaDelimitedList
+    Default: 'sg-12345678'
+  SourceConnectionString:
+    Type: String
+    Default: 'jdbc:postgresql://localhost:5432/test'
+  SourceDbUser:
+    Type: String
+    Default: 'testuser'
+  SourceDbPassword:
+    Type: String
+    Default: 'testpass'
+    NoEcho: true
+
+Conditions:
+  HasSourceNetworkConfig: !Not [!Equals [!Ref SourceVpcId, '']]
+
+Resources:
+  SourceGlueConnection:
+    Type: AWS::Glue::Connection
+    Condition: HasSourceNetworkConfig
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${JobName}-source-connection'
+        Description: 'Test connection'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Ref SourceConnectionString
+          USERNAME: !Ref SourceDbUser
+          PASSWORD: !Ref SourceDbPassword
+          JDBC_ENFORCE_SSL: 'false'
+        PhysicalConnectionRequirements:
+          AvailabilityZone: !Select [0, !GetAZs '']
+          SecurityGroupIdList: !Ref SourceSecurityGroupIds
+          SubnetId: !Select [0, !Ref SourceSubnetIds]
+
+Outputs:
+  ConnectionName:
+    Condition: HasSourceNetworkConfig
+    Value: !Ref SourceGlueConnection
