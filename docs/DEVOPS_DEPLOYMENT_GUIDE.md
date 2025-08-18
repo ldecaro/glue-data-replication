@@ -95,6 +95,9 @@ Before deploying the stack, ensure JDBC drivers are available in S3:
 # Create S3 bucket for drivers (if not exists)
 aws s3 mb s3://your-glue-assets-bucket
 
+# Upload Glue job script
+aws s3 cp scripts/glue_data_replication.py s3://your-glue-assets-bucket/scripts/glue_data_replication.py
+
 # Upload JDBC drivers using recommended structure
 aws s3 cp ojdbc11.jar s3://your-glue-assets-bucket/jdbc-drivers/oracle/21.7.0.0/ojdbc11.jar
 aws s3 cp mssql-jdbc-12.2.0.jre11.jar s3://your-glue-assets-bucket/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar
@@ -373,7 +376,7 @@ aws cloudformation create-stack \
   --stack-name glue-data-replication-prod \
   --template-body file://cloudformation/glue-data-replication.yaml \
   --parameters file://parameters/prod-parameters.json \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_NAMED_IAM \
   --tags Key=Environment,Value=Production Key=Project,Value=DataReplication
 
 # Monitor deployment progress
@@ -468,7 +471,7 @@ aws cloudformation create-stack \
   --stack-name glue-data-replication-dev \
   --template-body file://cloudformation/glue-data-replication.yaml \
   --parameters file://parameters/dev-parameters.json \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_NAMED_IAM \
   --tags Key=Environment,Value=Development
 ```
 
@@ -493,7 +496,7 @@ for region in us-east-1 us-west-2 eu-west-1; do
     --stack-name glue-data-replication-prod-$region \
     --template-body file://cloudformation/glue-data-replication.yaml \
     --parameters file://parameters/prod-$region-parameters.json \
-    --capabilities CAPABILITY_IAM
+    --capabilities CAPABILITY_NAMED_IAM
 done
 ```
 
@@ -509,7 +512,7 @@ aws cloudformation update-stack \
   --stack-name glue-data-replication-prod \
   --template-body file://cloudformation/glue-data-replication.yaml \
   --parameters file://parameters/prod-parameters-updated.json \
-  --capabilities CAPABILITY_IAM
+  --capabilities CAPABILITY_NAMED_IAM
 ```
 
 ### JDBC Driver Updates

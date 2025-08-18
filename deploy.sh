@@ -229,7 +229,7 @@ if [[ "$OPERATION" == "create" ]]; then
         --stack-name "$STACK_NAME" \
         --template-body file://$TEMPLATE_FILE \
         --parameters file://$PARAMETERS_FILE \
-        --capabilities CAPABILITY_IAM \
+        --capabilities CAPABILITY_NAMED_IAM \
         --tags Key=DeployedBy,Value="$(whoami)" Key=DeploymentDate,Value="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --enable-termination-protection
     
@@ -240,7 +240,7 @@ elif [[ "$OPERATION" == "update" ]]; then
         --stack-name "$STACK_NAME" \
         --template-body file://$TEMPLATE_FILE \
         --parameters file://$PARAMETERS_FILE \
-        --capabilities CAPABILITY_IAM
+        --capabilities CAPABILITY_NAMED_IAM
     
     print_success "Stack update initiated"
 fi

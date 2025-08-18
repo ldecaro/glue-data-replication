@@ -78,7 +78,7 @@ aws cloudformation create-stack \
                ParameterKey=SourceEngineType,ParameterValue=oracle \
                ParameterKey=TargetEngineType,ParameterValue=postgresql \
                # ... other required parameters
-  --capabilities CAPABILITY_IAM
+  --capabilities CAPABILITY_NAMED_IAM
 ```
 
 ## Security Considerations

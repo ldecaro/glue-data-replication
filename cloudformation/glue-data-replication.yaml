@@ -202,10 +202,26 @@ Parameters:
     Default: ''
     ConstraintDescription: 'Must be a comma-separated list of valid security group IDs (sg-xxxxxxxx) or empty'
   
+  SourceAvailabilityZone:
+    Type: String
+    Description: 'Availability Zone for source subnet (required if SourceVpcId is specified)'
+    Default: ''
+    AllowedPattern: '^([a-z]{2}-[a-z]+-[0-9][a-z])?$'
+    ConstraintDescription: 'Must be a valid availability zone (e.g., us-east-1a) or empty'
+  
   CreateSourceS3VpcEndpoint:
     Type: String
     Description: 'Create S3 VPC endpoint in source VPC for private subnet access to JDBC drivers'
     Default: 'NO'
+    AllowedValues:
+      - 'YES'
+      - 'NO'
+    ConstraintDescription: 'Must be YES or NO'
+  
+  CreateSourceGlueVpcEndpoint:
+    Type: String
+    Description: 'Create Glue VPC endpoint in source VPC for private subnet access to Glue API'
+    Default: 'YES'
     AllowedValues:
       - 'YES'
       - 'NO'
@@ -231,6 +247,13 @@ Parameters:
     Default: ''
     ConstraintDescription: 'Must be a comma-separated list of valid security group IDs (sg-xxxxxxxx) or empty'
   
+  TargetAvailabilityZone:
+    Type: String
+    Description: 'Availability Zone for target subnet (required if TargetVpcId is specified)'
+    Default: ''
+    AllowedPattern: '^([a-z]{2}-[a-z]+-[0-9][a-z])?$'
+    ConstraintDescription: 'Must be a valid availability zone (e.g., us-east-1a) or empty'
+  
   CreateTargetS3VpcEndpoint:
     Type: String
     Description: 'Create S3 VPC endpoint in target VPC for private subnet access to JDBC drivers'
@@ -239,6 +262,63 @@ Parameters:
       - 'YES'
       - 'NO'
     ConstraintDescription: 'Must be YES or NO'
+  
+  CreateTargetGlueVpcEndpoint:
+    Type: String
+    Description: 'Create Glue VPC endpoint in target VPC for private subnet access to Glue API'
+    Default: 'YES'
+    AllowedValues:
+      - 'YES'
+      - 'NO'
+    ConstraintDescription: 'Must be YES or NO'
+
+  # Observability Configuration Parameters (Optional)
+  LogRetentionDays:
+    Type: Number
+    Description: 'Number of days to retain CloudWatch logs'
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    ConstraintDescription: 'Must be a valid CloudWatch log retention period'
+
+  ErrorLogRetentionDays:
+    Type: Number
+    Description: 'Number of days to retain error logs (typically longer than regular logs)'
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    ConstraintDescription: 'Must be a valid CloudWatch log retention period'
+
+  EnableCloudWatchDashboard:
+    Type: String
+    Description: 'Create CloudWatch Dashboard for monitoring'
+    Default: 'YES'
+    AllowedValues:
+      - 'YES'
+      - 'NO'
+    ConstraintDescription: 'Must be YES or NO'
+
+  EnableCloudWatchAlarms:
+    Type: String
+    Description: 'Create CloudWatch Alarms for monitoring'
+    Default: 'YES'
+    AllowedValues:
+      - 'YES'
+      - 'NO'
+    ConstraintDescription: 'Must be YES or NO'
+
+  AlarmNotificationEmail:
+    Type: String
+    Description: 'Email address for alarm notifications (optional)'
+    Default: ''
+    AllowedPattern: '^$|^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    ConstraintDescription: 'Must be a valid email address or empty'
+
+  JobDurationThresholdMinutes:
+    Type: Number
+    Description: 'Threshold in minutes for long-running job alarm'
+    Default: 60
+    MinValue: 5
+    MaxValue: 2880
+    ConstraintDescription: 'Must be between 5 and 2880 minutes'
 
 Conditions:
   IsStandardWorker: !Equals [!Ref WorkerType, 'Standard']
@@ -264,6 +344,23 @@ Conditions:
   CreateAnyS3Endpoint: !Or
     - !Condition CreateSourceS3Endpoint
     - !Condition CreateTargetS3Endpoint
+  CreateSourceGlueEndpoint: !And
+    - !Condition HasSourceNetworkConfig
+    - !Equals [!Ref CreateSourceGlueVpcEndpoint, 'YES']
+  CreateTargetGlueEndpoint: !And
+    - !Condition HasTargetNetworkConfig
+    - !Equals [!Ref CreateTargetGlueVpcEndpoint, 'YES']
+  CreateAnyGlueEndpoint: !Or
+    - !Condition CreateSourceGlueEndpoint
+    - !Condition CreateTargetGlueEndpoint
+  
+  # Observability Conditions
+  EnableDashboard: !Equals [!Ref EnableCloudWatchDashboard, 'YES']
+  EnableAlarms: !Equals [!Ref EnableCloudWatchAlarms, 'YES']
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmNotificationEmail, '']]
+  CreateAlarmTopic: !And
+    - !Condition EnableAlarms
+    - !Condition HasAlarmEmail
   
   # Parameter validation is handled through parameter constraints
 
@@ -295,9 +392,15 @@ Resources:
                   - s3:GetObject
                   - s3:GetObjectVersion
                 Resource:
-                  - !Ref SourceJdbcDriverS3Path
-                  - !Ref TargetJdbcDriverS3Path
-                  - !Ref GlueJobScriptS3Path
+                  - !Sub
+                    - 'arn:aws:s3:::${S3Path}'
+                    - S3Path: !Select [1, !Split ['s3://', !Ref SourceJdbcDriverS3Path]]
+                  - !Sub
+                    - 'arn:aws:s3:::${S3Path}'
+                    - S3Path: !Select [1, !Split ['s3://', !Ref TargetJdbcDriverS3Path]]
+                  - !Sub
+                    - 'arn:aws:s3:::${S3Path}'
+                    - S3Path: !Select [1, !Split ['s3://', !Ref GlueJobScriptS3Path]]
               - Effect: Allow
                 Action:
                   - s3:ListBucket
@@ -332,9 +435,14 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogGroups
                   - logs:DescribeLogStreams
+                  - logs:DescribeLogEvents
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
                 Resource:
                   - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/*'
                   - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/${JobName}:*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/output/${JobName}:*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/jobs/error/${JobName}:*'
               # Glue Job Bookmark permissions
               - Effect: Allow
                 Action:
@@ -354,10 +462,25 @@ Resources:
               - Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                  - cloudwatch:PutDashboard
+                  - cloudwatch:GetDashboard
+                  - cloudwatch:ListDashboards
                 Resource: '*'
                 Condition:
                   StringEquals:
                     'cloudwatch:namespace': 'AWS/Glue'
+              # CloudWatch Insights permissions
+              - Effect: Allow
+                Action:
+                  - logs:StartQuery
+                  - logs:StopQuery
+                  - logs:GetQueryResults
+                  - logs:DescribeQueries
+                  - logs:PutQueryDefinition
+                  - logs:DescribeQueryDefinitions
+                Resource: '*'
 
               # Glue Connection permissions for cross-VPC access
               - Effect: Allow
@@ -369,8 +492,8 @@ Resources:
                   - glue:DeleteConnection
                   - glue:TestConnection
                 Resource:
-                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-source-connection'
-                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-target-connection'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-source-network-connection'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-target-network-connection'
               # Enhanced EC2 permissions for VPC network interface management
               - Effect: Allow
                 Action:
@@ -425,45 +548,37 @@ Resources:
                     - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
 
 
-  # Source Database Glue Connection for Cross-VPC Access
-  SourceGlueConnection:
+
+
+  # Source Network Connection for VPC Access
+  SourceNetworkConnection:
     Type: AWS::Glue::Connection
     Condition: HasSourceNetworkConfig
     Properties:
       CatalogId: !Ref AWS::AccountId
       ConnectionInput:
-        Name: !Sub '${JobName}-source-connection'
-        Description: !Sub 'Cross-VPC connection for source ${SourceEngineType} database access'
-        ConnectionType: JDBC
-        ConnectionProperties:
-          JDBC_CONNECTION_URL: !Ref SourceConnectionString
-          USERNAME: !Ref SourceDbUser
-          PASSWORD: !Ref SourceDbPassword
-          JDBC_ENFORCE_SSL: 'false'
+        Name: !Sub '${JobName}-source-network-connection'
+        Description: !Sub 'Network connection for source VPC access - ${SourceEngineType} database'
+        ConnectionType: NETWORK
         PhysicalConnectionRequirements:
-          AvailabilityZone: !Select [0, !GetAZs '']
           SecurityGroupIdList: !Ref SourceSecurityGroupIds
           SubnetId: !Select [0, !Ref SourceSubnetIds]
+          AvailabilityZone: !Ref SourceAvailabilityZone
 
-  # Target Database Glue Connection for Cross-VPC Access
-  TargetGlueConnection:
+  # Target Network Connection for VPC Access  
+  TargetNetworkConnection:
     Type: AWS::Glue::Connection
     Condition: HasTargetNetworkConfig
     Properties:
       CatalogId: !Ref AWS::AccountId
       ConnectionInput:
-        Name: !Sub '${JobName}-target-connection'
-        Description: !Sub 'Cross-VPC connection for target ${TargetEngineType} database access'
-        ConnectionType: JDBC
-        ConnectionProperties:
-          JDBC_CONNECTION_URL: !Ref TargetConnectionString
-          USERNAME: !Ref TargetDbUser
-          PASSWORD: !Ref TargetDbPassword
-          JDBC_ENFORCE_SSL: 'false'
+        Name: !Sub '${JobName}-target-network-connection'
+        Description: !Sub 'Network connection for target VPC access - ${TargetEngineType} database'
+        ConnectionType: NETWORK
         PhysicalConnectionRequirements:
-          AvailabilityZone: !Select [0, !GetAZs '']
           SecurityGroupIdList: !Ref TargetSecurityGroupIds
           SubnetId: !Select [0, !Ref TargetSubnetIds]
+          AvailabilityZone: !Ref TargetAvailabilityZone
 
   # Lambda function to look up route table IDs for source subnets
   SourceRouteTableLookupFunction:
@@ -719,9 +834,347 @@ Resources:
         - Key: JobName
           Value: !Ref JobName
 
+  # Glue VPC Endpoint for Source Database VPC (for Glue API access from private subnets)
+  SourceGlueVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateSourceGlueEndpoint
+    Properties:
+      VpcId: !Ref SourceVpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.glue'
+      VpcEndpointType: Interface
+      SubnetIds: !Ref SourceSubnetIds
+      SecurityGroupIds: !Ref SourceSecurityGroupIds
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - glue:GetConnection
+              - glue:GetConnections
+              - glue:GetJob
+              - glue:GetJobRun
+              - glue:GetJobRuns
+              - glue:GetJobBookmark
+              - glue:UpdateJobBookmark
+              - glue:ResetJobBookmark
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-source-glue-vpc-endpoint'
+        - Key: Purpose
+          Value: 'Glue API access for Glue job'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # Glue VPC Endpoint for Target Database VPC (for Glue API access from private subnets)
+  TargetGlueVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateTargetGlueEndpoint
+    Properties:
+      VpcId: !Ref TargetVpcId
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.glue'
+      VpcEndpointType: Interface
+      SubnetIds: !Ref TargetSubnetIds
+      SecurityGroupIds: !Ref TargetSecurityGroupIds
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - glue:GetConnection
+              - glue:GetConnections
+              - glue:GetJob
+              - glue:GetJobRun
+              - glue:GetJobRuns
+              - glue:GetJobBookmark
+              - glue:UpdateJobBookmark
+              - glue:ResetJobBookmark
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-target-glue-vpc-endpoint'
+        - Key: Purpose
+          Value: 'Glue API access for Glue job'
+        - Key: JobName
+          Value: !Ref JobName
+
+
+  # CloudWatch Log Group for Glue Job Logs
+  GlueJobLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws-glue/jobs/${JobName}'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-glue-job-logs'
+        - Key: Purpose
+          Value: 'Glue job execution logs'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # CloudWatch Log Group for Glue Job Output Logs
+  GlueJobOutputLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws-glue/jobs/output/${JobName}'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-glue-job-output-logs'
+        - Key: Purpose
+          Value: 'Glue job output and application logs'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # CloudWatch Log Group for Glue Job Error Logs
+  GlueJobErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws-glue/jobs/error/${JobName}'
+      RetentionInDays: !Ref ErrorLogRetentionDays
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-glue-job-error-logs'
+        - Key: Purpose
+          Value: 'Glue job error and exception logs'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # SNS Topic for Alarm Notifications
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: CreateAlarmTopic
+    Properties:
+      TopicName: !Sub '${JobName}-glue-alarms'
+      DisplayName: !Sub 'Glue Job Alarms - ${JobName}'
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlarmNotificationEmail
+
+  # CloudWatch Dashboard for Glue Job Monitoring
+  GlueJobDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Condition: EnableDashboard
+    Properties:
+      DashboardName: !Sub '${JobName}-glue-monitoring'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Glue", "glue.driver.aggregate.numCompletedTasks", "JobName", "${JobName}" ],
+                  [ ".", "glue.driver.aggregate.numFailedTasks", ".", "." ],
+                  [ ".", "glue.driver.aggregate.numKilledTasks", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Glue Job Task Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Glue", "glue.driver.jvm.heap.usage", "JobName", "${JobName}" ],
+                  [ ".", "glue.driver.jvm.heap.used", ".", "." ],
+                  [ ".", "glue.driver.system.cpuUtilization", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Glue Job Resource Utilization",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Glue", "glue.driver.BlockManager.disk.diskSpaceUsed_MB", "JobName", "${JobName}" ],
+                  [ ".", "glue.driver.s3.filesystem.read_bytes", ".", "." ],
+                  [ ".", "glue.driver.s3.filesystem.write_bytes", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Glue Job I/O Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "log",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws-glue/jobs/${JobName}'\n| fields @timestamp, @message\n| filter @message like /ERROR/\n| sort @timestamp desc\n| limit 100",
+                "region": "${AWS::Region}",
+                "title": "Recent Errors",
+                "view": "table"
+              }
+            }
+          ]
+        }
+
+  # CloudWatch Alarm for Job Failures
+  GlueJobFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableAlarms
+    Properties:
+      AlarmName: !Sub '${JobName}-job-failures'
+      AlarmDescription: !Sub 'Alarm when Glue job ${JobName} fails'
+      MetricName: 'glue.driver.aggregate.numFailedTasks'
+      Namespace: 'AWS/Glue'
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: JobName
+          Value: !Ref JobName
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - CreateAlarmTopic
+        - [!Ref AlarmNotificationTopic]
+        - []
+      OKActions: !If
+        - CreateAlarmTopic
+        - [!Ref AlarmNotificationTopic]
+        - []
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-failure-alarm'
+        - Key: Purpose
+          Value: 'Monitor Glue job failures'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # CloudWatch Alarm for High Memory Usage
+  GlueJobMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableAlarms
+    Properties:
+      AlarmName: !Sub '${JobName}-high-memory-usage'
+      AlarmDescription: !Sub 'Alarm when Glue job ${JobName} has high memory usage'
+      MetricName: 'glue.driver.jvm.heap.usage'
+      Namespace: 'AWS/Glue'
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 0.85
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: JobName
+          Value: !Ref JobName
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - CreateAlarmTopic
+        - [!Ref AlarmNotificationTopic]
+        - []
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-memory-alarm'
+        - Key: Purpose
+          Value: 'Monitor Glue job memory usage'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # CloudWatch Alarm for Long Running Jobs
+  GlueJobDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: EnableAlarms
+    Properties:
+      AlarmName: !Sub '${JobName}-long-duration'
+      AlarmDescription: !Sub 'Alarm when Glue job ${JobName} runs longer than expected'
+      MetricName: 'glue.driver.aggregate.elapsedTime'
+      Namespace: 'AWS/Glue'
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3600000  # 1 hour in milliseconds (configurable via parameter description)
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: JobName
+          Value: !Ref JobName
+      TreatMissingData: notBreaching
+      AlarmActions: !If
+        - CreateAlarmTopic
+        - [!Ref AlarmNotificationTopic]
+        - []
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-duration-alarm'
+        - Key: Purpose
+          Value: 'Monitor Glue job execution duration'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # CloudWatch Log Insights Saved Queries
+  LogInsightsQueryErrors:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub '${JobName}-error-analysis'
+      LogGroupNames:
+        - !Ref GlueJobLogGroup
+        - !Ref GlueJobErrorLogGroup
+      QueryString: |
+        fields @timestamp, @message, @logStream
+        | filter @message like /ERROR/ or @message like /Exception/ or @message like /Failed/
+        | sort @timestamp desc
+        | limit 100
+
+  LogInsightsQueryPerformance:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub '${JobName}-performance-analysis'
+      LogGroupNames:
+        - !Ref GlueJobLogGroup
+        - !Ref GlueJobOutputLogGroup
+      QueryString: |
+        fields @timestamp, @message
+        | filter @message like /records processed/ or @message like /execution time/ or @message like /memory usage/
+        | sort @timestamp desc
+        | limit 50
+
+  LogInsightsQueryDataFlow:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub '${JobName}-data-flow-analysis'
+      LogGroupNames:
+        - !Ref GlueJobOutputLogGroup
+      QueryString: |
+        fields @timestamp, @message
+        | filter @message like /table/ or @message like /rows/ or @message like /processed/
+        | stats count() by bin(5m)
+        | sort @timestamp desc
 
   GlueJob:
     Type: AWS::Glue::Job
+    DependsOn:
+      - GlueJobLogGroup
+      - GlueJobOutputLogGroup
+      - GlueJobErrorLogGroup
     Properties:
       Name: !Ref JobName
       Description: !Sub 'Data replication job from ${SourceEngineType} to ${TargetEngineType}'
@@ -736,6 +1189,12 @@ Resources:
         '--enable-continuous-cloudwatch-log': 'true'
         '--enable-spark-ui': 'true'
         '--spark-event-logs-path': !Sub 's3://aws-glue-assets-${AWS::AccountId}-${AWS::Region}/sparkHistoryLogs/'
+        '--continuous-log-logGroup': !Ref GlueJobLogGroup
+        '--continuous-log-logStreamPrefix': !Sub '${JobName}'
+        '--continuous-log-conversionPattern': '%d{yyyy-MM-dd HH:mm:ss} [%t] %-5p %c{1} - %m%n'
+        '--enable-auto-scaling': 'true'
+        '--enable-glue-datacatalog': 'true'
+        '--job-language': 'python'
         '--extra-jars': !Sub '${SourceJdbcDriverS3Path},${TargetJdbcDriverS3Path}'
         '--JOB_NAME': !Ref JobName
         '--SOURCE_ENGINE_TYPE': !Ref SourceEngineType
@@ -761,12 +1220,11 @@ Resources:
         '--TARGET_SUBNET_IDS': !Join [',', !Ref TargetSubnetIds]
         '--TARGET_SECURITY_GROUP_IDS': !Join [',', !Ref TargetSecurityGroupIds]
         '--CREATE_TARGET_S3_VPC_ENDPOINT': !Ref CreateTargetS3VpcEndpoint
-        '--SOURCE_GLUE_CONNECTION_NAME': !If [HasSourceNetworkConfig, !Sub '${JobName}-source-connection', '']
-        '--TARGET_GLUE_CONNECTION_NAME': !If [HasTargetNetworkConfig, !Sub '${JobName}-target-connection', '']
+        '--SOURCE_GLUE_CONNECTION_NAME': !If [HasSourceNetworkConfig, !Sub '${JobName}-source-network-connection', '']
+        '--TARGET_GLUE_CONNECTION_NAME': !If [HasTargetNetworkConfig, !Sub '${JobName}-target-network-connection', '']
         '--SOURCE_S3_VPC_ENDPOINT_ID': !If [CreateSourceS3Endpoint, !Ref SourceS3VpcEndpoint, '']
         '--TARGET_S3_VPC_ENDPOINT_ID': !If [CreateTargetS3Endpoint, !Ref TargetS3VpcEndpoint, '']
         '--VALIDATE_CONNECTIONS': 'true'
-        '--VALIDATE_VPC_ENDPOINTS': 'true'
         '--CONNECTION_TIMEOUT_SECONDS': '30'
       ExecutionProperty:
         MaxConcurrentRuns: !Ref MaxConcurrentRuns
@@ -776,14 +1234,14 @@ Resources:
       Connections:
         Connections: !If
           - HasBothNetworkConfigs
-          - - !Sub '${JobName}-source-connection'
-            - !Sub '${JobName}-target-connection'
+          - - !Sub '${JobName}-source-network-connection'
+            - !Sub '${JobName}-target-network-connection'
           - !If
             - HasOnlySourceNetworkConfig
-            - - !Sub '${JobName}-source-connection'
+            - - !Sub '${JobName}-source-network-connection'
             - !If
               - HasOnlyTargetNetworkConfig
-              - - !Sub '${JobName}-target-connection'
+              - - !Sub '${JobName}-target-network-connection'
               - []
       WorkerType: !If [IsStandardWorker, !Ref 'AWS::NoValue', !Ref WorkerType]
       NumberOfWorkers: !If [IsStandardWorker, !Ref 'AWS::NoValue', !Ref NumberOfWorkers]
@@ -819,19 +1277,19 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-TargetEngineType'
   
-  SourceGlueConnectionName:
+  SourceNetworkConnectionName:
     Condition: HasSourceNetworkConfig
-    Description: 'Name of the source database Glue connection for cross-VPC access'
-    Value: !Ref SourceGlueConnection
+    Description: 'Name of the source network connection for VPC access'
+    Value: !Ref SourceNetworkConnection
     Export:
-      Name: !Sub '${AWS::StackName}-SourceGlueConnectionName'
+      Name: !Sub '${AWS::StackName}-SourceNetworkConnectionName'
   
-  TargetGlueConnectionName:
+  TargetNetworkConnectionName:
     Condition: HasTargetNetworkConfig
-    Description: 'Name of the target database Glue connection for cross-VPC access'
-    Value: !Ref TargetGlueConnection
+    Description: 'Name of the target network connection for VPC access'
+    Value: !Ref TargetNetworkConnection
     Export:
-      Name: !Sub '${AWS::StackName}-TargetGlueConnectionName'
+      Name: !Sub '${AWS::StackName}-TargetNetworkConnectionName'
   
   NetworkConfiguration:
     Description: 'Summary of network configuration used'
@@ -864,3 +1322,69 @@ Outputs:
         TargetEndpoint: !If [CreateTargetS3Endpoint, 'Created', 'Not Created']
     Export:
       Name: !Sub '${AWS::StackName}-S3VpcEndpointConfiguration'
+
+  # Observability Outputs
+  GlueJobLogGroup:
+    Description: 'CloudWatch Log Group for Glue job execution logs'
+    Value: !Ref GlueJobLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobLogGroup'
+
+  GlueJobOutputLogGroup:
+    Description: 'CloudWatch Log Group for Glue job output logs'
+    Value: !Ref GlueJobOutputLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobOutputLogGroup'
+
+  GlueJobErrorLogGroup:
+    Description: 'CloudWatch Log Group for Glue job error logs'
+    Value: !Ref GlueJobErrorLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobErrorLogGroup'
+
+  CloudWatchDashboard:
+    Condition: EnableDashboard
+    Description: 'CloudWatch Dashboard for Glue job monitoring'
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${JobName}-glue-monitoring'
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudWatchDashboard'
+
+  LogInsightsQueries:
+    Description: 'CloudWatch Log Insights saved queries for analysis'
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#logsV2:logs-insights'
+    Export:
+      Name: !Sub '${AWS::StackName}-LogInsightsQueries'
+
+  GlueJobFailureAlarm:
+    Condition: EnableAlarms
+    Description: 'CloudWatch Alarm for Glue job failures'
+    Value: !Ref GlueJobFailureAlarm
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobFailureAlarm'
+
+  GlueJobMemoryAlarm:
+    Condition: EnableAlarms
+    Description: 'CloudWatch Alarm for high memory usage'
+    Value: !Ref GlueJobMemoryAlarm
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobMemoryAlarm'
+
+  GlueJobDurationAlarm:
+    Condition: EnableAlarms
+    Description: 'CloudWatch Alarm for long running jobs'
+    Value: !Ref GlueJobDurationAlarm
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueJobDurationAlarm'
+
+  AlarmNotificationTopic:
+    Condition: CreateAlarmTopic
+    Description: 'SNS Topic for alarm notifications'
+    Value: !Ref AlarmNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AlarmNotificationTopic'
+
+  ObservabilityConfiguration:
+    Description: 'Summary of observability components created'
+    Value: !Sub 'Log Groups: 3, Dashboard: 1, Alarms: 3, Log Insights Queries: 3'
+    Export:
+      Name: !Sub '${AWS::StackName}-ObservabilityConfiguration'

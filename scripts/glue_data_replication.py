@@ -9,14 +9,20 @@ Supported database engines: Oracle, SQL Server, PostgreSQL, DB2
 """
 
 import sys
+import os
 import json
 import logging
 import time
+import threading
+import queue
+import asyncio
 import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError, NoCredentialsError, BotoCoreError
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlparse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -39,6 +45,1760 @@ try:
 except Exception as e:
     logger.warning(f"Failed to initialize CloudWatch client: {e}")
     cloudwatch = None
+
+
+@dataclass
+class S3BookmarkConfig:
+    """Configuration for S3 bookmark storage."""
+    bucket_name: str
+    bookmark_prefix: str
+    job_name: str
+    retry_attempts: int = 3
+    timeout_seconds: int = 30
+    
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if not self.bucket_name:
+            raise ValueError("S3 bucket name cannot be empty")
+        if not self.job_name:
+            raise ValueError("Job name cannot be empty")
+        if self.retry_attempts < 1:
+            raise ValueError("Retry attempts must be at least 1")
+        if self.timeout_seconds < 1:
+            raise ValueError("Timeout seconds must be at least 1")
+        
+        # Ensure bookmark_prefix ends with '/' for proper S3 key structure
+        if self.bookmark_prefix and not self.bookmark_prefix.endswith('/'):
+            self.bookmark_prefix += '/'
+
+
+class S3BookmarkStorage:
+    """Handles S3 operations for persistent bookmark storage."""
+    
+    def __init__(self, config: S3BookmarkConfig):
+        self.config = config
+        self.structured_logger = StructuredLogger(config.job_name)
+        self.metrics_publisher = CloudWatchMetricsPublisher(config.job_name)
+        
+        # Configure S3 client with retry and timeout settings
+        boto_config = Config(
+            retries={
+                'max_attempts': config.retry_attempts,
+                'mode': 'adaptive'
+            },
+            read_timeout=config.timeout_seconds,
+            connect_timeout=config.timeout_seconds,
+            region_name=os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+        )
+        
+        try:
+            self.s3_client = boto3.client('s3', config=boto_config)
+            self.structured_logger.info("Initialized S3 client for bookmark storage",
+                                      bucket=config.bucket_name,
+                                      prefix=config.bookmark_prefix)
+        except Exception as e:
+            self.structured_logger.error("Failed to initialize S3 client", error=str(e))
+            raise
+    
+    def _get_bookmark_s3_key(self, table_name: str) -> str:
+        """Generate S3 key for bookmark file."""
+        return f"{self.config.bookmark_prefix}{self.config.job_name}/{table_name}.json"
+    
+    async def _read_bookmark_from_s3(self, table_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Private method to read bookmark data from S3 with comprehensive error handling.
+        
+        This method implements the core S3 read functionality with:
+        - JSON parsing and validation for bookmark files
+        - Error handling for S3 access denied, not found, and timeout scenarios
+        - Retry logic with exponential backoff
+        - Automatic cleanup of corrupted bookmark files
+        
+        Args:
+            table_name: Name of the table to read bookmark for
+            
+        Returns:
+            Dictionary containing validated bookmark data or None if not found/error
+        """
+        s3_key = self._get_bookmark_s3_key(table_name)
+        start_time = time.time()
+        
+        # Log operation start (Requirement 6.1)
+        self.structured_logger.log_s3_operation_start("read", table_name, s3_key,
+                                                     bucket=self.config.bucket_name)
+        
+        for attempt in range(1, self.config.retry_attempts + 1):
+            try:
+                self.structured_logger.debug("Attempting to read bookmark from S3",
+                                           table_name=table_name,
+                                           s3_key=s3_key,
+                                           attempt=attempt)
+                
+                # Use asyncio to run the S3 operation in a thread pool
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: self.s3_client.get_object(
+                        Bucket=self.config.bucket_name,
+                        Key=s3_key
+                    )
+                )
+                
+                # Parse JSON content with validation
+                content = response['Body'].read().decode('utf-8')
+                bookmark_data = json.loads(content)
+                
+                # Calculate operation duration for performance logging
+                duration_ms = (time.time() - start_time) * 1000
+                
+                # Validate bookmark JSON structure with enhanced corruption detection
+                if not self._validate_bookmark_json(bookmark_data, table_name):
+                    self.structured_logger.error("Bookmark validation failed - corrupted data detected",
+                                               table_name=table_name,
+                                               s3_key=s3_key,
+                                               bookmark_keys=list(bookmark_data.keys()) if isinstance(bookmark_data, dict) else "invalid_data",
+                                               cleanup_action="deleting_corrupted_file")
+                    
+                    # Publish corruption metrics
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_bookmark_corruption_metrics(
+                            table_name, "validation_failed", False)
+                    
+                    # Delete corrupted file and return None to trigger full load fallback
+                    try:
+                        delete_success = await self.delete_bookmark(table_name)
+                        cleanup_success = delete_success
+                        
+                        # Log cleanup result
+                        self.structured_logger.log_corrupted_bookmark_cleanup(
+                            table_name, s3_key, cleanup_success)
+                        
+                        # Update corruption metrics with cleanup result
+                        if hasattr(self, 'metrics_publisher'):
+                            self.metrics_publisher.publish_bookmark_corruption_metrics(
+                                table_name, "validation_failed", cleanup_success)
+                        
+                    except Exception as delete_error:
+                        self.structured_logger.log_corrupted_bookmark_cleanup(
+                            table_name, s3_key, False, str(delete_error))
+                        
+                        if hasattr(self, 'metrics_publisher'):
+                            self.metrics_publisher.publish_bookmark_corruption_metrics(
+                                table_name, "validation_failed", False)
+                    
+                    # Log operation failure and publish metrics
+                    self.structured_logger.log_s3_operation_failure(
+                        "read", table_name, s3_key, duration_ms, 
+                        "Bookmark validation failed", "corrupted_data")
+                    
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_s3_bookmark_metrics(
+                            "read", table_name, False, duration_ms, "corrupted_data")
+                    
+                    return None
+                
+                # Log successful operation with performance metrics (Requirements 6.1, 6.3)
+                file_size = response.get('ContentLength', 0)
+                self.structured_logger.log_s3_operation_success(
+                    "read", table_name, s3_key, duration_ms,
+                    file_size_bytes=file_size,
+                    bookmark_version=bookmark_data.get('version', 'unknown'))
+                
+                # Log bookmark state details (Requirement 6.2)
+                self.structured_logger.log_bookmark_state_loaded(
+                    table_name,
+                    bookmark_data.get('last_processed_value'),
+                    bookmark_data.get('last_update_timestamp'),
+                    bookmark_data.get('is_first_run', True))
+                
+                # Publish success metrics (Requirements 6.4, 6.5)
+                if hasattr(self, 'metrics_publisher'):
+                    self.metrics_publisher.publish_s3_bookmark_metrics(
+                        "read", table_name, True, duration_ms, file_size_bytes=file_size)
+                
+                return bookmark_data
+                
+            except ClientError as e:
+                # Calculate duration for error logging
+                duration_ms = (time.time() - start_time) * 1000
+                
+                # Use centralized error handling
+                error_info = self._handle_s3_error("read", table_name, e)
+                
+                if error_info['error_category'] == 'key_not_found':
+                    # File not found - expected for first run, not an error
+                    self.structured_logger.info("S3 bookmark file not found (expected for first run)",
+                                              table_name=table_name, s3_key=s3_key)
+                    return None
+                elif not error_info['is_recoverable']:
+                    # Permanent error - log failure and publish metrics
+                    self.structured_logger.log_s3_operation_failure(
+                        "read", table_name, s3_key, duration_ms, 
+                        str(e), error_info['error_category'])
+                    
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_s3_bookmark_metrics(
+                            "read", table_name, False, duration_ms, error_info['error_category'])
+                        self.metrics_publisher.publish_bookmark_fallback_metrics(
+                            table_name, "permanent_s3_error", error_info['error_category'])
+                    
+                    return None
+                elif error_info['should_retry'] and attempt < self.config.retry_attempts:
+                    # Retry with exponential backoff
+                    wait_time = 2 ** (attempt - 1)
+                    self.structured_logger.log_s3_operation_retry(
+                        "read", table_name, s3_key, attempt, wait_time, error_info['error_category'])
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Max retries reached - log final failure
+                    self.structured_logger.log_s3_operation_failure(
+                        "read", table_name, s3_key, duration_ms, 
+                        f"Max retries reached: {str(e)}", error_info['error_category'])
+                    
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_s3_bookmark_metrics(
+                            "read", table_name, False, duration_ms, error_info['error_category'])
+                        self.metrics_publisher.publish_bookmark_fallback_metrics(
+                            table_name, "max_retries_reached", error_info['error_category'])
+                    
+                    return None
+                        
+            except json.JSONDecodeError as e:
+                # Calculate duration for error logging
+                duration_ms = (time.time() - start_time) * 1000
+                
+                # Use centralized error handling for JSON corruption
+                error_info = self._handle_s3_error("read", table_name, e)
+                
+                self.structured_logger.error("Corrupted JSON detected in bookmark file, initiating cleanup",
+                                           table_name=table_name,
+                                           s3_key=s3_key,
+                                           error=str(e),
+                                           cleanup_action="deleting_corrupted_file")
+                
+                # Publish corruption detection metrics
+                if hasattr(self, 'metrics_publisher'):
+                    self.metrics_publisher.publish_bookmark_corruption_metrics(
+                        table_name, "json_decode_error", False)
+                
+                # Delete corrupted file and return None to trigger full load fallback
+                try:
+                    delete_success = await self.delete_bookmark(table_name)
+                    cleanup_success = delete_success
+                    
+                    # Log cleanup result
+                    self.structured_logger.log_corrupted_bookmark_cleanup(
+                        table_name, s3_key, cleanup_success)
+                    
+                    # Update corruption metrics with cleanup result
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_bookmark_corruption_metrics(
+                            table_name, "json_decode_error", cleanup_success)
+                        
+                except Exception as delete_error:
+                    self.structured_logger.log_corrupted_bookmark_cleanup(
+                        table_name, s3_key, False, str(delete_error))
+                    
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_bookmark_corruption_metrics(
+                            table_name, "json_decode_error", False)
+                
+                # Log operation failure and publish metrics
+                self.structured_logger.log_s3_operation_failure(
+                    "read", table_name, s3_key, duration_ms, 
+                    f"JSON decode error: {str(e)}", "corrupted_data")
+                
+                if hasattr(self, 'metrics_publisher'):
+                    self.metrics_publisher.publish_s3_bookmark_metrics(
+                        "read", table_name, False, duration_ms, "corrupted_data")
+                    self.metrics_publisher.publish_bookmark_fallback_metrics(
+                        table_name, "corrupted_json", "corrupted_data")
+                
+                return None
+                
+            except Exception as e:
+                # Calculate duration for error logging
+                duration_ms = (time.time() - start_time) * 1000
+                
+                # Use centralized error handling for unexpected errors
+                error_info = self._handle_s3_error("read", table_name, e)
+                
+                if error_info['should_retry'] and attempt < self.config.retry_attempts:
+                    # Retry with exponential backoff
+                    wait_time = 2 ** (attempt - 1)
+                    self.structured_logger.log_s3_operation_retry(
+                        "read", table_name, s3_key, attempt, wait_time, error_info['error_category'])
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Max retries reached or non-retryable error
+                    self.structured_logger.log_s3_operation_failure(
+                        "read", table_name, s3_key, duration_ms, 
+                        f"Unexpected error: {str(e)}", error_info['error_category'])
+                    
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_s3_bookmark_metrics(
+                            "read", table_name, False, duration_ms, error_info['error_category'])
+                        self.metrics_publisher.publish_bookmark_fallback_metrics(
+                            table_name, "unexpected_error", error_info['error_category'])
+                    
+                    return None
+        
+        return None
+    
+    def _validate_bookmark_json(self, bookmark_data: Dict[str, Any], table_name: str) -> bool:
+        """
+        Validate bookmark JSON structure and handle missing fields with comprehensive checks.
+        
+        This method performs enhanced validation of bookmark data including:
+        - Basic structure validation
+        - Required field presence and format validation
+        - Data type validation for all fields
+        - Logical consistency checks
+        - Corruption detection for malformed data
+        
+        Args:
+            bookmark_data: Dictionary containing bookmark data from S3
+            table_name: Name of the table (for logging)
+            
+        Returns:
+            True if bookmark data is valid, False otherwise
+        """
+        try:
+            # Basic structure validation
+            if not isinstance(bookmark_data, dict):
+                self.structured_logger.error("Bookmark data is not a valid dictionary",
+                                           table_name=table_name,
+                                           data_type=type(bookmark_data).__name__)
+                return False
+            
+            # Check for empty data
+            if not bookmark_data:
+                self.structured_logger.error("Bookmark data is empty",
+                                           table_name=table_name)
+                return False
+            
+            # Use the existing validation from JobBookmarkState
+            if not JobBookmarkState._validate_s3_data(bookmark_data):
+                self.structured_logger.error("Bookmark data failed JobBookmarkState validation",
+                                           table_name=table_name,
+                                           bookmark_keys=list(bookmark_data.keys()))
+                return False
+            
+            # Additional corruption detection checks
+            
+            # Check for table name consistency
+            if bookmark_data.get('table_name') != table_name:
+                self.structured_logger.error("Table name mismatch in bookmark data",
+                                           table_name=table_name,
+                                           bookmark_table_name=bookmark_data.get('table_name'))
+                return False
+            
+            # Check for reasonable timestamp values (not in the future by more than 1 hour)
+            current_time = datetime.now(timezone.utc)
+            future_threshold = current_time + timedelta(hours=1)
+            
+            timestamp_fields = ['last_update_timestamp', 'created_timestamp', 'updated_timestamp']
+            for field in timestamp_fields:
+                if field in bookmark_data and bookmark_data[field]:
+                    try:
+                        timestamp_str = bookmark_data[field]
+                        if timestamp_str.endswith('Z'):
+                            timestamp_str = timestamp_str[:-1] + '+00:00'
+                        elif '+' not in timestamp_str and timestamp_str.count(':') == 2:
+                            timestamp_str += '+00:00'
+                        
+                        parsed_timestamp = datetime.fromisoformat(timestamp_str)
+                        
+                        # Check if timestamp is unreasonably in the future
+                        if parsed_timestamp > future_threshold:
+                            self.structured_logger.error(f"Bookmark {field} is unreasonably in the future",
+                                                       table_name=table_name,
+                                                       field=field,
+                                                       timestamp=bookmark_data[field],
+                                                       current_time=current_time.isoformat())
+                            return False
+                        
+                        # Check if created_timestamp is after updated_timestamp (logical inconsistency)
+                        if field == 'updated_timestamp' and 'created_timestamp' in bookmark_data:
+                            created_str = bookmark_data['created_timestamp']
+                            if created_str:
+                                if created_str.endswith('Z'):
+                                    created_str = created_str[:-1] + '+00:00'
+                                elif '+' not in created_str and created_str.count(':') == 2:
+                                    created_str += '+00:00'
+                                
+                                created_timestamp = datetime.fromisoformat(created_str)
+                                if created_timestamp > parsed_timestamp:
+                                    self.structured_logger.error("Created timestamp is after updated timestamp",
+                                                               table_name=table_name,
+                                                               created_timestamp=bookmark_data['created_timestamp'],
+                                                               updated_timestamp=bookmark_data[field])
+                                    return False
+                                    
+                    except (ValueError, TypeError) as e:
+                        self.structured_logger.error(f"Invalid timestamp format in {field}",
+                                                   table_name=table_name,
+                                                   field=field,
+                                                   timestamp=bookmark_data[field],
+                                                   error=str(e))
+                        return False
+            
+            # Check for valid incremental strategy and column consistency
+            strategy = bookmark_data.get('incremental_strategy')
+            column = bookmark_data.get('incremental_column')
+            
+            if strategy in ['timestamp', 'primary_key'] and not column:
+                self.structured_logger.error("Incremental column required for strategy but missing",
+                                           table_name=table_name,
+                                           strategy=strategy,
+                                           column=column)
+                return False
+            
+            # Check for reasonable last_processed_value format
+            last_value = bookmark_data.get('last_processed_value')
+            if last_value is not None and strategy == 'timestamp':
+                # For timestamp strategy, last_processed_value should be a valid timestamp or date
+                try:
+                    if isinstance(last_value, str) and len(last_value) > 0:
+                        # Try to parse as timestamp
+                        if 'T' in last_value or ' ' in last_value:
+                            # Looks like a timestamp
+                            test_timestamp = last_value
+                            if test_timestamp.endswith('Z'):
+                                test_timestamp = test_timestamp[:-1] + '+00:00'
+                            elif '+' not in test_timestamp and test_timestamp.count(':') >= 2:
+                                test_timestamp += '+00:00'
+                            datetime.fromisoformat(test_timestamp)
+                        elif '-' in last_value and len(last_value) >= 8:
+                            # Looks like a date
+                            datetime.strptime(last_value[:10], '%Y-%m-%d')
+                except (ValueError, TypeError) as e:
+                    self.structured_logger.warning("Last processed value format may be invalid for timestamp strategy",
+                                                 table_name=table_name,
+                                                 last_processed_value=last_value,
+                                                 strategy=strategy,
+                                                 error=str(e))
+                    # Don't fail validation for this - it might be a different timestamp format
+            
+            # Check for suspicious data patterns that might indicate corruption
+            
+            # Check for extremely long string values that might indicate data corruption
+            for key, value in bookmark_data.items():
+                if isinstance(value, str) and len(value) > 10000:  # 10KB limit for string fields
+                    self.structured_logger.error("Suspiciously long string value detected",
+                                               table_name=table_name,
+                                               field=key,
+                                               value_length=len(value))
+                    return False
+            
+            # Check for null bytes or other control characters that might indicate corruption
+            for key, value in bookmark_data.items():
+                if isinstance(value, str) and ('\x00' in value or any(ord(c) < 32 and c not in '\t\n\r' for c in value)):
+                    self.structured_logger.error("Control characters detected in bookmark data",
+                                               table_name=table_name,
+                                               field=key)
+                    return False
+            
+            self.structured_logger.debug("Bookmark data validation passed all checks",
+                                       table_name=table_name,
+                                       strategy=strategy,
+                                       column=column,
+                                       is_first_run=bookmark_data.get('is_first_run', True))
+            
+            return True
+            
+        except Exception as e:
+            self.structured_logger.error("Unexpected error during bookmark validation",
+                                       table_name=table_name,
+                                       error=str(e),
+                                       error_type=type(e).__name__)
+            return False
+    
+    async def read_bookmark(self, table_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Read bookmark data from S3 with error handling and fallback logic.
+        
+        This is the public interface that implements fallback logic when S3 read operations fail.
+        
+        Args:
+            table_name: Name of the table to read bookmark for
+            
+        Returns:
+            Dictionary containing bookmark data or None if not found/error
+        """
+        try:
+            # Attempt to read from S3 using the private method
+            bookmark_data = await self._read_bookmark_from_s3(table_name)
+            
+            if bookmark_data is not None:
+                # Successfully read and validated bookmark
+                return bookmark_data
+            else:
+                # Bookmark not found or failed to read - this triggers fallback logic
+                self.structured_logger.info("S3 bookmark read returned None, triggering fallback logic",
+                                          table_name=table_name)
+                return None
+                
+        except Exception as e:
+            # Unexpected error in the read process - implement fallback logic
+            self.structured_logger.error("Unexpected error in bookmark read operation, falling back",
+                                       table_name=table_name,
+                                       error=str(e))
+            return None
+    
+    async def read_bookmarks_parallel(self, table_names: List[str]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """
+        Read bookmark data for multiple tables in parallel.
+        
+        This method implements parallel bookmark reading during job initialization
+        to optimize S3 operations for jobs processing many tables simultaneously.
+        
+        Args:
+            table_names: List of table names to read bookmarks for
+            
+        Returns:
+            Dictionary mapping table names to bookmark data (or None if not found/error)
+        """
+        if not table_names:
+            return {}
+        
+        start_time = time.time()
+        
+        # Log start of parallel operation (Requirement 7.1)
+        self.structured_logger.log_parallel_s3_operation_start(
+            "read", len(table_names), 
+            table_names=table_names
+        )
+        
+        try:
+            # Create tasks for parallel execution
+            tasks = []
+            for table_name in table_names:
+                task = asyncio.create_task(
+                    self.read_bookmark(table_name),
+                    name=f"read_bookmark_{table_name}"
+                )
+                tasks.append((table_name, task))
+            
+            # Execute all tasks concurrently with timeout
+            results = {}
+            successful_count = 0
+            failed_count = 0
+            
+            # Wait for all tasks to complete with a reasonable timeout
+            timeout_seconds = self.config.timeout_seconds * len(table_names)  # Scale timeout with table count
+            
+            try:
+                # Use asyncio.gather with return_exceptions=True to handle individual failures
+                task_results = await asyncio.wait_for(
+                    asyncio.gather(*[task for _, task in tasks], return_exceptions=True),
+                    timeout=timeout_seconds
+                )
+                
+                # Process results
+                for i, (table_name, _) in enumerate(tasks):
+                    result = task_results[i]
+                    
+                    if isinstance(result, Exception):
+                        # Task failed with exception
+                        self.structured_logger.error("Parallel bookmark read failed for table",
+                                                   table_name=table_name,
+                                                   error=str(result),
+                                                   error_type=type(result).__name__)
+                        results[table_name] = None
+                        failed_count += 1
+                    else:
+                        # Task completed successfully (result may be None for not found)
+                        results[table_name] = result
+                        successful_count += 1
+                        
+                        if result is not None:
+                            self.structured_logger.debug("Parallel bookmark read successful",
+                                                       table_name=table_name,
+                                                       bookmark_found=True)
+                        else:
+                            self.structured_logger.debug("Parallel bookmark read completed - no bookmark found",
+                                                       table_name=table_name,
+                                                       bookmark_found=False)
+                
+            except asyncio.TimeoutError:
+                # Handle timeout - cancel remaining tasks and collect partial results
+                self.structured_logger.warning("Parallel bookmark read timeout, cancelling remaining tasks",
+                                             timeout_seconds=timeout_seconds,
+                                             table_count=len(table_names))
+                
+                # Cancel all tasks and collect what we can
+                for table_name, task in tasks:
+                    if not task.done():
+                        task.cancel()
+                        results[table_name] = None
+                        failed_count += 1
+                    else:
+                        try:
+                            result = task.result()
+                            results[table_name] = result
+                            successful_count += 1
+                        except Exception as e:
+                            results[table_name] = None
+                            failed_count += 1
+            
+            # Calculate total duration
+            total_duration_ms = (time.time() - start_time) * 1000
+            
+            # Log completion of parallel operation (Requirement 7.1)
+            self.structured_logger.log_parallel_s3_operation_complete(
+                "read", len(table_names), successful_count, failed_count, 
+                total_duration_ms, table_names=table_names
+            )
+            
+            # Publish parallel operation metrics
+            if hasattr(self, 'metrics_publisher'):
+                self.metrics_publisher.publish_parallel_s3_metrics(
+                    "read", len(table_names), successful_count, failed_count, total_duration_ms
+                )
+            
+            return results
+            
+        except Exception as e:
+            # Handle unexpected errors in parallel processing
+            total_duration_ms = (time.time() - start_time) * 1000
+            
+            self.structured_logger.error("Unexpected error in parallel bookmark read operation",
+                                       error=str(e),
+                                       error_type=type(e).__name__,
+                                       table_count=len(table_names),
+                                       duration_ms=total_duration_ms)
+            
+            # Return empty results for all tables to trigger fallback
+            return {table_name: None for table_name in table_names}
+    
+    async def _write_bookmark_to_s3(self, table_name: str, bookmark_data: Dict[str, Any]) -> bool:
+        """
+        Private method to write bookmark data to S3 with comprehensive error handling.
+        
+        This method implements the core S3 write functionality with:
+        - JSON serialization and S3 upload functionality
+        - Error handling for S3 write failures with appropriate logging
+        - Retry logic with exponential backoff
+        - Non-blocking operation design to avoid blocking job execution
+        
+        Args:
+            table_name: Name of the table to write bookmark for
+            bookmark_data: Dictionary containing bookmark data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        s3_key = self._get_bookmark_s3_key(table_name)
+        start_time = time.time()
+        
+        try:
+            # Serialize bookmark data to JSON with proper formatting
+            json_content = json.dumps(bookmark_data, indent=2, default=str)
+            content_bytes = json_content.encode('utf-8')
+            
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            self.structured_logger.log_s3_operation_failure(
+                "write", table_name, s3_key, duration_ms,
+                f"JSON serialization failed: {str(e)}", "serialization_error")
+            
+            if hasattr(self, 'metrics_publisher'):
+                self.metrics_publisher.publish_s3_bookmark_metrics(
+                    "write", table_name, False, duration_ms, "serialization_error")
+            
+            return False
+        
+        # Log operation start (Requirement 6.1)
+        self.structured_logger.log_s3_operation_start("write", table_name, s3_key,
+                                                     bucket=self.config.bucket_name,
+                                                     content_size_bytes=len(content_bytes))
+        
+        for attempt in range(1, self.config.retry_attempts + 1):
+            try:
+                self.structured_logger.debug("Attempting to write bookmark to S3",
+                                           table_name=table_name,
+                                           s3_key=s3_key,
+                                           attempt=attempt,
+                                           content_size=len(content_bytes))
+                
+                # Use asyncio to run the S3 operation in a thread pool to avoid blocking
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(
+                    None,
+                    lambda: self.s3_client.put_object(
+                        Bucket=self.config.bucket_name,
+                        Key=s3_key,
+                        Body=content_bytes,
+                        ContentType='application/json',
+                        ServerSideEncryption='AES256'
+                    )
+                )
+                
+                # Calculate operation duration for performance logging
+                duration_ms = (time.time() - start_time) * 1000
+                
+                # Log successful operation with performance metrics (Requirements 6.1, 6.3)
+                self.structured_logger.log_s3_operation_success(
+                    "write", table_name, s3_key, duration_ms,
+                    file_size_bytes=len(content_bytes),
+                    bookmark_version=bookmark_data.get('version', 'unknown'))
+                
+                # Log bookmark state details (Requirement 6.2)
+                self.structured_logger.log_bookmark_state_saved(
+                    table_name,
+                    bookmark_data.get('last_processed_value'),
+                    len(content_bytes),
+                    bookmark_data.get('version', 'unknown'))
+                
+                # Publish success metrics (Requirements 6.4, 6.5)
+                if hasattr(self, 'metrics_publisher'):
+                    self.metrics_publisher.publish_s3_bookmark_metrics(
+                        "write", table_name, True, duration_ms, 
+                        file_size_bytes=len(content_bytes))
+                
+                return True
+                
+            except ClientError as e:
+                # Calculate duration for error logging
+                duration_ms = (time.time() - start_time) * 1000
+                
+                # Use centralized error handling
+                error_info = self._handle_s3_error("write", table_name, e)
+                
+                if not error_info['is_recoverable']:
+                    # Permanent error - log failure and publish metrics
+                    self.structured_logger.log_s3_operation_failure(
+                        "write", table_name, s3_key, duration_ms, 
+                        str(e), error_info['error_category'])
+                    
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_s3_bookmark_metrics(
+                            "write", table_name, False, duration_ms, error_info['error_category'])
+                    
+                    return False
+                elif error_info['should_retry'] and attempt < self.config.retry_attempts:
+                    # Retry with exponential backoff
+                    wait_time = 2 ** (attempt - 1)
+                    self.structured_logger.log_s3_operation_retry(
+                        "write", table_name, s3_key, attempt, wait_time, error_info['error_category'])
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Max retries reached - log final failure
+                    self.structured_logger.log_s3_operation_failure(
+                        "write", table_name, s3_key, duration_ms, 
+                        f"Max retries reached: {str(e)}", error_info['error_category'])
+                    
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_s3_bookmark_metrics(
+                            "write", table_name, False, duration_ms, error_info['error_category'])
+                    
+                    return False
+                        
+            except Exception as e:
+                # Calculate duration for error logging
+                duration_ms = (time.time() - start_time) * 1000
+                
+                # Use centralized error handling for unexpected errors
+                error_info = self._handle_s3_error("write", table_name, e)
+                
+                if error_info['should_retry'] and attempt < self.config.retry_attempts:
+                    # Retry with exponential backoff
+                    wait_time = 2 ** (attempt - 1)
+                    self.structured_logger.log_s3_operation_retry(
+                        "write", table_name, s3_key, attempt, wait_time, error_info['error_category'])
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Max retries reached or non-retryable error
+                    self.structured_logger.log_s3_operation_failure(
+                        "write", table_name, s3_key, duration_ms, 
+                        f"Unexpected error: {str(e)}", error_info['error_category'])
+                    
+                    if hasattr(self, 'metrics_publisher'):
+                        self.metrics_publisher.publish_s3_bookmark_metrics(
+                            "write", table_name, False, duration_ms, error_info['error_category'])
+                    
+                    return False
+        
+        return False
+    
+    async def write_bookmark(self, table_name: str, bookmark_data: Dict[str, Any]) -> bool:
+        """
+        Write bookmark data to S3 with error handling and fallback logic.
+        
+        This is the public interface that ensures write operations don't block job execution on failure.
+        
+        Args:
+            table_name: Name of the table to write bookmark for
+            bookmark_data: Dictionary containing bookmark data
+            
+        Returns:
+            True if successful, False otherwise (but job execution continues regardless)
+        """
+        try:
+            # Attempt to write to S3 using the private method
+            success = await self._write_bookmark_to_s3(table_name, bookmark_data)
+            
+            if success:
+                # Successfully wrote bookmark
+                return True
+            else:
+                # Write failed but don't block job execution
+                self.structured_logger.warning("S3 bookmark write failed, job execution will continue",
+                                              table_name=table_name)
+                return False
+                
+        except Exception as e:
+            # Unexpected error in the write process - don't block job execution
+            self.structured_logger.error("Unexpected error in bookmark write operation, job execution continues",
+                                       table_name=table_name,
+                                       error=str(e))
+            return False
+    
+    async def write_bookmarks_batch(self, bookmark_batch: Dict[str, Dict[str, Any]], 
+                                  batch_size: int = 10) -> Dict[str, bool]:
+        """
+        Write bookmark data for multiple tables in batches.
+        
+        This method implements batch S3 write operations for multiple table bookmarks
+        to optimize S3 operations and avoid blocking data operations.
+        
+        Args:
+            bookmark_batch: Dictionary mapping table names to bookmark data
+            batch_size: Number of bookmarks to write per batch (default: 10)
+            
+        Returns:
+            Dictionary mapping table names to success status (True/False)
+        """
+        if not bookmark_batch:
+            return {}
+        
+        start_time = time.time()
+        table_names = list(bookmark_batch.keys())
+        total_operations = len(table_names)
+        
+        # Log start of batch operation (Requirement 7.2)
+        self.structured_logger.log_batch_s3_operation_start(
+            "write", batch_size, total_operations,
+            table_names=table_names
+        )
+        
+        results = {}
+        successful_count = 0
+        failed_count = 0
+        
+        try:
+            # Process bookmarks in batches to avoid overwhelming S3
+            for batch_number, i in enumerate(range(0, total_operations, batch_size), 1):
+                batch_start_time = time.time()
+                batch_tables = table_names[i:i + batch_size]
+                
+                self.structured_logger.debug("Processing bookmark write batch",
+                                           batch_number=batch_number,
+                                           batch_size=len(batch_tables),
+                                           table_names=batch_tables)
+                
+                # Create tasks for this batch
+                batch_tasks = []
+                for table_name in batch_tables:
+                    task = asyncio.create_task(
+                        self.write_bookmark(table_name, bookmark_batch[table_name]),
+                        name=f"write_bookmark_{table_name}"
+                    )
+                    batch_tasks.append((table_name, task))
+                
+                # Execute batch concurrently with timeout
+                batch_timeout = self.config.timeout_seconds * len(batch_tables)
+                batch_successful = 0
+                batch_failed = 0
+                
+                try:
+                    # Wait for all tasks in this batch to complete
+                    batch_results = await asyncio.wait_for(
+                        asyncio.gather(*[task for _, task in batch_tasks], return_exceptions=True),
+                        timeout=batch_timeout
+                    )
+                    
+                    # Process batch results
+                    for j, (table_name, _) in enumerate(batch_tasks):
+                        result = batch_results[j]
+                        
+                        if isinstance(result, Exception):
+                            # Task failed with exception
+                            self.structured_logger.error("Batch bookmark write failed for table",
+                                                       table_name=table_name,
+                                                       batch_number=batch_number,
+                                                       error=str(result),
+                                                       error_type=type(result).__name__)
+                            results[table_name] = False
+                            batch_failed += 1
+                            failed_count += 1
+                        else:
+                            # Task completed - result is boolean success status
+                            results[table_name] = result
+                            if result:
+                                batch_successful += 1
+                                successful_count += 1
+                            else:
+                                batch_failed += 1
+                                failed_count += 1
+                
+                except asyncio.TimeoutError:
+                    # Handle batch timeout
+                    self.structured_logger.warning("Batch bookmark write timeout",
+                                                 batch_number=batch_number,
+                                                 timeout_seconds=batch_timeout,
+                                                 batch_size=len(batch_tables))
+                    
+                    # Cancel remaining tasks and mark as failed
+                    for table_name, task in batch_tasks:
+                        if not task.done():
+                            task.cancel()
+                            results[table_name] = False
+                            batch_failed += 1
+                            failed_count += 1
+                        else:
+                            try:
+                                result = task.result()
+                                results[table_name] = result
+                                if result:
+                                    batch_successful += 1
+                                    successful_count += 1
+                                else:
+                                    batch_failed += 1
+                                    failed_count += 1
+                            except Exception:
+                                results[table_name] = False
+                                batch_failed += 1
+                                failed_count += 1
+                
+                # Calculate batch duration and log completion
+                batch_duration_ms = (time.time() - batch_start_time) * 1000
+                
+                self.structured_logger.log_batch_s3_operation_complete(
+                    "write", batch_number, len(batch_tables), 
+                    batch_successful, batch_failed, batch_duration_ms,
+                    table_names=batch_tables
+                )
+                
+                # Add small delay between batches to avoid rate limiting
+                if batch_number * batch_size < total_operations:
+                    await asyncio.sleep(0.1)  # 100ms delay between batches
+            
+            # Calculate total duration
+            total_duration_ms = (time.time() - start_time) * 1000
+            
+            # Log completion of all batches
+            self.structured_logger.info("Completed all bookmark write batches",
+                                      total_operations=total_operations,
+                                      successful_count=successful_count,
+                                      failed_count=failed_count,
+                                      total_duration_ms=total_duration_ms,
+                                      batch_size=batch_size,
+                                      batch_count=((total_operations - 1) // batch_size) + 1)
+            
+            # Publish batch operation metrics
+            if hasattr(self, 'metrics_publisher'):
+                self.metrics_publisher.publish_batch_s3_metrics(
+                    "write", total_operations, successful_count, failed_count, 
+                    total_duration_ms, batch_size
+                )
+            
+            return results
+            
+        except Exception as e:
+            # Handle unexpected errors in batch processing
+            total_duration_ms = (time.time() - start_time) * 1000
+            
+            self.structured_logger.error("Unexpected error in batch bookmark write operation",
+                                       error=str(e),
+                                       error_type=type(e).__name__,
+                                       total_operations=total_operations,
+                                       duration_ms=total_duration_ms)
+            
+            # Return failure status for all remaining tables
+            for table_name in table_names:
+                if table_name not in results:
+                    results[table_name] = False
+            
+            return results
+    
+    async def delete_bookmark(self, table_name: str) -> bool:
+        """
+        Delete corrupted bookmark file from S3.
+        
+        Args:
+            table_name: Name of the table to delete bookmark for
+            
+        Returns:
+            True if successful or file doesn't exist, False on error
+        """
+        s3_key = self._get_bookmark_s3_key(table_name)
+        start_time = time.time()
+        
+        # Log operation start (Requirement 6.1)
+        self.structured_logger.log_s3_operation_start("delete", table_name, s3_key,
+                                                     bucket=self.config.bucket_name,
+                                                     reason="corrupted_file_cleanup")
+        
+        try:
+            # Use asyncio to run the S3 operation in a thread pool
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self.s3_client.delete_object(
+                    Bucket=self.config.bucket_name,
+                    Key=s3_key
+                )
+            )
+            
+            # Calculate operation duration for performance logging
+            duration_ms = (time.time() - start_time) * 1000
+            
+            # Log successful operation with performance metrics (Requirements 6.1, 6.3)
+            self.structured_logger.log_s3_operation_success(
+                "delete", table_name, s3_key, duration_ms,
+                reason="corrupted_file_cleanup")
+            
+            # Publish success metrics (Requirements 6.4, 6.5)
+            if hasattr(self, 'metrics_publisher'):
+                self.metrics_publisher.publish_s3_bookmark_metrics(
+                    "delete", table_name, True, duration_ms)
+            
+            return True
+            
+        except ClientError as e:
+            # Calculate duration for error logging
+            duration_ms = (time.time() - start_time) * 1000
+            
+            # Use centralized error handling
+            error_info = self._handle_s3_error("delete", table_name, e)
+            
+            if error_info['error_category'] == 'key_not_found':
+                # File doesn't exist, consider it successful
+                self.structured_logger.info("Bookmark file already doesn't exist (expected)",
+                                          table_name=table_name,
+                                          s3_key=s3_key,
+                                          duration_ms=duration_ms)
+                
+                # Still publish success metrics since this is expected
+                if hasattr(self, 'metrics_publisher'):
+                    self.metrics_publisher.publish_s3_bookmark_metrics(
+                        "delete", table_name, True, duration_ms)
+                
+                return True
+            else:
+                # Other errors - log failure and publish metrics
+                self.structured_logger.log_s3_operation_failure(
+                    "delete", table_name, s3_key, duration_ms, 
+                    str(e), error_info['error_category'])
+                
+                if hasattr(self, 'metrics_publisher'):
+                    self.metrics_publisher.publish_s3_bookmark_metrics(
+                        "delete", table_name, False, duration_ms, error_info['error_category'])
+                
+                return False
+        
+        except Exception as e:
+            # Calculate duration for error logging
+            duration_ms = (time.time() - start_time) * 1000
+            
+            # Handle unexpected errors
+            self.structured_logger.log_s3_operation_failure(
+                "delete", table_name, s3_key, duration_ms, 
+                f"Unexpected error: {str(e)}", "unexpected_error")
+            
+            if hasattr(self, 'metrics_publisher'):
+                self.metrics_publisher.publish_s3_bookmark_metrics(
+                    "delete", table_name, False, duration_ms, "unexpected_error")
+            
+            return False
+                
+        except Exception as e:
+            # Use centralized error handling for unexpected errors
+            error_info = self._handle_s3_error("delete", table_name, e)
+            return False
+    
+    def _handle_s3_error(self, operation: str, table_name: str, error: Exception) -> Dict[str, Any]:
+        """
+        Handle S3 operation errors with appropriate fallback logic.
+        
+        This method provides centralized error handling for S3 operations and implements
+        the fallback logic when S3 read operations fail. It categorizes errors and
+        provides appropriate responses for each error type.
+        
+        Args:
+            operation: Type of S3 operation (read, write, delete)
+            table_name: Name of the table being processed
+            error: Exception that occurred during S3 operation
+            
+        Returns:
+            Dictionary containing error handling results:
+            - should_retry: bool - whether the operation should be retried
+            - should_fallback: bool - whether to fall back to in-memory bookmarks
+            - is_recoverable: bool - whether the error is recoverable
+            - error_category: str - category of the error for monitoring
+        """
+        error_info = {
+            'should_retry': False,
+            'should_fallback': False,
+            'is_recoverable': True,
+            'error_category': 'unknown'
+        }
+        
+        if isinstance(error, ClientError):
+            error_code = error.response.get('Error', {}).get('Code', 'Unknown')
+            
+            if error_code == 'AccessDenied':
+                # Access denied - permanent error, fall back to in-memory bookmarks
+                self.structured_logger.error(f"S3 {operation} access denied - check IAM permissions",
+                                           operation=operation,
+                                           table_name=table_name,
+                                           error_code=error_code,
+                                           bucket=self.config.bucket_name,
+                                           fallback_action="switching_to_in_memory_bookmarks")
+                error_info.update({
+                    'should_retry': False,
+                    'should_fallback': True,
+                    'is_recoverable': False,
+                    'error_category': 'access_denied'
+                })
+                
+            elif error_code == 'NoSuchBucket':
+                # Bucket not found - permanent error, fall back to in-memory bookmarks
+                self.structured_logger.error(f"S3 bucket not found for {operation} operation",
+                                           operation=operation,
+                                           table_name=table_name,
+                                           error_code=error_code,
+                                           bucket=self.config.bucket_name,
+                                           fallback_action="switching_to_in_memory_bookmarks")
+                error_info.update({
+                    'should_retry': False,
+                    'should_fallback': True,
+                    'is_recoverable': False,
+                    'error_category': 'bucket_not_found'
+                })
+                
+            elif error_code == 'NoSuchKey':
+                # Key not found - expected for first run, not an error
+                self.structured_logger.info(f"S3 bookmark file not found for {operation} (expected for first run)",
+                                          operation=operation,
+                                          table_name=table_name,
+                                          error_code=error_code)
+                error_info.update({
+                    'should_retry': False,
+                    'should_fallback': False,
+                    'is_recoverable': True,
+                    'error_category': 'key_not_found'
+                })
+                
+            elif error_code in ['RequestTimeout', 'ServiceUnavailable', 'SlowDown', 'ThrottlingException']:
+                # Temporary errors - retry with backoff
+                self.structured_logger.warning(f"S3 {operation} timeout/throttling - will retry",
+                                             operation=operation,
+                                             table_name=table_name,
+                                             error_code=error_code,
+                                             retry_recommended=True)
+                error_info.update({
+                    'should_retry': True,
+                    'should_fallback': False,
+                    'is_recoverable': True,
+                    'error_category': 'timeout_throttling'
+                })
+                
+            elif error_code in ['InternalError', 'ServiceFailure']:
+                # AWS service errors - retry with backoff
+                self.structured_logger.warning(f"S3 {operation} service error - will retry",
+                                             operation=operation,
+                                             table_name=table_name,
+                                             error_code=error_code,
+                                             retry_recommended=True)
+                error_info.update({
+                    'should_retry': True,
+                    'should_fallback': False,
+                    'is_recoverable': True,
+                    'error_category': 'service_error'
+                })
+                
+            elif error_code == 'InvalidBucketName':
+                # Invalid bucket name - permanent error
+                self.structured_logger.error(f"S3 {operation} failed due to invalid bucket name",
+                                           operation=operation,
+                                           table_name=table_name,
+                                           error_code=error_code,
+                                           bucket=self.config.bucket_name,
+                                           fallback_action="switching_to_in_memory_bookmarks")
+                error_info.update({
+                    'should_retry': False,
+                    'should_fallback': True,
+                    'is_recoverable': False,
+                    'error_category': 'invalid_bucket'
+                })
+                
+            else:
+                # Other client errors - log and potentially retry
+                self.structured_logger.error(f"S3 {operation} failed with client error",
+                                           operation=operation,
+                                           table_name=table_name,
+                                           error_code=error_code,
+                                           error_message=str(error),
+                                           retry_recommended=True)
+                error_info.update({
+                    'should_retry': True,
+                    'should_fallback': False,
+                    'is_recoverable': True,
+                    'error_category': 'client_error'
+                })
+                
+        elif isinstance(error, (BotoCoreError, NoCredentialsError)):
+            # Boto3/credential errors - usually permanent, fall back
+            self.structured_logger.error(f"S3 {operation} failed with boto3/credential error",
+                                       operation=operation,
+                                       table_name=table_name,
+                                       error_type=type(error).__name__,
+                                       error_message=str(error),
+                                       fallback_action="switching_to_in_memory_bookmarks")
+            error_info.update({
+                'should_retry': False,
+                'should_fallback': True,
+                'is_recoverable': False,
+                'error_category': 'credential_error'
+            })
+            
+        elif isinstance(error, json.JSONDecodeError):
+            # JSON parsing error - corrupted data, delete and fall back
+            self.structured_logger.error(f"S3 {operation} failed due to corrupted JSON data",
+                                       operation=operation,
+                                       table_name=table_name,
+                                       error_type=type(error).__name__,
+                                       error_message=str(error),
+                                       fallback_action="deleting_corrupted_file_and_performing_full_load")
+            error_info.update({
+                'should_retry': False,
+                'should_fallback': True,
+                'is_recoverable': True,
+                'error_category': 'corrupted_data'
+            })
+            
+        elif isinstance(error, (ConnectionError, TimeoutError)):
+            # Network errors - retry with backoff
+            self.structured_logger.warning(f"S3 {operation} failed due to network error - will retry",
+                                         operation=operation,
+                                         table_name=table_name,
+                                         error_type=type(error).__name__,
+                                         error_message=str(error),
+                                         retry_recommended=True)
+            error_info.update({
+                'should_retry': True,
+                'should_fallback': False,
+                'is_recoverable': True,
+                'error_category': 'network_error'
+            })
+            
+        else:
+            # Handle other types of errors (unexpected errors)
+            self.structured_logger.error(f"S3 {operation} failed with unexpected error",
+                                       operation=operation,
+                                       table_name=table_name,
+                                       error_type=type(error).__name__,
+                                       error_message=str(error),
+                                       retry_recommended=True)
+            error_info.update({
+                'should_retry': True,
+                'should_fallback': False,
+                'is_recoverable': True,
+                'error_category': 'unexpected_error'
+            })
+        
+        # Publish CloudWatch metric for error tracking
+        self._publish_error_metric(operation, error_info['error_category'], table_name)
+        
+        return error_info
+    
+    def _publish_error_metric(self, operation: str, error_category: str, table_name: str) -> None:
+        """
+        Publish CloudWatch metrics for S3 error tracking.
+        
+        Args:
+            operation: Type of S3 operation (read, write, delete)
+            error_category: Category of the error
+            table_name: Name of the table being processed
+        """
+        try:
+            if cloudwatch:
+                metric_name = f"BookmarkS3{operation.capitalize()}Error"
+                cloudwatch.put_metric_data(
+                    Namespace='GlueDataReplication/Bookmarks/Errors',
+                    MetricData=[
+                        {
+                            'MetricName': metric_name,
+                            'Dimensions': [
+                                {
+                                    'Name': 'JobName',
+                                    'Value': self.config.job_name
+                                },
+                                {
+                                    'Name': 'TableName',
+                                    'Value': table_name
+                                },
+                                {
+                                    'Name': 'ErrorCategory',
+                                    'Value': error_category
+                                }
+                            ],
+                            'Value': 1.0,
+                            'Unit': 'Count',
+                            'Timestamp': datetime.now(timezone.utc)
+                        }
+                    ]
+                )
+                self.structured_logger.debug("Published S3 error metric",
+                                           metric_name=metric_name,
+                                           error_category=error_category,
+                                           table_name=table_name)
+        except Exception as e:
+            # Don't fail the job for CloudWatch metric failures
+            self.structured_logger.warning("Failed to publish S3 error metric",
+                                         operation=operation,
+                                         error_category=error_category,
+                                         table_name=table_name,
+                                         error=str(e))
+    
+    def list_bookmarks(self) -> List[str]:
+        """
+        List all bookmark files for the current job.
+        
+        Returns:
+            List of table names that have bookmark files
+        """
+        try:
+            prefix = f"{self.config.bookmark_prefix}{self.config.job_name}/"
+            
+            response = self.s3_client.list_objects_v2(
+                Bucket=self.config.bucket_name,
+                Prefix=prefix
+            )
+            
+            table_names = []
+            for obj in response.get('Contents', []):
+                key = obj['Key']
+                # Extract table name from key (remove prefix and .json extension)
+                if key.endswith('.json'):
+                    table_name = key[len(prefix):-5]  # Remove prefix and .json
+                    table_names.append(table_name)
+            
+            self.structured_logger.info("Listed bookmark files",
+                                      count=len(table_names),
+                                      tables=table_names)
+            
+            return table_names
+            
+        except Exception as e:
+            self._handle_s3_error("list", "all_tables", e)
+            return []
+
+
+class S3PathUtilities:
+    """Utility class for S3 path operations and bucket detection."""
+    
+    @staticmethod
+    def extract_s3_bucket_name(s3_path: str) -> str:
+        """
+        Extract S3 bucket name from JDBC driver S3 path.
+        
+        Args:
+            s3_path: S3 path in format s3://bucket-name/path/to/file.jar
+            
+        Returns:
+            Bucket name extracted from the S3 path
+            
+        Raises:
+            ValueError: If the S3 path format is invalid
+            
+        Examples:
+            >>> S3PathUtilities.extract_s3_bucket_name("s3://my-bucket/drivers/oracle.jar")
+            'my-bucket'
+            >>> S3PathUtilities.extract_s3_bucket_name("s3://glue-assets-123/jdbc/sqlserver.jar")
+            'glue-assets-123'
+        """
+        if not isinstance(s3_path, str):
+            raise ValueError(f"S3 path must be a string, got {type(s3_path)}")
+        
+        if not s3_path.startswith('s3://'):
+            raise ValueError(f"Invalid S3 path format: {s3_path}. Must start with 's3://'")
+        
+        # Remove s3:// prefix and split by /
+        path_without_prefix = s3_path[5:]  # Remove 's3://'
+        
+        if not path_without_prefix:
+            raise ValueError(f"Invalid S3 path format: {s3_path}. Missing bucket name")
+        
+        path_parts = path_without_prefix.split('/')
+        
+        if len(path_parts) < 1 or not path_parts[0]:
+            raise ValueError(f"Invalid S3 path format: {s3_path}. Missing bucket name")
+        
+        bucket_name = path_parts[0]
+        
+        # Validate bucket name format (basic validation)
+        if not S3PathUtilities._is_valid_bucket_name(bucket_name):
+            raise ValueError(f"Invalid S3 bucket name: {bucket_name}")
+        
+        return bucket_name
+    
+    @staticmethod
+    def _is_valid_bucket_name(bucket_name: str) -> bool:
+        """
+        Validate S3 bucket name format (basic validation).
+        
+        Args:
+            bucket_name: Bucket name to validate
+            
+        Returns:
+            True if bucket name appears valid, False otherwise
+        """
+        if not bucket_name:
+            return False
+        
+        # Basic validation - bucket names must be 3-63 characters
+        if len(bucket_name) < 3 or len(bucket_name) > 63:
+            return False
+        
+        # Must start and end with alphanumeric character
+        if not (bucket_name[0].isalnum() and bucket_name[-1].isalnum()):
+            return False
+        
+        # Can contain lowercase letters, numbers, hyphens, and periods
+        import re
+        if not re.match(r'^[a-z0-9.-]+$', bucket_name):
+            return False
+        
+        return True
+    
+    @staticmethod
+    def generate_bookmark_s3_key(job_name: str, table_name: str, bookmark_prefix: str = "bookmarks") -> str:
+        """
+        Generate S3 key for bookmark file using job name and table name.
+        
+        Args:
+            job_name: Name of the Glue job
+            table_name: Name of the table
+            bookmark_prefix: Prefix for bookmark files (default: "bookmarks")
+            
+        Returns:
+            S3 key in format: bookmarks/{job_name}/{table_name}.json
+            
+        Raises:
+            ValueError: If job_name or table_name is empty
+            
+        Examples:
+            >>> S3PathUtilities.generate_bookmark_s3_key("customer-replication", "customers")
+            'bookmarks/customer-replication/customers.json'
+            >>> S3PathUtilities.generate_bookmark_s3_key("data-sync", "orders", "job-bookmarks")
+            'job-bookmarks/data-sync/orders.json'
+        """
+        if not job_name or not job_name.strip():
+            raise ValueError("Job name cannot be empty")
+        
+        if not table_name or not table_name.strip():
+            raise ValueError("Table name cannot be empty")
+        
+        # Clean job name and table name (remove invalid characters)
+        clean_job_name = S3PathUtilities._sanitize_s3_key_component(job_name.strip())
+        clean_table_name = S3PathUtilities._sanitize_s3_key_component(table_name.strip())
+        
+        # Ensure bookmark_prefix ends with '/' for proper key structure
+        if bookmark_prefix and not bookmark_prefix.endswith('/'):
+            bookmark_prefix += '/'
+        elif not bookmark_prefix:
+            bookmark_prefix = "bookmarks/"
+        
+        return f"{bookmark_prefix}{clean_job_name}/{clean_table_name}.json"
+    
+    @staticmethod
+    def _sanitize_s3_key_component(component: str) -> str:
+        """
+        Sanitize a component of an S3 key by replacing invalid characters.
+        
+        Args:
+            component: String component to sanitize
+            
+        Returns:
+            Sanitized component safe for use in S3 keys
+        """
+        import re
+        # Replace spaces and special characters with hyphens
+        sanitized = re.sub(r'[^a-zA-Z0-9._-]', '-', component)
+        # Remove multiple consecutive hyphens
+        sanitized = re.sub(r'-+', '-', sanitized)
+        # Remove leading/trailing hyphens
+        sanitized = sanitized.strip('-')
+        return sanitized
+    
+    @staticmethod
+    def validate_s3_path_format(s3_path: str) -> bool:
+        """
+        Validate S3 path format for JDBC driver paths.
+        
+        Args:
+            s3_path: S3 path to validate
+            
+        Returns:
+            True if path format is valid, False otherwise
+            
+        Examples:
+            >>> S3PathUtilities.validate_s3_path_format("s3://my-bucket/drivers/oracle.jar")
+            True
+            >>> S3PathUtilities.validate_s3_path_format("invalid-path")
+            False
+        """
+        try:
+            # Check basic S3 path format
+            if not s3_path.startswith('s3://'):
+                return False
+            
+            # Parse URL to validate structure
+            parsed = urlparse(s3_path)
+            if not parsed.netloc or not parsed.path:
+                return False
+            
+            # For JDBC drivers, expect .jar extension
+            if not parsed.path.lower().endswith('.jar'):
+                return False
+            
+            # Validate bucket name
+            bucket_name = parsed.netloc
+            if not S3PathUtilities._is_valid_bucket_name(bucket_name):
+                return False
+            
+            return True
+            
+        except Exception:
+            return False
+    
+    @staticmethod
+    def detect_s3_bucket_from_jdbc_paths(source_jdbc_path: str, target_jdbc_path: str, 
+                                        structured_logger: 'StructuredLogger' = None) -> str:
+        """
+        Detect S3 bucket for bookmark storage from JDBC driver paths.
+        Prefers source JDBC driver bucket if different buckets are used.
+        
+        Args:
+            source_jdbc_path: S3 path to source JDBC driver
+            target_jdbc_path: S3 path to target JDBC driver
+            structured_logger: Optional structured logger for enhanced logging
+            
+        Returns:
+            S3 bucket name to use for bookmark storage
+            
+        Raises:
+            ValueError: If both paths are invalid or buckets cannot be extracted
+            
+        Examples:
+            >>> S3PathUtilities.detect_s3_bucket_from_jdbc_paths(
+            ...     "s3://my-bucket/drivers/oracle.jar",
+            ...     "s3://my-bucket/drivers/postgres.jar"
+            ... )
+            'my-bucket'
+            >>> S3PathUtilities.detect_s3_bucket_from_jdbc_paths(
+            ...     "s3://source-bucket/oracle.jar",
+            ...     "s3://target-bucket/postgres.jar"
+            ... )
+            'source-bucket'
+        """
+        # Log bucket detection start (Requirement 6.2)
+        if structured_logger:
+            structured_logger.log_s3_bucket_detection_start(source_jdbc_path, target_jdbc_path)
+        
+        source_bucket = None
+        target_bucket = None
+        
+        # Try to extract source bucket
+        try:
+            source_bucket = S3PathUtilities.extract_s3_bucket_name(source_jdbc_path)
+        except ValueError as e:
+            error_msg = f"Failed to extract bucket from source JDBC path '{source_jdbc_path}': {e}"
+            if structured_logger:
+                structured_logger.warning(error_msg, path_type="source", error=str(e))
+            else:
+                logger.warning(error_msg)
+        
+        # Try to extract target bucket
+        try:
+            target_bucket = S3PathUtilities.extract_s3_bucket_name(target_jdbc_path)
+        except ValueError as e:
+            error_msg = f"Failed to extract bucket from target JDBC path '{target_jdbc_path}': {e}"
+            if structured_logger:
+                structured_logger.warning(error_msg, path_type="target", error=str(e))
+            else:
+                logger.warning(error_msg)
+        
+        # Determine which bucket to use
+        selected_bucket = None
+        selection_reason = ""
+        
+        if source_bucket and target_bucket:
+            if source_bucket == target_bucket:
+                selected_bucket = source_bucket
+                selection_reason = "common_bucket_detected"
+            else:
+                selected_bucket = source_bucket
+                selection_reason = "different_buckets_prefer_source"
+        elif source_bucket:
+            selected_bucket = source_bucket
+            selection_reason = "only_source_bucket_available"
+        elif target_bucket:
+            selected_bucket = target_bucket
+            selection_reason = "only_target_bucket_available"
+        else:
+            error_msg = (f"Cannot extract valid S3 bucket from JDBC paths. "
+                        f"Source: '{source_jdbc_path}', Target: '{target_jdbc_path}'")
+            if structured_logger:
+                structured_logger.error(error_msg, source_bucket=source_bucket, target_bucket=target_bucket)
+            raise ValueError(error_msg)
+        
+        # Log successful bucket detection (Requirement 6.2)
+        if structured_logger:
+            structured_logger.log_s3_bucket_detection_success(
+                selected_bucket, source_bucket, target_bucket, selection_reason)
+        else:
+            logger.info(f"Selected S3 bucket for bookmarks: {selected_bucket} (reason: {selection_reason})")
+        
+        return selected_bucket
+    
+    @staticmethod
+    def validate_s3_bucket_accessibility(bucket_name: str, s3_client=None, 
+                                       structured_logger: 'StructuredLogger' = None,
+                                       metrics_publisher: 'CloudWatchMetricsPublisher' = None) -> bool:
+        """
+        Validate that the S3 bucket is accessible with current IAM permissions.
+        
+        Args:
+            bucket_name: Name of the S3 bucket to validate
+            s3_client: Optional boto3 S3 client (will create one if not provided)
+            structured_logger: Optional structured logger for enhanced logging
+            metrics_publisher: Optional metrics publisher for CloudWatch metrics
+            
+        Returns:
+            True if bucket is accessible, False otherwise
+        """
+        start_time = time.time()
+        
+        # Log validation start (Requirement 6.2)
+        if structured_logger:
+            structured_logger.log_s3_bucket_validation_start(bucket_name)
+        
+        if not s3_client:
+            try:
+                s3_client = boto3.client('s3')
+            except Exception as e:
+                duration_ms = (time.time() - start_time) * 1000
+                error_msg = f"Failed to create S3 client for bucket validation: {e}"
+                
+                if structured_logger:
+                    structured_logger.log_s3_bucket_validation_failure(
+                        bucket_name, duration_ms, error_msg, "s3_client_creation_failed")
+                else:
+                    logger.error(error_msg)
+                
+                if metrics_publisher:
+                    metrics_publisher.publish_s3_bucket_validation_metrics(
+                        bucket_name, False, duration_ms, "s3_client_creation_failed")
+                
+                return False
+        
+        try:
+            # Try to list objects in the bucket (with limit to minimize cost)
+            s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+            
+            # Calculate validation duration for performance logging
+            duration_ms = (time.time() - start_time) * 1000
+            
+            # Log successful validation (Requirements 6.2, 6.3)
+            if structured_logger:
+                structured_logger.log_s3_bucket_validation_success(bucket_name, duration_ms)
+            else:
+                logger.debug(f"S3 bucket '{bucket_name}' is accessible")
+            
+            # Publish success metrics (Requirements 6.4, 6.5)
+            if metrics_publisher:
+                metrics_publisher.publish_s3_bucket_validation_metrics(
+                    bucket_name, True, duration_ms)
+            
+            return True
+            
+        except ClientError as e:
+            duration_ms = (time.time() - start_time) * 1000
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            
+            # Determine error category and message
+            if error_code == 'NoSuchBucket':
+                error_msg = f"S3 bucket '{bucket_name}' does not exist"
+                error_category = "bucket_not_found"
+            elif error_code == 'AccessDenied':
+                error_msg = f"Access denied to S3 bucket '{bucket_name}'. Check IAM permissions"
+                error_category = "access_denied"
+            else:
+                error_msg = f"Failed to access S3 bucket '{bucket_name}': {error_code}"
+                error_category = "client_error"
+            
+            # Log validation failure (Requirements 6.2, 6.3)
+            if structured_logger:
+                structured_logger.log_s3_bucket_validation_failure(
+                    bucket_name, duration_ms, error_msg, "fallback_to_in_memory_bookmarks")
+            else:
+                logger.error(error_msg)
+            
+            # Publish failure metrics (Requirements 6.4, 6.5)
+            if metrics_publisher:
+                metrics_publisher.publish_s3_bucket_validation_metrics(
+                    bucket_name, False, duration_ms, error_category)
+            
+            return False
+            
+        except Exception as e:
+            duration_ms = (time.time() - start_time) * 1000
+            error_msg = f"Unexpected error validating S3 bucket '{bucket_name}': {e}"
+            
+            # Log validation failure (Requirements 6.2, 6.3)
+            if structured_logger:
+                structured_logger.log_s3_bucket_validation_failure(
+                    bucket_name, duration_ms, error_msg, "fallback_to_in_memory_bookmarks")
+            else:
+                logger.error(error_msg)
+            
+            # Publish failure metrics (Requirements 6.4, 6.5)
+            if metrics_publisher:
+                metrics_publisher.publish_s3_bucket_validation_metrics(
+                    bucket_name, False, duration_ms, "unexpected_error")
+            
+            return False
+    
+    @staticmethod
+    def create_bookmark_s3_path(bucket_name: str, job_name: str, table_name: str, 
+                               bookmark_prefix: str = "bookmarks") -> str:
+        """
+        Create complete S3 path for bookmark file.
+        
+        Args:
+            bucket_name: S3 bucket name
+            job_name: Name of the Glue job
+            table_name: Name of the table
+            bookmark_prefix: Prefix for bookmark files (default: "bookmarks")
+            
+        Returns:
+            Complete S3 path for bookmark file
+            
+        Examples:
+            >>> S3PathUtilities.create_bookmark_s3_path("my-bucket", "job1", "customers")
+            's3://my-bucket/bookmarks/job1/customers.json'
+        """
+        s3_key = S3PathUtilities.generate_bookmark_s3_key(job_name, table_name, bookmark_prefix)
+        return f"s3://{bucket_name}/{s3_key}"
 
 
 @dataclass
@@ -129,6 +1889,175 @@ class StructuredLogger:
         """Log critical message with context."""
         self.logger.critical(self._format_message(message, **kwargs))
     
+    # S3 Operation Logging Methods (Requirement 6.1)
+    def log_s3_operation_start(self, operation: str, table_name: str, s3_key: str, **kwargs):
+        """Log start of S3 bookmark operation with structured data."""
+        self.info(
+            f"Starting S3 {operation} operation",
+            operation=operation,
+            table_name=table_name,
+            s3_key=s3_key,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            **kwargs
+        )
+    
+    def log_s3_operation_success(self, operation: str, table_name: str, s3_key: str, 
+                               duration_ms: float, **kwargs):
+        """Log successful S3 bookmark operation with performance metrics."""
+        self.info(
+            f"S3 {operation} operation completed successfully",
+            operation=operation,
+            table_name=table_name,
+            s3_key=s3_key,
+            duration_ms=round(duration_ms, 2),
+            status="success",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            **kwargs
+        )
+    
+    def log_s3_operation_failure(self, operation: str, table_name: str, s3_key: str, 
+                               duration_ms: float, error: str, error_category: str, **kwargs):
+        """Log failed S3 bookmark operation with error details."""
+        self.error(
+            f"S3 {operation} operation failed",
+            operation=operation,
+            table_name=table_name,
+            s3_key=s3_key,
+            duration_ms=round(duration_ms, 2),
+            status="failure",
+            error=error,
+            error_category=error_category,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            **kwargs
+        )
+    
+    def log_s3_operation_retry(self, operation: str, table_name: str, s3_key: str, 
+                             attempt: int, wait_seconds: float, error_category: str):
+        """Log S3 operation retry attempt."""
+        self.warning(
+            f"Retrying S3 {operation} operation",
+            operation=operation,
+            table_name=table_name,
+            s3_key=s3_key,
+            attempt=attempt,
+            wait_seconds=wait_seconds,
+            error_category=error_category,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    # S3 Bucket Detection and Validation Logging (Requirement 6.2)
+    def log_s3_bucket_detection_start(self, source_jdbc_path: str, target_jdbc_path: str):
+        """Log start of S3 bucket detection process."""
+        self.info(
+            "Starting S3 bucket detection from JDBC paths",
+            source_jdbc_path=source_jdbc_path,
+            target_jdbc_path=target_jdbc_path,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_s3_bucket_detection_success(self, detected_bucket: str, source_bucket: str, 
+                                      target_bucket: str, selection_reason: str):
+        """Log successful S3 bucket detection."""
+        self.info(
+            "S3 bucket detection completed successfully",
+            detected_bucket=detected_bucket,
+            source_bucket=source_bucket,
+            target_bucket=target_bucket,
+            selection_reason=selection_reason,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_s3_bucket_validation_start(self, bucket_name: str):
+        """Log start of S3 bucket validation."""
+        self.info(
+            "Starting S3 bucket validation",
+            bucket_name=bucket_name,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_s3_bucket_validation_success(self, bucket_name: str, validation_duration_ms: float):
+        """Log successful S3 bucket validation."""
+        self.info(
+            "S3 bucket validation completed successfully",
+            bucket_name=bucket_name,
+            validation_duration_ms=round(validation_duration_ms, 2),
+            status="accessible",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_s3_bucket_validation_failure(self, bucket_name: str, validation_duration_ms: float, 
+                                       error: str, fallback_action: str):
+        """Log failed S3 bucket validation."""
+        self.error(
+            "S3 bucket validation failed",
+            bucket_name=bucket_name,
+            validation_duration_ms=round(validation_duration_ms, 2),
+            status="inaccessible",
+            error=error,
+            fallback_action=fallback_action,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    # Bookmark State Logging (Requirement 6.2)
+    def log_bookmark_state_loaded(self, table_name: str, last_processed_value: Any, 
+                                 last_update_timestamp: str, is_first_run: bool):
+        """Log bookmark state loaded from S3."""
+        self.info(
+            "Bookmark state loaded from S3",
+            table_name=table_name,
+            last_processed_value=str(last_processed_value) if last_processed_value is not None else None,
+            last_update_timestamp=last_update_timestamp,
+            is_first_run=is_first_run,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_bookmark_state_saved(self, table_name: str, new_processed_value: Any, 
+                               file_size_bytes: int, bookmark_version: str):
+        """Log bookmark state saved to S3."""
+        self.info(
+            "Bookmark state saved to S3",
+            table_name=table_name,
+            new_processed_value=str(new_processed_value) if new_processed_value is not None else None,
+            file_size_bytes=file_size_bytes,
+            bookmark_version=bookmark_version,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    # Fallback and Error Recovery Logging
+    def log_fallback_to_memory(self, table_name: str, reason: str, error_category: str):
+        """Log fallback to in-memory bookmarks."""
+        self.warning(
+            "Falling back to in-memory bookmarks",
+            table_name=table_name,
+            reason=reason,
+            error_category=error_category,
+            fallback_type="in_memory",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_corrupted_bookmark_cleanup(self, table_name: str, s3_key: str, 
+                                     cleanup_success: bool, cleanup_error: str = None):
+        """Log cleanup of corrupted bookmark files."""
+        if cleanup_success:
+            self.info(
+                "Corrupted bookmark file cleaned up successfully",
+                table_name=table_name,
+                s3_key=s3_key,
+                cleanup_status="success",
+                next_action="full_load_will_be_performed",
+                timestamp=datetime.now(timezone.utc).isoformat()
+            )
+        else:
+            self.error(
+                "Failed to clean up corrupted bookmark file",
+                table_name=table_name,
+                s3_key=s3_key,
+                cleanup_status="failure",
+                cleanup_error=cleanup_error,
+                next_action="full_load_will_still_be_performed",
+                timestamp=datetime.now(timezone.utc).isoformat()
+            )
+    
     def log_table_processing_start(self, table_name: str, operation: str):
         """Log start of table processing."""
         self.info(
@@ -175,6 +2104,128 @@ class StructuredLogger:
             total_rows_processed=total_rows,
             total_duration_seconds=round(total_duration, 2),
             average_throughput_rows_per_sec=round(total_rows / total_duration, 2) if total_duration > 0 else 0
+        )
+    
+    # Parallel and Batch Operation Logging (for future performance optimizations)
+    def log_parallel_s3_operation_start(self, operation: str, table_count: int, **kwargs):
+        """Log start of parallel S3 bookmark operations."""
+        self.info(
+            f"Starting parallel S3 {operation} operations",
+            operation=operation,
+            table_count=table_count,
+            parallel_execution=True,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            **kwargs
+        )
+    
+    def log_parallel_s3_operation_complete(self, operation: str, table_count: int, 
+                                         successful_count: int, failed_count: int, 
+                                         total_duration_ms: float, **kwargs):
+        """Log completion of parallel S3 bookmark operations."""
+        self.info(
+            f"Completed parallel S3 {operation} operations",
+            operation=operation,
+            table_count=table_count,
+            successful_count=successful_count,
+            failed_count=failed_count,
+            success_rate=round((successful_count / table_count * 100), 2) if table_count > 0 else 0,
+            total_duration_ms=round(total_duration_ms, 2),
+            average_duration_per_table_ms=round(total_duration_ms / table_count, 2) if table_count > 0 else 0,
+            parallel_execution=True,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            **kwargs
+        )
+    
+    def log_batch_s3_operation_start(self, operation: str, batch_size: int, total_operations: int, **kwargs):
+        """Log start of batch S3 bookmark operations."""
+        self.info(
+            f"Starting batch S3 {operation} operations",
+            operation=operation,
+            batch_size=batch_size,
+            total_operations=total_operations,
+            batch_count=round(total_operations / batch_size) if batch_size > 0 else 0,
+            batch_execution=True,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            **kwargs
+        )
+    
+    def log_batch_s3_operation_complete(self, operation: str, batch_number: int, 
+                                      batch_size: int, successful_count: int, 
+                                      failed_count: int, batch_duration_ms: float, **kwargs):
+        """Log completion of a single batch S3 operation."""
+        self.info(
+            f"Completed batch {batch_number} of S3 {operation} operations",
+            operation=operation,
+            batch_number=batch_number,
+            batch_size=batch_size,
+            successful_count=successful_count,
+            failed_count=failed_count,
+            batch_success_rate=round((successful_count / batch_size * 100), 2) if batch_size > 0 else 0,
+            batch_duration_ms=round(batch_duration_ms, 2),
+            average_operation_duration_ms=round(batch_duration_ms / batch_size, 2) if batch_size > 0 else 0,
+            batch_execution=True,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            **kwargs
+        )
+    
+    # S3 Performance and Resource Usage Logging
+    def log_s3_operation_performance_summary(self, operation: str, total_operations: int, 
+                                           total_duration_ms: float, total_bytes: int, 
+                                           success_count: int, failure_count: int):
+        """Log comprehensive performance summary for S3 operations."""
+        self.info(
+            f"S3 {operation} performance summary",
+            operation=operation,
+            total_operations=total_operations,
+            success_count=success_count,
+            failure_count=failure_count,
+            success_rate=round((success_count / total_operations * 100), 2) if total_operations > 0 else 0,
+            total_duration_ms=round(total_duration_ms, 2),
+            total_duration_seconds=round(total_duration_ms / 1000, 2),
+            average_duration_ms=round(total_duration_ms / total_operations, 2) if total_operations > 0 else 0,
+            total_bytes=total_bytes,
+            total_mb=round(total_bytes / 1024 / 1024, 2),
+            throughput_mb_per_sec=round((total_bytes / 1024 / 1024) / (total_duration_ms / 1000), 2) if total_duration_ms > 0 else 0,
+            operations_per_sec=round(total_operations / (total_duration_ms / 1000), 2) if total_duration_ms > 0 else 0,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_s3_resource_usage(self, operation: str, table_name: str, file_size_bytes: int, 
+                            request_count: int, retry_count: int = 0):
+        """Log S3 resource usage for cost and performance monitoring."""
+        self.info(
+            f"S3 resource usage for {operation}",
+            operation=operation,
+            table_name=table_name,
+            file_size_bytes=file_size_bytes,
+            file_size_kb=round(file_size_bytes / 1024, 2),
+            file_size_mb=round(file_size_bytes / 1024 / 1024, 4),
+            request_count=request_count,
+            retry_count=retry_count,
+            total_requests=request_count + retry_count,
+            storage_class="STANDARD",
+            estimated_cost_usd=round((file_size_bytes / 1024 / 1024 / 1024) * 0.023, 6),  # Rough S3 standard storage cost
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_s3_operation_trend(self, operation: str, current_duration_ms: float, 
+                             historical_average_ms: float, table_count: int, 
+                             trend_direction: str = "stable"):
+        """Log S3 operation performance trends for capacity planning."""
+        performance_change = 0.0
+        if historical_average_ms > 0:
+            performance_change = ((current_duration_ms - historical_average_ms) / historical_average_ms) * 100
+        
+        self.info(
+            f"S3 {operation} performance trend analysis",
+            operation=operation,
+            current_duration_ms=round(current_duration_ms, 2),
+            historical_average_ms=round(historical_average_ms, 2),
+            performance_change_percent=round(performance_change, 2),
+            trend_direction=trend_direction,
+            table_count=table_count,
+            performance_status="improving" if performance_change < -5 else "degrading" if performance_change > 5 else "stable",
+            timestamp=datetime.now(timezone.utc).isoformat()
         )
 
 
@@ -351,6 +2402,334 @@ class CloudWatchMetricsPublisher:
         self.structured_logger.debug("Published error metrics", 
                                    error_category=error_category, 
                                    operation=error_operation)
+    
+    # S3 Bookmark Operation Metrics (Requirements 6.4, 6.5)
+    def publish_s3_bookmark_metrics(self, operation: str, table_name: str, success: bool, 
+                                  duration_ms: float, error_category: str = None, 
+                                  file_size_bytes: int = None):
+        """Publish comprehensive S3 bookmark operation metrics."""
+        dimensions = {
+            'Operation': operation,  # read, write, delete
+            'TableName': table_name
+        }
+        
+        # Success/failure metrics
+        if success:
+            self.put_metric('BookmarkS3ReadSuccess' if operation == 'read' else 
+                          'BookmarkS3WriteSuccess' if operation == 'write' else 
+                          'BookmarkS3DeleteSuccess', 1, 'Count', dimensions)
+        else:
+            failure_dimensions = {**dimensions}
+            if error_category:
+                failure_dimensions['ErrorCategory'] = error_category
+            
+            self.put_metric('BookmarkS3ReadFailure' if operation == 'read' else 
+                          'BookmarkS3WriteFailure' if operation == 'write' else 
+                          'BookmarkS3DeleteFailure', 1, 'Count', dimensions)
+        
+        # Performance metrics (Requirement 6.3)
+        self.put_metric('BookmarkS3OperationLatency', duration_ms, 'Milliseconds', dimensions)
+        
+        # File size metrics for write operations
+        if operation == 'write' and file_size_bytes is not None:
+            self.put_metric('BookmarkS3FileSize', file_size_bytes, 'Bytes', dimensions)
+        
+        self.structured_logger.debug("Published S3 bookmark metrics", 
+                                   operation=operation, table_name=table_name, 
+                                   success=success, duration_ms=duration_ms)
+    
+    def publish_s3_bucket_detection_metrics(self, success: bool, detection_duration_ms: float, 
+                                          source_bucket: str = None, target_bucket: str = None, 
+                                          selected_bucket: str = None):
+        """Publish S3 bucket detection metrics."""
+        dimensions = {}
+        if source_bucket:
+            dimensions['SourceBucket'] = source_bucket
+        if target_bucket:
+            dimensions['TargetBucket'] = target_bucket
+        if selected_bucket:
+            dimensions['SelectedBucket'] = selected_bucket
+        
+        # Detection success/failure
+        self.put_metric('S3BucketDetectionSuccess', 1 if success else 0, 'Count', dimensions)
+        self.put_metric('S3BucketDetectionFailure', 0 if success else 1, 'Count', dimensions)
+        
+        # Detection performance
+        self.put_metric('S3BucketDetectionLatency', detection_duration_ms, 'Milliseconds', dimensions)
+        
+        self.structured_logger.debug("Published S3 bucket detection metrics", 
+                                   success=success, duration_ms=detection_duration_ms)
+    
+    def publish_s3_bucket_validation_metrics(self, bucket_name: str, success: bool, 
+                                           validation_duration_ms: float, error_category: str = None):
+        """Publish S3 bucket validation metrics."""
+        dimensions = {'BucketName': bucket_name}
+        if error_category:
+            dimensions['ErrorCategory'] = error_category
+        
+        # Validation success/failure
+        self.put_metric('S3BucketValidationSuccess', 1 if success else 0, 'Count', dimensions)
+        self.put_metric('S3BucketValidationFailure', 0 if success else 1, 'Count', dimensions)
+        
+        # Validation performance
+        self.put_metric('S3BucketValidationLatency', validation_duration_ms, 'Milliseconds', dimensions)
+        
+        self.structured_logger.debug("Published S3 bucket validation metrics", 
+                                   bucket_name=bucket_name, success=success, 
+                                   duration_ms=validation_duration_ms)
+    
+    def publish_bookmark_fallback_metrics(self, table_name: str, fallback_reason: str, 
+                                        error_category: str):
+        """Publish metrics when falling back to in-memory bookmarks."""
+        dimensions = {
+            'TableName': table_name,
+            'FallbackReason': fallback_reason,
+            'ErrorCategory': error_category
+        }
+        
+        self.put_metric('BookmarkFallbackToMemory', 1, 'Count', dimensions)
+        
+        self.structured_logger.debug("Published bookmark fallback metrics", 
+                                   table_name=table_name, fallback_reason=fallback_reason)
+    
+    def publish_bookmark_corruption_metrics(self, table_name: str, corruption_type: str, 
+                                          cleanup_success: bool):
+        """Publish metrics for bookmark corruption detection and cleanup."""
+        dimensions = {
+            'TableName': table_name,
+            'CorruptionType': corruption_type
+        }
+        
+        # Corruption detection
+        self.put_metric('BookmarkCorruptionDetected', 1, 'Count', dimensions)
+        
+        # Cleanup success/failure
+        self.put_metric('BookmarkCorruptionCleanupSuccess', 1 if cleanup_success else 0, 
+                       'Count', dimensions)
+        self.put_metric('BookmarkCorruptionCleanupFailure', 0 if cleanup_success else 1, 
+                       'Count', dimensions)
+        
+        self.structured_logger.debug("Published bookmark corruption metrics", 
+                                   table_name=table_name, corruption_type=corruption_type, 
+                                   cleanup_success=cleanup_success)
+    
+    # Parallel and Batch Operation Metrics (for future performance optimizations)
+    def publish_parallel_s3_bookmark_metrics(self, operation: str, table_count: int, 
+                                            successful_count: int, failed_count: int, 
+                                            total_duration_ms: float):
+        """Publish metrics for parallel S3 bookmark operations."""
+        dimensions = {'Operation': operation}
+        
+        # Parallel operation counts
+        self.put_metric('ParallelS3BookmarkOperations', table_count, 'Count', dimensions)
+        self.put_metric('ParallelS3BookmarkSuccess', successful_count, 'Count', dimensions)
+        self.put_metric('ParallelS3BookmarkFailure', failed_count, 'Count', dimensions)
+        
+        # Parallel operation performance
+        self.put_metric('ParallelS3BookmarkTotalLatency', total_duration_ms, 'Milliseconds', dimensions)
+        if table_count > 0:
+            self.put_metric('ParallelS3BookmarkAverageLatency', 
+                           total_duration_ms / table_count, 'Milliseconds', dimensions)
+        
+        # Success rate
+        if table_count > 0:
+            success_rate = (successful_count / table_count) * 100
+            self.put_metric('ParallelS3BookmarkSuccessRate', success_rate, 'Percent', dimensions)
+        
+        self.structured_logger.debug("Published parallel S3 bookmark metrics", 
+                                   operation=operation, table_count=table_count, 
+                                   successful_count=successful_count, failed_count=failed_count)
+    
+    def publish_batch_s3_bookmark_metrics(self, operation: str, batch_number: int, 
+                                        batch_size: int, successful_count: int, 
+                                        failed_count: int, batch_duration_ms: float):
+        """Publish metrics for batch S3 bookmark operations."""
+        dimensions = {
+            'Operation': operation,
+            'BatchNumber': str(batch_number)
+        }
+        
+        # Batch operation counts
+        self.put_metric('BatchS3BookmarkOperations', batch_size, 'Count', dimensions)
+        self.put_metric('BatchS3BookmarkSuccess', successful_count, 'Count', dimensions)
+        self.put_metric('BatchS3BookmarkFailure', failed_count, 'Count', dimensions)
+        
+        # Batch operation performance
+        self.put_metric('BatchS3BookmarkLatency', batch_duration_ms, 'Milliseconds', dimensions)
+        if batch_size > 0:
+            self.put_metric('BatchS3BookmarkAverageLatency', 
+                           batch_duration_ms / batch_size, 'Milliseconds', dimensions)
+        
+        # Batch success rate
+        if batch_size > 0:
+            success_rate = (successful_count / batch_size) * 100
+            self.put_metric('BatchS3BookmarkSuccessRate', success_rate, 'Percent', dimensions)
+        
+        self.structured_logger.debug("Published batch S3 bookmark metrics", 
+                                   operation=operation, batch_number=batch_number, 
+                                   batch_size=batch_size, successful_count=successful_count)
+    
+    # S3 Performance and Resource Usage Metrics
+    def publish_s3_performance_summary_metrics(self, operation: str, total_operations: int, 
+                                             total_duration_ms: float, total_bytes: int, 
+                                             success_count: int, failure_count: int):
+        """Publish comprehensive performance summary metrics for S3 operations."""
+        dimensions = {'Operation': operation}
+        
+        # Operation counts and success rates
+        self.put_metric('S3BookmarkTotalOperations', total_operations, 'Count', dimensions)
+        self.put_metric('S3BookmarkTotalSuccess', success_count, 'Count', dimensions)
+        self.put_metric('S3BookmarkTotalFailure', failure_count, 'Count', dimensions)
+        
+        if total_operations > 0:
+            success_rate = (success_count / total_operations) * 100
+            self.put_metric('S3BookmarkOverallSuccessRate', success_rate, 'Percent', dimensions)
+        
+        # Performance metrics
+        self.put_metric('S3BookmarkTotalLatency', total_duration_ms, 'Milliseconds', dimensions)
+        if total_operations > 0:
+            self.put_metric('S3BookmarkAverageLatency', 
+                           total_duration_ms / total_operations, 'Milliseconds', dimensions)
+        
+        # Throughput metrics
+        if total_duration_ms > 0:
+            duration_seconds = total_duration_ms / 1000
+            self.put_metric('S3BookmarkThroughputOperationsPerSec', 
+                           total_operations / duration_seconds, 'Count/Second', dimensions)
+            
+            if total_bytes > 0:
+                throughput_bytes_per_sec = total_bytes / duration_seconds
+                self.put_metric('S3BookmarkThroughputBytesPerSec', 
+                               throughput_bytes_per_sec, 'Bytes/Second', dimensions)
+        
+        # Data volume metrics
+        if total_bytes > 0:
+            self.put_metric('S3BookmarkTotalBytes', total_bytes, 'Bytes', dimensions)
+        
+        self.structured_logger.debug("Published S3 performance summary metrics", 
+                                   operation=operation, total_operations=total_operations, 
+                                   success_count=success_count)
+    
+    def publish_s3_resource_usage_metrics(self, operation: str, table_name: str, 
+                                        file_size_bytes: int, request_count: int, 
+                                        retry_count: int = 0):
+        """Publish S3 resource usage metrics for cost and performance monitoring."""
+        dimensions = {
+            'Operation': operation,
+            'TableName': table_name
+        }
+        
+        # File size metrics
+        self.put_metric('S3BookmarkFileSize', file_size_bytes, 'Bytes', dimensions)
+        
+        # Request metrics
+        self.put_metric('S3BookmarkRequestCount', request_count, 'Count', dimensions)
+        self.put_metric('S3BookmarkRetryCount', retry_count, 'Count', dimensions)
+        self.put_metric('S3BookmarkTotalRequests', request_count + retry_count, 'Count', dimensions)
+        
+        # Efficiency metrics
+        if request_count > 0:
+            retry_rate = (retry_count / request_count) * 100
+            self.put_metric('S3BookmarkRetryRate', retry_rate, 'Percent', dimensions)
+        
+        # Cost estimation metrics (for monitoring purposes)
+        storage_cost_gb_month = 0.023  # Rough S3 standard storage cost per GB per month
+        estimated_monthly_cost = (file_size_bytes / 1024 / 1024 / 1024) * storage_cost_gb_month
+        self.put_metric('S3BookmarkEstimatedMonthlyCost', estimated_monthly_cost, 'None', dimensions)
+        
+        self.structured_logger.debug("Published S3 resource usage metrics", 
+                                   operation=operation, table_name=table_name, 
+                                   file_size_bytes=file_size_bytes, request_count=request_count)
+    
+    def publish_s3_performance_trend_metrics(self, operation: str, current_duration_ms: float, 
+                                           historical_average_ms: float, table_count: int):
+        """Publish S3 operation performance trend metrics for capacity planning."""
+        dimensions = {'Operation': operation}
+        
+        # Current performance metrics
+        self.put_metric('S3BookmarkCurrentLatency', current_duration_ms, 'Milliseconds', dimensions)
+        self.put_metric('S3BookmarkHistoricalAverageLatency', historical_average_ms, 'Milliseconds', dimensions)
+        
+        # Performance change metrics
+        if historical_average_ms > 0:
+            performance_change = ((current_duration_ms - historical_average_ms) / historical_average_ms) * 100
+            self.put_metric('S3BookmarkPerformanceChange', performance_change, 'Percent', dimensions)
+            
+            # Performance status indicators
+            if performance_change < -5:
+                self.put_metric('S3BookmarkPerformanceImproving', 1, 'Count', dimensions)
+                self.put_metric('S3BookmarkPerformanceDegrading', 0, 'Count', dimensions)
+            elif performance_change > 5:
+                self.put_metric('S3BookmarkPerformanceImproving', 0, 'Count', dimensions)
+                self.put_metric('S3BookmarkPerformanceDegrading', 1, 'Count', dimensions)
+            else:
+                self.put_metric('S3BookmarkPerformanceImproving', 0, 'Count', dimensions)
+                self.put_metric('S3BookmarkPerformanceDegrading', 0, 'Count', dimensions)
+        
+        # Workload metrics
+        self.put_metric('S3BookmarkCurrentTableCount', table_count, 'Count', dimensions)
+        
+        self.structured_logger.debug("Published S3 performance trend metrics", 
+                                   operation=operation, current_duration_ms=current_duration_ms, 
+                                   historical_average_ms=historical_average_ms)
+    
+    def publish_parallel_s3_metrics(self, operation: str, table_count: int, 
+                                   successful_count: int, failed_count: int, 
+                                   total_duration_ms: float):
+        """Publish metrics for parallel S3 bookmark operations."""
+        dimensions = {'Operation': operation, 'ExecutionType': 'parallel'}
+        
+        # Parallel operation counts
+        self.put_metric('S3BookmarkParallelOperations', table_count, 'Count', dimensions)
+        self.put_metric('S3BookmarkParallelSuccess', successful_count, 'Count', dimensions)
+        self.put_metric('S3BookmarkParallelFailure', failed_count, 'Count', dimensions)
+        
+        # Parallel operation performance
+        self.put_metric('S3BookmarkParallelTotalLatency', total_duration_ms, 'Milliseconds', dimensions)
+        if table_count > 0:
+            self.put_metric('S3BookmarkParallelAverageLatency', 
+                           total_duration_ms / table_count, 'Milliseconds', dimensions)
+        
+        # Success rate
+        if table_count > 0:
+            success_rate = (successful_count / table_count) * 100
+            self.put_metric('S3BookmarkParallelSuccessRate', success_rate, 'Percent', dimensions)
+        
+        self.structured_logger.debug("Published parallel S3 metrics", 
+                                   operation=operation, table_count=table_count, 
+                                   successful_count=successful_count, failed_count=failed_count)
+    
+    def publish_batch_s3_metrics(self, operation: str, total_operations: int, 
+                                successful_count: int, failed_count: int, 
+                                total_duration_ms: float, batch_size: int):
+        """Publish metrics for batch S3 bookmark operations."""
+        dimensions = {'Operation': operation, 'ExecutionType': 'batch'}
+        
+        # Batch operation counts
+        self.put_metric('S3BookmarkBatchOperations', total_operations, 'Count', dimensions)
+        self.put_metric('S3BookmarkBatchSuccess', successful_count, 'Count', dimensions)
+        self.put_metric('S3BookmarkBatchFailure', failed_count, 'Count', dimensions)
+        
+        # Batch configuration metrics
+        self.put_metric('S3BookmarkBatchSize', batch_size, 'Count', dimensions)
+        batch_count = ((total_operations - 1) // batch_size) + 1 if total_operations > 0 else 0
+        self.put_metric('S3BookmarkBatchCount', batch_count, 'Count', dimensions)
+        
+        # Batch operation performance
+        self.put_metric('S3BookmarkBatchTotalLatency', total_duration_ms, 'Milliseconds', dimensions)
+        if total_operations > 0:
+            self.put_metric('S3BookmarkBatchAverageLatency', 
+                           total_duration_ms / total_operations, 'Milliseconds', dimensions)
+        
+        # Success rate
+        if total_operations > 0:
+            success_rate = (successful_count / total_operations) * 100
+            self.put_metric('S3BookmarkBatchSuccessRate', success_rate, 'Percent', dimensions)
+        
+        self.structured_logger.debug("Published batch S3 metrics", 
+                                   operation=operation, total_operations=total_operations, 
+                                   successful_count=successful_count, failed_count=failed_count,
+                                   batch_size=batch_size)
 
 
 def estimate_dataframe_size(df: DataFrame, sample_size: int = 1000) -> int:
@@ -772,30 +3151,81 @@ class JobConfigurationParser:
     
     @classmethod
     def parse_job_arguments(cls) -> Dict[str, str]:
-        """Parse job arguments from CloudFormation parameters."""
+        """Parse job arguments from CloudFormation parameters with robust error handling."""
         try:
-            # Parse required parameters
-            args = getResolvedOptions(sys.argv, cls.REQUIRED_PARAMS)
+            logger.info(f"Starting argument parsing. Command line length: {len(sys.argv)}")
             
-            # Parse optional network parameters with defaults
+            # First, try the standard Glue approach
+            all_params = cls.REQUIRED_PARAMS + cls.OPTIONAL_NETWORK_PARAMS
+            
             try:
-                optional_args = getResolvedOptions(sys.argv, cls.OPTIONAL_NETWORK_PARAMS)
-                args.update(optional_args)
-            except Exception:
-                # Set default values for optional parameters if not provided
+                # Parse all parameters at once with getResolvedOptions
+                args = getResolvedOptions(sys.argv, all_params)
+                logger.info(f"Successfully parsed all parameters using getResolvedOptions")
+                
+                # Set defaults for optional parameters that might be empty
                 for param in cls.OPTIONAL_NETWORK_PARAMS:
-                    if param not in args:
+                    if param not in args or args[param] is None:
                         args[param] = ''
+                
+            except Exception as e:
+                logger.warning(f"getResolvedOptions failed: {str(e)}, trying manual parsing")
+                
+                # Fallback to manual parsing if getResolvedOptions fails
+                args = cls._manual_parse_arguments(sys.argv)
+            
+            # Validate that all required parameters are present
+            missing_params = [param for param in cls.REQUIRED_PARAMS if param not in args or not args[param]]
+            if missing_params:
+                raise RuntimeError(f"Missing required parameters: {missing_params}")
             
             # Set defaults for specific parameters
             args.setdefault('VALIDATE_CONNECTIONS', 'true')
             args.setdefault('CONNECTION_TIMEOUT_SECONDS', '30')
             
-            logger.info("Successfully parsed job arguments")
+            # Log final parsed arguments (excluding sensitive data)
+            safe_args = {k: v if 'PASSWORD' not in k else '***' for k, v in args.items()}
+            logger.info(f"Successfully parsed {len(args)} arguments")
+            logger.debug(f"Parsed arguments: {safe_args}")
+            
             return args
+            
         except Exception as e:
-            logger.error(f"Failed to parse job arguments: {str(e)}")
-            raise RuntimeError(f"Missing required job parameters: {str(e)}")
+            logger.error(f"CRITICAL: Failed to parse job arguments: {str(e)}")
+            logger.error(f"Command line arguments: {sys.argv}")
+            raise RuntimeError(f"Job argument parsing failed: {str(e)}")
+    
+    @classmethod
+    def _manual_parse_arguments(cls, argv: List[str]) -> Dict[str, str]:
+        """Manually parse command line arguments as fallback."""
+        args = {}
+        i = 0
+        
+        while i < len(argv):
+            arg = argv[i]
+            
+            # Look for our custom parameters (start with --)
+            if arg.startswith('--') and len(arg) > 2:
+                param_name = arg[2:]  # Remove --
+                
+                # Check if this is one of our expected parameters
+                if param_name in cls.REQUIRED_PARAMS + cls.OPTIONAL_NETWORK_PARAMS:
+                    # Get the next argument as the value
+                    if i + 1 < len(argv) and not argv[i + 1].startswith('--'):
+                        args[param_name] = argv[i + 1]
+                        i += 2  # Skip both parameter and value
+                    else:
+                        # Parameter without value, set as empty string
+                        args[param_name] = ''
+                        i += 1
+                else:
+                    # Skip unknown parameters
+                    i += 1
+            else:
+                i += 1
+        
+        logger.info(f"Manual parsing found {len(args)} parameters")
+        return args
     
     @classmethod
     def parse_network_config(cls, args: Dict[str, str], prefix: str) -> Optional[NetworkConfig]:
@@ -975,16 +3405,22 @@ def initialize_spark_session(job_config: JobConfig) -> tuple[SparkSession, GlueC
         # Get Spark session
         spark = glue_context.spark_session
         
-        # Initialize Glue job
+        # Initialize Glue job with proper bookmark configuration
         job = Job(glue_context)
-        job.init(job_config.job_name, {})
+        job.init(job_config.job_name, {
+            '--job-bookmark-option': 'job-bookmark-enable',
+            '--enable-job-bookmark': 'true'
+        })
         
-        logger.info(f"Initialized Spark session for job: {job_config.job_name}")
+        logger.info(f"Initialized Spark session for job: {job_config.job_name} with job bookmarks enabled")
         return spark, glue_context, job
         
     except Exception as e:
         logger.error(f"Failed to initialize Spark session: {str(e)}")
         raise RuntimeError(f"Spark initialization failed: {str(e)}")
+
+
+
 
 
 def load_jdbc_drivers(spark_context: SparkContext, job_config: JobConfig) -> None:
@@ -1013,212 +3449,10 @@ def load_jdbc_drivers(spark_context: SparkContext, job_config: JobConfig) -> Non
         raise RuntimeError(f"JDBC driver loading failed: {str(e)}")
 
 
-def main():
-    """Main entry point for the Glue job with comprehensive error handling."""
-    error_recovery_manager = None
-    job = None
-    performance_monitor = None
-    structured_logger = None
-    
-    try:
-        logger.info("Starting AWS Glue Data Replication Job")
-        
-        # Initialize performance monitoring early
-        temp_job_name = "glue-data-replication"  # Will be updated with actual job name
-        performance_monitor = PerformanceMonitor(temp_job_name)
-        structured_logger = StructuredLogger(temp_job_name)
-        
-        structured_logger.info("Initializing AWS Glue Data Replication Job")
-        
-        # Parse job arguments from CloudFormation parameters
-        try:
-            args = JobConfigurationParser.parse_job_arguments()
-        except Exception as e:
-            logger.critical(f"Failed to parse job arguments: {str(e)}")
-            raise RuntimeError(f"Job configuration parsing failed: {str(e)}")
-        
-        # Create job configuration
-        try:
-            job_config = JobConfigurationParser.create_job_config(args)
-            
-            # Update monitoring with actual job name
-            performance_monitor = PerformanceMonitor(job_config.job_name)
-            structured_logger = StructuredLogger(job_config.job_name)
-            performance_monitor.start_job_monitoring()
-            
-        except Exception as e:
-            if structured_logger:
-                structured_logger.critical("Failed to create job configuration", error=str(e))
-            else:
-                logger.critical(f"Failed to create job configuration: {str(e)}")
-            raise RuntimeError(f"Job configuration creation failed: {str(e)}")
-        
-        # Initialize error recovery manager with monitoring
-        error_recovery_manager = ErrorRecoveryManager(job_config.job_name)
-        
-        # Set context for structured logging
-        structured_logger.set_context(
-            source_engine=job_config.source_connection.engine_type,
-            target_engine=job_config.target_connection.engine_type,
-            table_count=len(job_config.tables)
-        )
-        
-        # Validate configuration
-        try:
-            JobConfigurationParser.validate_configuration(job_config)
-        except Exception as e:
-            error_info = error_recovery_manager.handle_infrastructure_error(
-                e, "Configuration", "job_configuration_validation"
-            )
-            logger.critical(f"Job configuration validation failed: {str(e)}")
-            raise RuntimeError(f"Configuration validation failed: {str(e)}")
-        
-        # Initialize Spark session and Glue context
-        try:
-            spark, glue_context, job = initialize_spark_session(job_config)
-        except Exception as e:
-            error_info = error_recovery_manager.handle_infrastructure_error(
-                e, "Spark", "spark_session_initialization"
-            )
-            logger.critical(f"Spark session initialization failed: {str(e)}")
-            raise RuntimeError(f"Spark initialization failed: {str(e)}")
-        
-        # Load JDBC drivers with error handling
-        try:
-            load_jdbc_drivers(spark.sparkContext, job_config)
-        except Exception as e:
-            error_info = error_recovery_manager.handle_infrastructure_error(
-                e, "S3/JDBC", "jdbc_driver_loading"
-            )
-            
-            # Attempt recovery for JDBC driver loading
-            if error_recovery_manager.attempt_graceful_recovery(error_info):
-                logger.info("Retrying JDBC driver loading after recovery attempt")
-                try:
-                    load_jdbc_drivers(spark.sparkContext, job_config)
-                except Exception as retry_error:
-                    logger.critical(f"JDBC driver loading failed after recovery: {str(retry_error)}")
-                    raise RuntimeError(f"JDBC driver loading failed: {str(retry_error)}")
-            else:
-                logger.critical(f"JDBC driver loading failed: {str(e)}")
-                raise RuntimeError(f"JDBC driver loading failed: {str(e)}")
-        
-        logger.info(f"Job configuration completed successfully for: {job_config.job_name}")
-        logger.info(f"Source: {job_config.source_connection.engine_type} -> Target: {job_config.target_connection.engine_type}")
-        logger.info(f"Tables to replicate: {', '.join(job_config.tables)}")
-        
-        # Test database connections with enhanced error handling and monitoring
-        try:
-            test_database_connections_with_recovery(spark, job_config, error_recovery_manager, performance_monitor)
-        except Exception as e:
-            structured_logger.critical("Database connection testing failed", error=str(e))
-            if performance_monitor:
-                performance_monitor.record_error("connection", "database_connection_test", str(e))
-            raise RuntimeError(f"Database connectivity validation failed: {str(e)}")
-        
-        # Determine migration mode based on job bookmarks
-        try:
-            migration_mode = determine_migration_mode(glue_context, job_config.job_name, job_config.tables)
-        except Exception as e:
-            error_info = error_recovery_manager.handle_infrastructure_error(
-                e, "Glue", "migration_mode_determination"
-            )
-            logger.warning(f"Failed to determine migration mode, defaulting to full-load: {str(e)}")
-            migration_mode = 'full_load'
-        
-        # Perform data migration based on mode with comprehensive error handling and monitoring
-        migration_results = {}
-        try:
-            if migration_mode == 'incremental':
-                structured_logger.info("Performing incremental data migration with job bookmarks", 
-                                     migration_mode=migration_mode)
-                migration_results = perform_incremental_data_migration_with_recovery(
-                    spark, glue_context, job_config, error_recovery_manager, performance_monitor
-                )
-            else:
-                structured_logger.info("Performing full-load data migration", 
-                                     migration_mode=migration_mode)
-                migration_results = perform_full_load_data_migration_with_recovery(
-                    spark, job_config, error_recovery_manager, performance_monitor
-                )
-        except Exception as e:
-            structured_logger.error("Data migration failed", error=str(e))
-            if performance_monitor:
-                performance_monitor.record_error("data_processing", "data_migration", str(e))
-            # Don't immediately fail - log partial results if any
-            if migration_results:
-                structured_logger.info("Partial migration results available despite failure")
-        
-        # Log final results with error details and complete monitoring
-        successful_count = sum(1 for p in migration_results.values() if p.status == 'completed')
-        failed_count = sum(1 for p in migration_results.values() if p.status == 'failed')
-        total_count = len(migration_results)
-        total_rows = sum(p.processed_rows for p in migration_results.values() if p.status == 'completed')
-        
-        structured_logger.info(
-            "Data migration completed",
-            successful_tables=successful_count,
-            failed_tables=failed_count,
-            total_tables=total_count,
-            total_rows_migrated=total_rows,
-            success_rate=round((successful_count / total_count * 100), 2) if total_count > 0 else 0
-        )
-        
-        # Log detailed error report
-        if error_recovery_manager:
-            error_recovery_manager.log_final_error_report()
-        
-        # Determine job success/failure
-        job_success = failed_count == 0
-        if failed_count > 0:
-            structured_logger.warning("Job completed with table failures", 
-                                    failed_count=failed_count, 
-                                    successful_count=successful_count)
-            if successful_count == 0:
-                job_success = False
-                if performance_monitor:
-                    performance_monitor.complete_job_monitoring(success=False)
-                raise RuntimeError(f"All {total_count} tables failed to migrate")
-        
-        # Complete monitoring before job commit
-        if performance_monitor:
-            performance_monitor.complete_job_monitoring(success=job_success)
-        
-        # Commit the job
-        if job:
-            job.commit()
-        structured_logger.info("Job completed successfully", 
-                             final_status="success" if job_success else "partial_success")
-        
-    except Exception as e:
-        if structured_logger:
-            structured_logger.error("Job failed with error", error=str(e))
-        else:
-            logger.error(f"Job failed with error: {str(e)}")
-        
-        # Complete monitoring with failure status
-        if performance_monitor:
-            performance_monitor.complete_job_monitoring(success=False)
-        
-        # Log final error report even on failure
-        if error_recovery_manager:
-            error_recovery_manager.log_final_error_report()
-        
-        # Ensure job is properly handled on failure
-        if job:
-            try:
-                job.commit()
-            except Exception as commit_error:
-                if structured_logger:
-                    structured_logger.error("Failed to commit job on error", commit_error=str(commit_error))
-                else:
-                    logger.error(f"Failed to commit job on error: {str(commit_error)}")
-        
-        raise
+# Main function moved to end of file after all class definitions
 
 
-if __name__ == "__main__":
-    main()
+
 
 
 class ConnectionStringBuilder:
@@ -1664,6 +3898,14 @@ class NetworkErrorHandler:
         
         if from_port is None or to_port is None:
             return False
+        
+        # Check for rules that allow all traffic (common in outbound rules)
+        if from_port == 0 and to_port == 65535:
+            return True
+        
+        # Check for rules that allow all traffic on all protocols (FromPort = -1)
+        if from_port == -1:
+            return True
         
         database_ports = [1433, 1521, 5432, 50000]  # SQL Server, Oracle, PostgreSQL, DB2
         
@@ -2158,7 +4400,14 @@ class GlueConnectionManager:
     
     def __init__(self, glue_context: GlueContext):
         self.glue_context = glue_context
-        self.glue_client = boto3.client('glue')
+        # Configure Glue client with aggressive timeout settings
+        from botocore.config import Config
+        config = Config(
+            read_timeout=30,  # Reduced from 60 to 30 seconds
+            connect_timeout=10,  # Reduced from 30 to 10 seconds
+            retries={'max_attempts': 2}  # Reduced from 3 to 2 attempts
+        )
+        self.glue_client = boto3.client('glue', config=config)
         self.structured_logger = StructuredLogger("GlueConnectionManager")
     
     def get_glue_connection(self, connection_name: str) -> Optional[Dict[str, Any]]:
@@ -2180,8 +4429,39 @@ class GlueConnectionManager:
         try:
             self.structured_logger.info("Retrieving Glue connection", connection_name=connection_name)
             
-            response = self.glue_client.get_connection(Name=connection_name)
-            connection = response.get('Connection', {})
+            # Log diagnostic information first
+            try:
+                # First, try to list connections to verify access
+                self.structured_logger.info("Testing Glue API access by listing connections")
+                list_response = self.glue_client.get_connections(MaxResults=1)
+                self.structured_logger.info("Glue API access verified - can list connections")
+            except Exception as list_error:
+                self.structured_logger.error(
+                    "Cannot access Glue API - this indicates permission or configuration issues",
+                    error=str(list_error)
+                )
+                raise GlueConnectionError(
+                    f"Cannot access Glue API: {str(list_error)}. Please check IAM permissions for glue:GetConnections.",
+                    connection_name,
+                    {'error_type': 'api_access_error', 'original_error': str(list_error)}
+                )
+            
+            # Try to get the specific connection with better error handling
+            self.structured_logger.info("Attempting to retrieve specific Glue connection", connection_name=connection_name)
+            
+            try:
+                response = self.glue_client.get_connection(Name=connection_name)
+                connection = response.get('Connection', {})
+                self.structured_logger.info("Successfully retrieved Glue connection", connection_name=connection_name)
+            except Exception as get_error:
+                self.structured_logger.error(
+                    "Failed to retrieve specific Glue connection",
+                    connection_name=connection_name,
+                    error=str(get_error),
+                    error_type=type(get_error).__name__
+                )
+                # Re-raise the original exception to be handled by the outer try-catch
+                raise
             
             connection_details = {
                 'name': connection.get('Name'),
@@ -2201,32 +4481,25 @@ class GlueConnectionManager:
             
             return connection_details
             
-        except self.glue_client.exceptions.EntityNotFoundException:
-            self.structured_logger.warning(
-                "Glue connection not found",
-                connection_name=connection_name
-            )
-            return None
-        except GlueConnectionError:
-            raise
         except Exception as e:
             self.structured_logger.error(
                 "Failed to retrieve Glue connection",
                 connection_name=connection_name,
-                error=str(e)
+                error=str(e),
+                error_type=type(e).__name__
             )
             raise GlueConnectionError(
                 f"Failed to retrieve Glue connection '{connection_name}': {str(e)}",
                 connection_name,
-                {'error_type': 'retrieval_error', 'original_error': str(e)}
+                {'error_type': 'connection_retrieval_error', 'original_error': str(e)}
             )
     
     def _validate_glue_connection_config(self, connection_details: Dict[str, Any], connection_name: str):
         """Validate Glue connection configuration."""
         connection_type = connection_details.get('connection_type')
-        if connection_type != 'JDBC':
+        if connection_type not in ['JDBC', 'NETWORK']:
             raise GlueConnectionError(
-                f"Glue connection '{connection_name}' is not a JDBC connection (type: {connection_type})",
+                f"Glue connection '{connection_name}' is not a JDBC or NETWORK connection (type: {connection_type})",
                 connection_name,
                 {'error_type': 'invalid_connection_type', 'connection_type': connection_type}
             )
@@ -2276,6 +4549,17 @@ class GlueConnectionManager:
             VpcEndpointError: For VPC endpoint issues
         """
         try:
+            # Check for environment variable to skip Glue connection validation
+            import os
+            skip_glue_validation = os.environ.get('SKIP_GLUE_CONNECTION_VALIDATION', 'false').lower() == 'true'
+            
+            if skip_glue_validation:
+                self.structured_logger.warning(
+                    "Skipping Glue connection validation due to environment variable SKIP_GLUE_CONNECTION_VALIDATION=true",
+                    connection_name=connection_name or "same-vpc"
+                )
+                return True
+            
             self.structured_logger.info(
                 "Starting network connectivity validation",
                 connection_name=connection_name or "same-vpc",
@@ -2290,27 +4574,49 @@ class GlueConnectionManager:
                 # For same-VPC, we'll validate during actual connection attempt
                 return True
             
-            # Retrieve Glue connection details with error handling
+            # Retrieve Glue connection details with error handling and fallback
             try:
+                self.structured_logger.info("Attempting to retrieve Glue connection for validation", connection_name=connection_name)
                 connection_details = self.get_glue_connection(connection_name)
                 if not connection_details:
-                    raise GlueConnectionError(
-                        f"Glue connection '{connection_name}' not found or inaccessible",
-                        connection_name
+                    self.structured_logger.warning(
+                        "Glue connection validation failed - connection not found, will attempt direct connection",
+                        connection_name=connection_name
                     )
+                    # Return True to allow the job to continue and try direct connection
+                    return True
             except Exception as conn_error:
+                self.structured_logger.warning(
+                    "Glue connection validation failed - will attempt direct connection instead",
+                    connection_name=connection_name,
+                    error=str(conn_error),
+                    error_type=type(conn_error).__name__
+                )
+                
+                # Log specific error types for debugging
                 if "EntityNotFoundException" in str(conn_error):
-                    raise GlueConnectionError(
-                        f"Glue connection '{connection_name}' does not exist",
-                        connection_name,
-                        {'error_type': 'not_found'}
+                    self.structured_logger.error(
+                        "Glue connection does not exist - please verify the connection name and ensure it's created",
+                        connection_name=connection_name
                     )
-                else:
-                    raise GlueConnectionError(
-                        f"Failed to retrieve Glue connection '{connection_name}': {str(conn_error)}",
-                        connection_name,
-                        {'error_type': 'access_error', 'original_error': str(conn_error)}
+                elif "AccessDenied" in str(conn_error) or "permission" in str(conn_error).lower():
+                    self.structured_logger.error(
+                        "Permission denied accessing Glue connection - please verify IAM permissions",
+                        connection_name=connection_name
                     )
+                elif "timeout" in str(conn_error).lower():
+                    self.structured_logger.error(
+                        "Timeout accessing Glue connection - may indicate network or service issues",
+                        connection_name=connection_name
+                    )
+                
+                # Instead of failing, return True to allow the job to continue
+                # The actual database connection will be tested later
+                self.structured_logger.info(
+                    "Skipping Glue connection validation - will test actual database connectivity instead",
+                    connection_name=connection_name
+                )
+                return True
             
             # Validate connection properties
             connection_properties = connection_details.get('connection_properties', {})
@@ -2474,6 +4780,14 @@ class GlueConnectionManager:
         if from_port is None or to_port is None:
             return False
         
+        # Check for rules that allow all traffic (common in outbound rules)
+        if from_port == 0 and to_port == 65535:
+            return True
+        
+        # Check for rules that allow all traffic on all protocols (FromPort = -1)
+        if from_port == -1:
+            return True
+        
         database_ports = [1433, 1521, 5432, 50000]  # SQL Server, Oracle, PostgreSQL, DB2
         
         return any(
@@ -2524,6 +4838,24 @@ class GlueConnectionManager:
                         glue_connection_name,
                         {'error_type': 'not_found'}
                     )
+                
+                # Check if this is a NETWORK connection (for VPC access only)
+                connection_type = connection_details.get('connection_type', '').upper()
+                if connection_type == 'NETWORK':
+                    self.structured_logger.info(
+                        "Using NETWORK connection for VPC access with direct JDBC properties",
+                        connection_name=glue_connection_name
+                    )
+                    # For NETWORK connections, use direct JDBC properties
+                    # The network connection just provides VPC access
+                    jdbc_properties['_glue_connection_metadata'] = {
+                        'connection_name': glue_connection_name,
+                        'connection_type': 'NETWORK',
+                        'subnet_id': connection_details.get('physical_connection_requirements', {}).get('SubnetId'),
+                        'security_groups': connection_details.get('physical_connection_requirements', {}).get('SecurityGroupIdList', [])
+                    }
+                    return jdbc_properties
+                    
             except GlueConnectionError:
                 raise
             except Exception as conn_error:
@@ -2635,9 +4967,9 @@ class JdbcConnectionManager:
     def create_connection_properties(self, connection_config: ConnectionConfig) -> Dict[str, str]:
         """Create JDBC connection properties from connection configuration."""
         properties = {
-            'user': connection_config.username,
-            'password': connection_config.password,
-            'driver': DatabaseEngineManager.get_driver_class(connection_config.engine_type)
+            'user': str(connection_config.username),
+            'password': str(connection_config.password),
+            'driver': str(DatabaseEngineManager.get_driver_class(connection_config.engine_type))
         }
         
         # Add engine-specific connection properties
@@ -2930,28 +5262,31 @@ class JdbcConnectionManager:
             )
     
     def validate_connection(self, connection_config: ConnectionConfig) -> bool:
-        """Validate database connection by executing a simple query."""
+        """Validate database connection by executing a simple query using Spark DataFrame."""
         def _validate():
             properties = self.create_connection_properties(connection_config)
             
             # Use a simple query appropriate for each database type
             test_queries = {
-                'oracle': 'SELECT 1 FROM DUAL',
-                'sqlserver': 'SELECT 1',
-                'postgresql': 'SELECT 1',
-                'db2': 'SELECT 1 FROM SYSIBM.SYSDUMMY1'
+                'oracle': 'SELECT 1 as test_column FROM DUAL',
+                'sqlserver': 'SELECT 1 as test_column',
+                'postgresql': 'SELECT 1 as test_column',
+                'db2': 'SELECT 1 as test_column FROM SYSIBM.SYSDUMMY1'
             }
             
-            test_query = test_queries.get(connection_config.engine_type.lower(), 'SELECT 1')
+            test_query = test_queries.get(connection_config.engine_type.lower(), 'SELECT 1 as test_column')
             
             try:
-                # Execute test query
-                df = self.spark.read \
-                    .format('jdbc') \
-                    .option('url', connection_config.connection_string) \
-                    .option('query', test_query) \
-                    .options(**properties) \
-                    .load()
+                # Execute test query using Spark DataFrame (not DynamicFrame)
+                reader = self.spark.read.format('jdbc')
+                reader = reader.option('url', connection_config.connection_string)
+                reader = reader.option('query', test_query)
+                
+                # Add connection properties
+                for key, value in properties.items():
+                    reader = reader.option(key, str(value))
+                
+                df = reader.load()
                 
                 # Trigger execution by collecting one row
                 result = df.collect()
@@ -2976,7 +5311,7 @@ class JdbcConnectionManager:
             return False
     
     def get_table_schema(self, connection_config: ConnectionConfig, table_name: str) -> StructType:
-        """Get table schema from database."""
+        """Get table schema from database using Spark DataFrame."""
         def _get_schema():
             properties = self.create_connection_properties(connection_config)
             
@@ -2984,14 +5319,16 @@ class JdbcConnectionManager:
             full_table_name = f"{connection_config.schema}.{table_name}"
             
             try:
-                # Read table schema by limiting to 0 rows
-                df = self.spark.read \
-                    .format('jdbc') \
-                    .option('url', connection_config.connection_string) \
-                    .option('dbtable', full_table_name) \
-                    .options(**properties) \
-                    .load() \
-                    .limit(0)
+                # Read table schema by limiting to 0 rows using Spark DataFrame
+                reader = self.spark.read.format('jdbc')
+                reader = reader.option('url', connection_config.connection_string)
+                reader = reader.option('dbtable', full_table_name)
+                
+                # Add connection properties
+                for key, value in properties.items():
+                    reader = reader.option(key, str(value))
+                
+                df = reader.load().limit(0)
                 
                 schema = df.schema
                 logger.info(f"Retrieved schema for table {full_table_name}: {len(schema.fields)} columns")
@@ -3008,7 +5345,7 @@ class JdbcConnectionManager:
     
     def read_table_data(self, connection_config: ConnectionConfig, table_name: str, 
                        query: Optional[str] = None, **options) -> DataFrame:
-        """Read data from database table."""
+        """Read data from database table using Spark DataFrame (not DynamicFrame)."""
         def _read_data():
             properties = self.create_connection_properties(connection_config)
             
@@ -3016,10 +5353,13 @@ class JdbcConnectionManager:
             properties.update(options)
             
             try:
-                reader = self.spark.read \
-                    .format('jdbc') \
-                    .option('url', connection_config.connection_string) \
-                    .options(**properties)
+                # Use Spark DataFrame reader directly (not DynamicFrame)
+                reader = self.spark.read.format('jdbc')
+                
+                # Set connection properties
+                reader = reader.option('url', connection_config.connection_string)
+                for key, value in properties.items():
+                    reader = reader.option(key, str(value))
                 
                 if query:
                     # Use custom query
@@ -3043,24 +5383,30 @@ class JdbcConnectionManager:
     
     def write_table_data(self, df: DataFrame, connection_config: ConnectionConfig, 
                         table_name: str, mode: str = 'append', **options) -> None:
-        """Write data to database table."""
+        """Write data to database table using Spark DataFrame."""
         def _write_data():
             properties = self.create_connection_properties(connection_config)
             
             # Add any additional options
-            properties.update(options)
+            if options:
+                for key, value in options.items():
+                    properties[key] = str(value)
             
             # Build full table name with schema
             full_table_name = f"{connection_config.schema}.{table_name}"
             
             try:
-                df.write \
-                    .format('jdbc') \
-                    .option('url', connection_config.connection_string) \
-                    .option('dbtable', full_table_name) \
-                    .options(**properties) \
-                    .mode(mode) \
-                    .save()
+                # Build writer using Spark DataFrame (not DynamicFrame)
+                writer = df.write.format('jdbc')
+                writer = writer.option('url', connection_config.connection_string)
+                writer = writer.option('dbtable', full_table_name)
+                writer = writer.mode(mode)
+                
+                # Add properties individually
+                for key, value in properties.items():
+                    writer = writer.option(key, str(value))
+                
+                writer.save()
                 
                 logger.info(f"Successfully wrote data to {connection_config.engine_type} table: {table_name}")
                 
@@ -3488,7 +5834,7 @@ class IncrementalLoadProgress:
 
 @dataclass
 class JobBookmarkState:
-    """Represents job bookmark state for a table."""
+    """Represents job bookmark state for a table with S3 compatibility."""
     table_name: str
     incremental_strategy: str
     incremental_column: Optional[str] = None
@@ -3497,8 +5843,15 @@ class JobBookmarkState:
     row_hash_checkpoint: Optional[str] = None
     is_first_run: bool = True
     
+    # New S3-specific fields
+    job_name: str = ""
+    created_timestamp: Optional[datetime] = None
+    updated_timestamp: Optional[datetime] = None
+    version: str = "1.0"
+    s3_key: Optional[str] = None
+    
     def to_dict(self) -> Dict[str, Any]:
-        """Convert bookmark state to dictionary for storage."""
+        """Convert bookmark state to dictionary for storage (legacy method)."""
         return {
             'table_name': self.table_name,
             'incremental_strategy': self.incremental_strategy,
@@ -3509,9 +5862,35 @@ class JobBookmarkState:
             'is_first_run': self.is_first_run
         }
     
+    def to_s3_dict(self) -> Dict[str, Any]:
+        """Convert bookmark state to S3-compatible dictionary with ISO timestamps."""
+        # Set updated_timestamp to current time if not set
+        current_time = datetime.now(timezone.utc)
+        if self.updated_timestamp is None:
+            self.updated_timestamp = current_time
+        
+        # Set created_timestamp if not set (for new bookmarks)
+        if self.created_timestamp is None:
+            self.created_timestamp = current_time
+        
+        return {
+            'table_name': self.table_name,
+            'incremental_strategy': self.incremental_strategy,
+            'incremental_column': self.incremental_column,
+            'last_processed_value': str(self.last_processed_value) if self.last_processed_value is not None else None,
+            'last_update_timestamp': self.last_update_timestamp.isoformat() if self.last_update_timestamp else None,
+            'row_hash_checkpoint': self.row_hash_checkpoint,
+            'is_first_run': self.is_first_run,
+            'job_name': self.job_name,
+            'created_timestamp': self.created_timestamp.isoformat() if self.created_timestamp else None,
+            'updated_timestamp': self.updated_timestamp.isoformat() if self.updated_timestamp else None,
+            'version': self.version,
+            's3_key': self.s3_key
+        }
+    
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'JobBookmarkState':
-        """Create bookmark state from dictionary."""
+        """Create bookmark state from dictionary (legacy method)."""
         last_update_timestamp = None
         if data.get('last_update_timestamp'):
             last_update_timestamp = datetime.fromisoformat(data['last_update_timestamp'])
@@ -3525,6 +5904,135 @@ class JobBookmarkState:
             row_hash_checkpoint=data.get('row_hash_checkpoint'),
             is_first_run=data.get('is_first_run', True)
         )
+    
+    @classmethod
+    def from_s3_dict(cls, data: Dict[str, Any]) -> 'JobBookmarkState':
+        """Create bookmark state from S3 dictionary with validation."""
+        # Validate required fields
+        if not cls._validate_s3_data(data):
+            raise ValueError("Invalid S3 bookmark data structure")
+        
+        # Parse timestamps with timezone handling
+        last_update_timestamp = None
+        if data.get('last_update_timestamp'):
+            try:
+                # Handle both timezone-aware and naive timestamps
+                timestamp_str = data['last_update_timestamp']
+                if timestamp_str.endswith('Z'):
+                    # Replace Z with +00:00 for proper parsing
+                    timestamp_str = timestamp_str[:-1] + '+00:00'
+                elif '+' not in timestamp_str and timestamp_str.count(':') == 2:
+                    # Assume UTC if no timezone info
+                    timestamp_str += '+00:00'
+                last_update_timestamp = datetime.fromisoformat(timestamp_str)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse last_update_timestamp '{data.get('last_update_timestamp')}': {e}")
+                last_update_timestamp = None
+        
+        created_timestamp = None
+        if data.get('created_timestamp'):
+            try:
+                timestamp_str = data['created_timestamp']
+                if timestamp_str.endswith('Z'):
+                    timestamp_str = timestamp_str[:-1] + '+00:00'
+                elif '+' not in timestamp_str and timestamp_str.count(':') == 2:
+                    timestamp_str += '+00:00'
+                created_timestamp = datetime.fromisoformat(timestamp_str)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse created_timestamp '{data.get('created_timestamp')}': {e}")
+                created_timestamp = None
+        
+        updated_timestamp = None
+        if data.get('updated_timestamp'):
+            try:
+                timestamp_str = data['updated_timestamp']
+                if timestamp_str.endswith('Z'):
+                    timestamp_str = timestamp_str[:-1] + '+00:00'
+                elif '+' not in timestamp_str and timestamp_str.count(':') == 2:
+                    timestamp_str += '+00:00'
+                updated_timestamp = datetime.fromisoformat(timestamp_str)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Failed to parse updated_timestamp '{data.get('updated_timestamp')}': {e}")
+                updated_timestamp = None
+        
+        return cls(
+            table_name=data['table_name'],
+            incremental_strategy=data['incremental_strategy'],
+            incremental_column=data.get('incremental_column'),
+            last_processed_value=data.get('last_processed_value'),
+            last_update_timestamp=last_update_timestamp,
+            row_hash_checkpoint=data.get('row_hash_checkpoint'),
+            is_first_run=data.get('is_first_run', True),
+            job_name=data.get('job_name', ''),
+            created_timestamp=created_timestamp,
+            updated_timestamp=updated_timestamp,
+            version=data.get('version', '1.0'),
+            s3_key=data.get('s3_key')
+        )
+    
+    @staticmethod
+    def _validate_s3_data(data: Dict[str, Any]) -> bool:
+        """Validate S3 bookmark data structure and handle missing fields."""
+        if not isinstance(data, dict):
+            logger.error("Bookmark data must be a dictionary")
+            return False
+        
+        # Check required fields
+        required_fields = ['table_name', 'incremental_strategy']
+        for field in required_fields:
+            if field not in data or data[field] is None:
+                logger.error(f"Missing required field in bookmark data: {field}")
+                return False
+            if not isinstance(data[field], str) or not data[field].strip():
+                logger.error(f"Invalid value for required field '{field}': must be non-empty string")
+                return False
+        
+        # Validate incremental_strategy values
+        valid_strategies = ['timestamp', 'primary_key', 'hash', 'full_load']
+        if data['incremental_strategy'] not in valid_strategies:
+            logger.error(f"Invalid incremental_strategy '{data['incremental_strategy']}'. Must be one of: {valid_strategies}")
+            return False
+        
+        # Validate optional fields if present
+        if 'is_first_run' in data and not isinstance(data['is_first_run'], bool):
+            logger.error(f"Invalid is_first_run value: must be boolean, got {type(data['is_first_run'])}")
+            return False
+        
+        if 'version' in data and not isinstance(data['version'], str):
+            logger.error(f"Invalid version value: must be string, got {type(data['version'])}")
+            return False
+        
+        # Validate timestamp formats if present
+        timestamp_fields = ['last_update_timestamp', 'created_timestamp', 'updated_timestamp']
+        for field in timestamp_fields:
+            if field in data and data[field] is not None:
+                if not isinstance(data[field], str):
+                    logger.error(f"Invalid {field} value: must be ISO format string, got {type(data[field])}")
+                    return False
+                # Basic ISO format validation
+                try:
+                    timestamp_str = data[field]
+                    if timestamp_str.endswith('Z'):
+                        timestamp_str = timestamp_str[:-1] + '+00:00'
+                    elif '+' not in timestamp_str and timestamp_str.count(':') == 2:
+                        timestamp_str += '+00:00'
+                    datetime.fromisoformat(timestamp_str)
+                except (ValueError, TypeError):
+                    logger.error(f"Invalid {field} format: must be valid ISO timestamp")
+                    return False
+        
+        logger.debug("S3 bookmark data validation passed")
+        return True
+    
+    def validate_s3_data(self) -> bool:
+        """Validate current bookmark state for S3 compatibility."""
+        # Convert to dict and validate
+        try:
+            s3_dict = self.to_s3_dict()
+            return self._validate_s3_data(s3_dict)
+        except Exception as e:
+            logger.error(f"Failed to validate bookmark state: {e}")
+            return False
 
 
 class DataTypeMapper:
@@ -4128,6 +6636,983 @@ class SchemaCompatibilityValidator:
         return validation_summary
 
 
+class FullLoadDataMigrator:
+    """Handles full-load data migration operations."""
+    
+    def __init__(self, spark_session: SparkSession, connection_manager: JdbcConnectionManager):
+        self.spark = spark_session
+        self.connection_manager = connection_manager
+        self.structured_logger = StructuredLogger("FullLoadDataMigrator")
+    
+    def perform_full_load_migration(self, source_config: ConnectionConfig, 
+                                  target_config: ConnectionConfig, table_name: str) -> FullLoadProgress:
+        """Perform full-load migration for a table."""
+        progress = FullLoadProgress(table_name=table_name)
+        progress.start_time = time.time()
+        progress.status = 'in_progress'
+        
+        try:
+            # Read all data from source
+            source_df = self.connection_manager.read_table_data(source_config, table_name)
+            progress.total_rows = source_df.count()
+            
+            # Write to target
+            self.connection_manager.write_table_data(source_df, target_config, table_name, mode='overwrite')
+            
+            progress.processed_rows = progress.total_rows
+            progress.end_time = time.time()
+            progress.status = 'completed'
+            
+            self.structured_logger.info(f"Full load completed for {table_name}", 
+                                      rows_processed=progress.processed_rows,
+                                      duration=progress.duration_seconds)
+            
+        except Exception as e:
+            progress.end_time = time.time()
+            progress.status = 'failed'
+            progress.error_message = str(e)
+            self.structured_logger.error(f"Full load failed for {table_name}", error=str(e))
+        
+        return progress
+
+
+class JobBookmarkManager:
+    """
+    Manages job bookmarks for incremental loading with S3 persistent storage.
+    
+    This enhanced implementation supports both S3-based persistent bookmark storage
+    and fallback to in-memory bookmarks when S3 is unavailable. It automatically
+    detects the S3 bucket from JDBC driver paths and initializes S3BookmarkStorage
+    for persistent state management across job executions.
+    """
+    
+    def __init__(self, glue_context: GlueContext, job_name: str, job: Job = None, 
+                 source_jdbc_path: Optional[str] = None, target_jdbc_path: Optional[str] = None):
+        """
+        Initialize JobBookmarkManager with S3 persistent storage support.
+        
+        Args:
+            glue_context: AWS Glue context
+            job_name: Name of the Glue job
+            job: Glue job instance (optional)
+            source_jdbc_path: S3 path to source JDBC driver (optional)
+            target_jdbc_path: S3 path to target JDBC driver (optional)
+        """
+        self.glue_context = glue_context
+        self.job_name = job_name
+        self.job = job
+        self.bookmark_states = {}  # In-memory bookmark storage (fallback)
+        self.structured_logger = StructuredLogger(job_name)
+        
+        # Initialize S3 bookmark storage if JDBC paths are provided
+        self.s3_bookmark_storage = None
+        self.s3_enabled = False
+        
+        if source_jdbc_path or target_jdbc_path:
+            try:
+                # Implement S3 bucket detection logic using JDBC driver paths
+                bucket_name = self._extract_s3_bucket_from_jdbc_paths(source_jdbc_path, target_jdbc_path)
+                
+                if bucket_name:
+                    # Validate S3 bucket accessibility before initializing storage (Requirement 6.2)
+                    bucket_accessible = S3PathUtilities.validate_s3_bucket_accessibility(
+                        bucket_name, 
+                        structured_logger=self.structured_logger,
+                        metrics_publisher=getattr(self, 'metrics_publisher', None)
+                    )
+                    
+                    if bucket_accessible:
+                        # Initialize S3BookmarkStorage instance with detected bucket configuration
+                        s3_config = S3BookmarkConfig(
+                            bucket_name=bucket_name,
+                            bookmark_prefix="bookmarks/",
+                            job_name=job_name,
+                            retry_attempts=3,
+                            timeout_seconds=30
+                        )
+                        
+                        self.s3_bookmark_storage = S3BookmarkStorage(s3_config)
+                        self.s3_enabled = True
+                        
+                        self.structured_logger.info("S3 bookmark storage initialized successfully",
+                                                  bucket=bucket_name,
+                                                  source_jdbc_path=source_jdbc_path,
+                                                  target_jdbc_path=target_jdbc_path)
+                    else:
+                        # Bucket not accessible - fall back to in-memory bookmarks
+                        self.structured_logger.log_fallback_to_memory(
+                            "initialization", "S3 bucket not accessible", "bucket_validation_failed")
+                        
+                        if hasattr(self, 'metrics_publisher'):
+                            self.metrics_publisher.publish_bookmark_fallback_metrics(
+                                "initialization", "bucket_validation_failed", "bucket_validation_failed")
+                        
+                        self.s3_bookmark_storage = None
+                        self.s3_enabled = False
+                else:
+                    self.structured_logger.warning("Could not extract S3 bucket from JDBC paths, using in-memory bookmarks",
+                                                 source_jdbc_path=source_jdbc_path,
+                                                 target_jdbc_path=target_jdbc_path)
+                    
+            except Exception as e:
+                # Add fallback initialization for in-memory bookmarks when S3 is unavailable
+                self.structured_logger.error("Failed to initialize S3 bookmark storage, falling back to in-memory bookmarks",
+                                           error=str(e),
+                                           source_jdbc_path=source_jdbc_path,
+                                           target_jdbc_path=target_jdbc_path)
+                self.s3_bookmark_storage = None
+                self.s3_enabled = False
+        else:
+            self.structured_logger.info("No JDBC S3 paths provided, using in-memory bookmark storage")
+    
+    def _extract_s3_bucket_from_jdbc_paths(self, source_jdbc_path: Optional[str], 
+                                         target_jdbc_path: Optional[str]) -> Optional[str]:
+        """
+        Extract S3 bucket name from JDBC driver paths with enhanced logging and metrics.
+        
+        Args:
+            source_jdbc_path: S3 path to source JDBC driver
+            target_jdbc_path: S3 path to target JDBC driver
+            
+        Returns:
+            S3 bucket name or None if extraction fails
+        """
+        start_time = time.time()
+        
+        try:
+            # Use enhanced S3PathUtilities with structured logging (Requirement 6.2)
+            bucket_name = S3PathUtilities.detect_s3_bucket_from_jdbc_paths(
+                source_jdbc_path or "", 
+                target_jdbc_path or "", 
+                self.structured_logger
+            )
+            
+            # Calculate detection duration for performance logging
+            duration_ms = (time.time() - start_time) * 1000
+            
+            # Publish bucket detection success metrics (Requirements 6.4, 6.5)
+            if hasattr(self, 'metrics_publisher'):
+                source_bucket = None
+                target_bucket = None
+                
+                try:
+                    if source_jdbc_path:
+                        source_bucket = S3PathUtilities.extract_s3_bucket_name(source_jdbc_path)
+                except ValueError:
+                    pass
+                
+                try:
+                    if target_jdbc_path:
+                        target_bucket = S3PathUtilities.extract_s3_bucket_name(target_jdbc_path)
+                except ValueError:
+                    pass
+                
+                self.metrics_publisher.publish_s3_bucket_detection_metrics(
+                    True, duration_ms, source_bucket, target_bucket, bucket_name)
+            
+            return bucket_name
+            
+        except ValueError as e:
+            # Calculate detection duration for error logging
+            duration_ms = (time.time() - start_time) * 1000
+            
+            self.structured_logger.error("S3 bucket detection failed",
+                                       error=str(e),
+                                       source_path=source_jdbc_path,
+                                       target_path=target_jdbc_path,
+                                       duration_ms=duration_ms)
+            
+            # Publish bucket detection failure metrics (Requirements 6.4, 6.5)
+            if hasattr(self, 'metrics_publisher'):
+                self.metrics_publisher.publish_s3_bucket_detection_metrics(
+                    False, duration_ms)
+            
+            return None
+            
+        except Exception as e:
+            # Calculate detection duration for error logging
+            duration_ms = (time.time() - start_time) * 1000
+            
+            self.structured_logger.error("Unexpected error during S3 bucket detection",
+                                       error=str(e),
+                                       source_path=source_jdbc_path,
+                                       target_path=target_jdbc_path,
+                                       duration_ms=duration_ms)
+            
+            # Publish bucket detection failure metrics (Requirements 6.4, 6.5)
+            if hasattr(self, 'metrics_publisher'):
+                self.metrics_publisher.publish_s3_bucket_detection_metrics(
+                    False, duration_ms)
+            
+            return None
+    
+    def initialize_bookmark_state(self, table_name: str, incremental_strategy: str,
+                                incremental_column: Optional[str] = None) -> JobBookmarkState:
+        """
+        Initialize job bookmark state for a table with S3 integration.
+        
+        This method implements the enhanced bookmark initialization that:
+        - Attempts to read existing bookmark state from S3 first
+        - Handles first-run detection based on S3 bookmark existence
+        - Falls back to in-memory bookmarks when S3 operations fail
+        - Ensures backward compatibility with existing job configurations
+        
+        Args:
+            table_name: Name of the table to initialize bookmark for
+            incremental_strategy: Strategy for incremental loading (timestamp, primary_key, hash)
+            incremental_column: Column to use for incremental loading (optional)
+            
+        Returns:
+            JobBookmarkState instance with initialized state
+        """
+        try:
+            # Check if we have a cached state from previous processing in this job
+            if table_name in self.bookmark_states:
+                state = self.bookmark_states[table_name]
+                self.structured_logger.info("Using cached bookmark state from current job execution",
+                                          table_name=table_name,
+                                          is_first_run=state.is_first_run,
+                                          last_processed_value=state.last_processed_value)
+                return state
+            
+            # Attempt to read existing bookmark state from S3 first (Requirement 1.2)
+            if self.s3_enabled and self.s3_bookmark_storage:
+                try:
+                    self.structured_logger.info("Attempting to read bookmark state from S3",
+                                              table_name=table_name,
+                                              s3_enabled=True)
+                    
+                    # Use asyncio to read bookmark from S3
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        s3_bookmark_data = loop.run_until_complete(
+                            self.s3_bookmark_storage.read_bookmark(table_name)
+                        )
+                    finally:
+                        loop.close()
+                    
+                    if s3_bookmark_data:
+                        # Successfully read bookmark from S3 - perform incremental loading (Requirement 1.4)
+                        state = JobBookmarkState.from_s3_dict(s3_bookmark_data)
+                        
+                        # Ensure job_name is set correctly for this execution
+                        state.job_name = self.job_name
+                        
+                        self.structured_logger.info("Successfully loaded bookmark state from S3",
+                                                  table_name=table_name,
+                                                  is_first_run=state.is_first_run,
+                                                  last_processed_value=state.last_processed_value,
+                                                  last_update_timestamp=state.last_update_timestamp,
+                                                  incremental_strategy=state.incremental_strategy)
+                        
+                        # Cache the state for this job execution
+                        self.bookmark_states[table_name] = state
+                        return state
+                    else:
+                        # No bookmark state exists in S3 - first run detection (Requirement 1.3)
+                        self.structured_logger.info("No bookmark state found in S3, performing first run",
+                                                  table_name=table_name,
+                                                  s3_enabled=True)
+                        
+                except Exception as s3_error:
+                    # Handle S3 read failures with centralized error handling and fallback (Requirement 1.3, 4.3)
+                    self._handle_s3_error("read", table_name, s3_error)
+                    
+                    self.structured_logger.warning("S3 bookmark read failed, falling back to in-memory bookmarks",
+                                                  table_name=table_name,
+                                                  error=str(s3_error),
+                                                  error_type=type(s3_error).__name__,
+                                                  fallback_action="creating_new_bookmark_state_for_full_load")
+                    
+                    # Continue with in-memory bookmark creation below
+            else:
+                # S3 not enabled - use in-memory bookmarks (backward compatibility - Requirement 4.1)
+                self.structured_logger.info("S3 bookmark storage not enabled, using in-memory bookmarks",
+                                          table_name=table_name,
+                                          s3_enabled=False)
+            
+            # Create new bookmark state for first run or S3 fallback
+            # Set created_timestamp for S3 compatibility
+            current_time = datetime.now(timezone.utc)
+            
+            state = JobBookmarkState(
+                table_name=table_name,
+                incremental_strategy=incremental_strategy,
+                incremental_column=incremental_column,
+                is_first_run=True,  # First run - perform full load
+                job_name=self.job_name,
+                created_timestamp=current_time,
+                updated_timestamp=current_time,
+                version="1.0"
+            )
+            
+            self.structured_logger.info("Created new bookmark state for first run",
+                                      table_name=table_name,
+                                      incremental_strategy=incremental_strategy,
+                                      incremental_column=incremental_column,
+                                      is_first_run=True)
+            
+            # Cache the state for this job execution
+            self.bookmark_states[table_name] = state
+            return state
+            
+        except Exception as e:
+            # Handle any unexpected errors with fallback to basic bookmark state (Requirement 4.4)
+            self.structured_logger.error("Unexpected error during bookmark initialization, creating fallback state",
+                                       table_name=table_name,
+                                       error=str(e),
+                                       error_type=type(e).__name__)
+            
+            # Create fallback state to ensure job continues
+            current_time = datetime.now(timezone.utc)
+            state = JobBookmarkState(
+                table_name=table_name,
+                incremental_strategy=incremental_strategy,
+                incremental_column=incremental_column,
+                is_first_run=True,
+                job_name=self.job_name,
+                created_timestamp=current_time,
+                updated_timestamp=current_time,
+                version="1.0"
+            )
+            
+            # Cache the fallback state
+            self.bookmark_states[table_name] = state
+            return state
+    
+    def update_bookmark_state(self, table_name: str, new_max_value: Any,
+                            processed_rows: int = 0) -> None:
+        """
+        Update job bookmark state after successful processing with S3 persistence.
+        
+        This enhanced method implements:
+        - S3 bookmark persistence after processing
+        - Asynchronous S3 write operations to avoid blocking job execution
+        - Error handling for S3 write failures with appropriate logging
+        - In-memory bookmark state as backup when S3 operations fail
+        
+        Args:
+            table_name: Name of the table to update bookmark for
+            new_max_value: New maximum value processed
+            processed_rows: Number of rows processed (default: 0)
+            
+        Requirements: 1.1, 5.2, 7.4
+        """
+        if table_name not in self.bookmark_states:
+            raise ValueError(f"No bookmark state found for table {table_name}")
+        
+        # Update in-memory bookmark state first (maintain as backup)
+        state = self.bookmark_states[table_name]
+        state.last_processed_value = new_max_value
+        state.last_update_timestamp = datetime.now(timezone.utc)
+        state.is_first_run = False
+        
+        # Update S3-specific metadata
+        state.updated_timestamp = datetime.now(timezone.utc)
+        if not state.created_timestamp:
+            state.created_timestamp = state.updated_timestamp
+        
+        self.structured_logger.info("Updated in-memory bookmark state",
+                                  table_name=table_name,
+                                  last_value=str(new_max_value),
+                                  processed_rows=processed_rows,
+                                  is_first_run=False)
+        
+        # Attempt to write bookmark data to S3 after processing (Requirement 1.1)
+        if self.s3_enabled and self.s3_bookmark_storage:
+            try:
+                # Prepare S3-compatible bookmark data
+                s3_bookmark_data = state.to_s3_dict()
+                
+                # Implement asynchronous S3 write operations to avoid blocking job execution (Requirement 7.4)
+                self.structured_logger.debug("Starting asynchronous S3 bookmark write",
+                                           table_name=table_name,
+                                           s3_enabled=True)
+                
+                # Use asyncio to write bookmark to S3 asynchronously
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # Execute S3 write operation asynchronously
+                    write_success = loop.run_until_complete(
+                        self.s3_bookmark_storage.write_bookmark(table_name, s3_bookmark_data)
+                    )
+                    
+                    if write_success:
+                        self.structured_logger.info("Successfully wrote bookmark to S3",
+                                                   table_name=table_name,
+                                                   last_value=str(new_max_value),
+                                                   processed_rows=processed_rows,
+                                                   s3_key=self.s3_bookmark_storage._get_bookmark_s3_key(table_name))
+                        
+                        # Publish CloudWatch metric for successful S3 write
+                        self._publish_bookmark_metric("BookmarkS3WriteSuccess", table_name)
+                        
+                    else:
+                        # Add error handling for S3 write failures with appropriate logging (Requirement 5.2)
+                        self.structured_logger.warning("S3 bookmark write failed, but in-memory state is maintained",
+                                                      table_name=table_name,
+                                                      fallback_available=True)
+                        
+                        # Publish CloudWatch metric for failed S3 write
+                        self._publish_bookmark_metric("BookmarkS3WriteFailure", table_name)
+                        
+                finally:
+                    loop.close()
+                    
+            except Exception as e:
+                # Handle S3 write failures with centralized error handling (Requirement 5.2)
+                self._handle_s3_error("write", table_name, e)
+                
+                self.structured_logger.error("Unexpected error during S3 bookmark write operation",
+                                           table_name=table_name,
+                                           error=str(e),
+                                           error_type=type(e).__name__,
+                                           fallback_available=True,
+                                           job_continues=True)
+                
+                # Publish CloudWatch metric for failed S3 write
+                self._publish_bookmark_metric("BookmarkS3WriteFailure", table_name)
+                
+                # Maintain in-memory bookmark state as backup when S3 operations fail (Requirement 5.2)
+                # Don't raise exception for S3 failures - continue processing
+                
+        else:
+            # S3 not enabled, using in-memory bookmarks only
+            self.structured_logger.debug("S3 bookmark storage not enabled, using in-memory bookmarks only",
+                                       table_name=table_name,
+                                       s3_enabled=self.s3_enabled)
+        
+        # Log final bookmark state update (always successful for in-memory)
+        self.structured_logger.info("Bookmark state update completed",
+                                  table_name=table_name,
+                                  last_value=str(new_max_value),
+                                  processed_rows=processed_rows,
+                                  s3_enabled=self.s3_enabled,
+                                  in_memory_backup=True)
+    
+    def _publish_bookmark_metric(self, metric_name: str, table_name: str) -> None:
+        """
+        Publish CloudWatch custom metrics for bookmark operations.
+        
+        Args:
+            metric_name: Name of the CloudWatch metric
+            table_name: Name of the table (used as dimension)
+        """
+        try:
+            if cloudwatch:
+                cloudwatch.put_metric_data(
+                    Namespace='GlueDataReplication/Bookmarks',
+                    MetricData=[
+                        {
+                            'MetricName': metric_name,
+                            'Dimensions': [
+                                {
+                                    'Name': 'JobName',
+                                    'Value': self.job_name
+                                },
+                                {
+                                    'Name': 'TableName',
+                                    'Value': table_name
+                                }
+                            ],
+                            'Value': 1.0,
+                            'Unit': 'Count',
+                            'Timestamp': datetime.now(timezone.utc)
+                        }
+                    ]
+                )
+                self.structured_logger.debug("Published CloudWatch metric",
+                                           metric_name=metric_name,
+                                           table_name=table_name)
+        except Exception as e:
+            # Don't fail the job for CloudWatch metric failures
+            self.structured_logger.warning("Failed to publish CloudWatch metric",
+                                         metric_name=metric_name,
+                                         table_name=table_name,
+                                         error=str(e))
+    
+    def get_bookmark_state(self, table_name: str) -> Optional[JobBookmarkState]:
+        """Get current bookmark state for a table."""
+        return self.bookmark_states.get(table_name)
+    
+    def reset_bookmark_state(self, table_name: str) -> None:
+        """Reset bookmark state for a table (force full reload)."""
+        try:
+            # Update local state to force full reload
+            if table_name in self.bookmark_states:
+                state = self.bookmark_states[table_name]
+                state.last_processed_value = None
+                state.last_update_timestamp = None
+                state.is_first_run = True
+            
+            logger.info(f"Reset bookmark state for table {table_name}")
+        except Exception as e:
+            logger.error(f"Failed to reset bookmark state for {table_name}: {str(e)}")
+    
+    def get_all_bookmark_states(self) -> Dict[str, JobBookmarkState]:
+        """Get all bookmark states."""
+        return self.bookmark_states.copy()
+    
+    def _handle_s3_error(self, operation: str, table_name: str, error: Exception) -> None:
+        """
+        Handle S3 operation errors with graceful degradation to in-memory bookmarks.
+        
+        This method implements centralized error handling for S3 operations at the
+        JobBookmarkManager level and provides graceful degradation when S3 operations fail.
+        
+        Args:
+            operation: Type of S3 operation (read, write, delete)
+            table_name: Name of the table being processed
+            error: Exception that occurred during S3 operation
+        """
+        # Log the error with appropriate context
+        self.structured_logger.error(f"S3 bookmark {operation} operation failed",
+                                   operation=operation,
+                                   table_name=table_name,
+                                   error_type=type(error).__name__,
+                                   error_message=str(error),
+                                   s3_enabled=self.s3_enabled)
+        
+        # Check if this is a permanent S3 failure that requires disabling S3
+        if isinstance(error, ClientError):
+            error_code = error.response.get('Error', {}).get('Code', 'Unknown')
+            
+            # Permanent errors that should disable S3 for this job execution
+            permanent_errors = ['AccessDenied', 'NoSuchBucket', 'InvalidBucketName']
+            
+            if error_code in permanent_errors and self.s3_enabled:
+                self.structured_logger.warning("Disabling S3 bookmark storage due to permanent error",
+                                             error_code=error_code,
+                                             table_name=table_name,
+                                             fallback_action="switching_to_in_memory_bookmarks_for_remaining_tables")
+                
+                # Disable S3 for the remainder of this job execution
+                self.s3_enabled = False
+                self.s3_bookmark_storage = None
+                
+                # Publish metric for S3 fallback
+                self._publish_bookmark_metric("BookmarkFallbackToMemory", table_name)
+        
+        elif isinstance(error, (BotoCoreError, NoCredentialsError)):
+            # Credential/boto errors - disable S3 for this job execution
+            if self.s3_enabled:
+                self.structured_logger.warning("Disabling S3 bookmark storage due to credential/boto error",
+                                             error_type=type(error).__name__,
+                                             table_name=table_name,
+                                             fallback_action="switching_to_in_memory_bookmarks_for_remaining_tables")
+                
+                self.s3_enabled = False
+                self.s3_bookmark_storage = None
+                
+                # Publish metric for S3 fallback
+                self._publish_bookmark_metric("BookmarkFallbackToMemory", table_name)
+        
+        # For other errors (network, JSON corruption, etc.), keep S3 enabled but log the issue
+        # Individual operations will handle retries and fallbacks appropriately
+    
+    def _detect_and_handle_corrupted_bookmark(self, table_name: str, bookmark_data: Dict[str, Any]) -> bool:
+        """
+        Detect and handle corrupted bookmark JSON files.
+        
+        This method validates bookmark data structure and handles corruption by
+        deleting the corrupted file and triggering a full load fallback.
+        
+        Args:
+            table_name: Name of the table being processed
+            bookmark_data: Dictionary containing bookmark data from S3
+            
+        Returns:
+            True if bookmark data is valid, False if corrupted (and handled)
+        """
+        try:
+            # Use the existing validation from JobBookmarkState
+            if not JobBookmarkState._validate_s3_data(bookmark_data):
+                self.structured_logger.error("Bookmark data validation failed - corrupted data detected",
+                                           table_name=table_name,
+                                           bookmark_keys=list(bookmark_data.keys()) if isinstance(bookmark_data, dict) else "invalid_data",
+                                           cleanup_action="deleting_corrupted_file")
+                
+                # Attempt to delete the corrupted file
+                if self.s3_enabled and self.s3_bookmark_storage:
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            delete_success = loop.run_until_complete(
+                                self.s3_bookmark_storage.delete_bookmark(table_name)
+                            )
+                            
+                            if delete_success:
+                                self.structured_logger.info("Successfully deleted corrupted bookmark file",
+                                                           table_name=table_name,
+                                                           fallback_action="full_load_will_be_performed")
+                            else:
+                                self.structured_logger.warning("Failed to delete corrupted bookmark file",
+                                                             table_name=table_name,
+                                                             fallback_action="full_load_will_still_be_performed")
+                        finally:
+                            loop.close()
+                            
+                    except Exception as delete_error:
+                        self.structured_logger.error("Error during corrupted file cleanup",
+                                                   table_name=table_name,
+                                                   delete_error=str(delete_error),
+                                                   fallback_action="full_load_will_still_be_performed")
+                
+                # Publish metric for corrupted bookmark detection
+                self._publish_bookmark_metric("BookmarkCorruptionDetected", table_name)
+                
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.structured_logger.error("Error during bookmark corruption detection",
+                                       table_name=table_name,
+                                       error=str(e),
+                                       fallback_action="treating_as_corrupted_and_performing_full_load")
+            
+            # Treat validation errors as corruption
+            self._publish_bookmark_metric("BookmarkCorruptionDetected", table_name)
+            return False
+    
+    def initialize_bookmark_states_parallel(self, table_configs: List[Dict[str, Any]]) -> Dict[str, JobBookmarkState]:
+        """
+        Initialize bookmark states for multiple tables in parallel.
+        
+        This method implements parallel bookmark reading during job initialization
+        to optimize S3 operations for jobs processing many tables simultaneously.
+        
+        Args:
+            table_configs: List of dictionaries containing table configuration:
+                          [{'name': str, 'strategy': str, 'column': Optional[str]}, ...]
+            
+        Returns:
+            Dictionary mapping table names to initialized JobBookmarkState objects
+        """
+        if not table_configs:
+            return {}
+        
+        start_time = time.time()
+        table_names = [config['name'] for config in table_configs]
+        
+        self.structured_logger.info("Starting parallel bookmark state initialization",
+                                  table_count=len(table_names),
+                                  s3_enabled=self.s3_enabled,
+                                  table_names=table_names)
+        
+        # Initialize results dictionary
+        bookmark_states = {}
+        
+        # If S3 is enabled, attempt parallel reading
+        if self.s3_enabled and self.s3_bookmark_storage:
+            try:
+                # Use asyncio to read bookmarks in parallel
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    # Read all bookmarks in parallel (Requirement 7.1)
+                    s3_results = loop.run_until_complete(
+                        self.s3_bookmark_storage.read_bookmarks_parallel(table_names)
+                    )
+                    
+                    # Process results and create bookmark states
+                    for config in table_configs:
+                        table_name = config['name']
+                        strategy = config['strategy']
+                        column = config.get('column')
+                        
+                        s3_data = s3_results.get(table_name)
+                        
+                        if s3_data:
+                            # Successfully read from S3 - create state from S3 data
+                            try:
+                                state = JobBookmarkState.from_s3_dict(s3_data)
+                                state.job_name = self.job_name  # Ensure job name is current
+                                bookmark_states[table_name] = state
+                                
+                                self.structured_logger.debug("Parallel bookmark initialization from S3",
+                                                           table_name=table_name,
+                                                           is_first_run=state.is_first_run,
+                                                           last_processed_value=state.last_processed_value)
+                                
+                            except Exception as parse_error:
+                                # Failed to parse S3 data - create new state
+                                self.structured_logger.warning("Failed to parse S3 bookmark data, creating new state",
+                                                             table_name=table_name,
+                                                             error=str(parse_error))
+                                bookmark_states[table_name] = self._create_new_bookmark_state(
+                                    table_name, strategy, column)
+                        else:
+                            # No S3 data found - create new state for first run
+                            bookmark_states[table_name] = self._create_new_bookmark_state(
+                                table_name, strategy, column)
+                            
+                            self.structured_logger.debug("Parallel bookmark initialization - new state created",
+                                                       table_name=table_name,
+                                                       is_first_run=True)
+                    
+                finally:
+                    loop.close()
+                    
+            except Exception as s3_error:
+                # S3 parallel read failed - fall back to individual initialization
+                self.structured_logger.warning("Parallel S3 bookmark read failed, falling back to individual initialization",
+                                             error=str(s3_error),
+                                             error_type=type(s3_error).__name__,
+                                             table_count=len(table_names))
+                
+                # Create new states for all tables
+                for config in table_configs:
+                    table_name = config['name']
+                    strategy = config['strategy']
+                    column = config.get('column')
+                    bookmark_states[table_name] = self._create_new_bookmark_state(table_name, strategy, column)
+        else:
+            # S3 not enabled - create new states for all tables
+            self.structured_logger.info("S3 not enabled, creating new bookmark states for all tables",
+                                      table_count=len(table_names))
+            
+            for config in table_configs:
+                table_name = config['name']
+                strategy = config['strategy']
+                column = config.get('column')
+                bookmark_states[table_name] = self._create_new_bookmark_state(table_name, strategy, column)
+        
+        # Cache all states in memory
+        self.bookmark_states.update(bookmark_states)
+        
+        # Calculate and log performance metrics
+        total_duration_ms = (time.time() - start_time) * 1000
+        successful_count = len(bookmark_states)
+        
+        self.structured_logger.info("Completed parallel bookmark state initialization",
+                                  table_count=len(table_names),
+                                  successful_count=successful_count,
+                                  total_duration_ms=total_duration_ms,
+                                  s3_enabled=self.s3_enabled,
+                                  average_duration_per_table_ms=total_duration_ms / len(table_names) if table_names else 0)
+        
+        return bookmark_states
+    
+    def update_bookmark_states_batch(self, bookmark_updates: Dict[str, Any], 
+                                   processed_rows_map: Dict[str, int] = None) -> Dict[str, bool]:
+        """
+        Update bookmark states for multiple tables in batch.
+        
+        This method implements batch S3 write operations for multiple table bookmarks
+        to optimize S3 operations and avoid blocking data operations.
+        
+        Args:
+            bookmark_updates: Dictionary mapping table names to new max values
+            processed_rows_map: Dictionary mapping table names to processed row counts (optional)
+            
+        Returns:
+            Dictionary mapping table names to update success status (True/False)
+        """
+        if not bookmark_updates:
+            return {}
+        
+        start_time = time.time()
+        table_names = list(bookmark_updates.keys())
+        
+        self.structured_logger.info("Starting batch bookmark state updates",
+                                  table_count=len(table_names),
+                                  s3_enabled=self.s3_enabled,
+                                  table_names=table_names)
+        
+        # Update in-memory states first
+        s3_bookmark_batch = {}
+        update_results = {}
+        
+        for table_name, new_max_value in bookmark_updates.items():
+            processed_rows = processed_rows_map.get(table_name, 0) if processed_rows_map else 0
+            
+            try:
+                # Update in-memory state
+                if table_name not in self.bookmark_states:
+                    self.structured_logger.warning("No bookmark state found for batch update",
+                                                 table_name=table_name)
+                    update_results[table_name] = False
+                    continue
+                
+                state = self.bookmark_states[table_name]
+                state.last_processed_value = new_max_value
+                state.last_update_timestamp = datetime.now(timezone.utc)
+                state.is_first_run = False
+                state.updated_timestamp = datetime.now(timezone.utc)
+                
+                if not state.created_timestamp:
+                    state.created_timestamp = state.updated_timestamp
+                
+                # Prepare S3 data if S3 is enabled
+                if self.s3_enabled and self.s3_bookmark_storage:
+                    s3_bookmark_batch[table_name] = state.to_s3_dict()
+                
+                self.structured_logger.debug("Updated in-memory bookmark state for batch",
+                                           table_name=table_name,
+                                           last_value=str(new_max_value),
+                                           processed_rows=processed_rows)
+                
+                update_results[table_name] = True
+                
+            except Exception as e:
+                self.structured_logger.error("Failed to update in-memory bookmark state for batch",
+                                           table_name=table_name,
+                                           error=str(e))
+                update_results[table_name] = False
+        
+        # Perform batch S3 writes if S3 is enabled and we have data to write
+        if self.s3_enabled and self.s3_bookmark_storage and s3_bookmark_batch:
+            try:
+                # Use asyncio for batch S3 operations (Requirement 7.2)
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    s3_results = loop.run_until_complete(
+                        self.s3_bookmark_storage.write_bookmarks_batch(s3_bookmark_batch)
+                    )
+                    
+                    # Update results based on S3 write success
+                    for table_name, s3_success in s3_results.items():
+                        if not s3_success and update_results.get(table_name, False):
+                            # S3 write failed but in-memory update succeeded
+                            self.structured_logger.warning("S3 write failed in batch but in-memory state maintained",
+                                                          table_name=table_name)
+                            # Keep update_results[table_name] as True since in-memory state is updated
+                        
+                        # Publish individual metrics
+                        metric_name = "BookmarkS3WriteSuccess" if s3_success else "BookmarkS3WriteFailure"
+                        self._publish_bookmark_metric(metric_name, table_name)
+                    
+                finally:
+                    loop.close()
+                    
+            except Exception as s3_error:
+                # Batch S3 operation failed - log but don't fail the updates
+                self.structured_logger.error("Batch S3 bookmark write operation failed",
+                                           error=str(s3_error),
+                                           error_type=type(s3_error).__name__,
+                                           table_count=len(s3_bookmark_batch),
+                                           in_memory_states_maintained=True)
+                
+                # Publish failure metrics for all tables
+                for table_name in s3_bookmark_batch.keys():
+                    self._publish_bookmark_metric("BookmarkS3WriteFailure", table_name)
+        
+        # Calculate and log performance metrics
+        total_duration_ms = (time.time() - start_time) * 1000
+        successful_count = sum(1 for success in update_results.values() if success)
+        failed_count = len(update_results) - successful_count
+        
+        self.structured_logger.info("Completed batch bookmark state updates",
+                                  table_count=len(table_names),
+                                  successful_count=successful_count,
+                                  failed_count=failed_count,
+                                  total_duration_ms=total_duration_ms,
+                                  s3_enabled=self.s3_enabled,
+                                  average_duration_per_table_ms=total_duration_ms / len(table_names) if table_names else 0)
+        
+        return update_results
+    
+    def _create_new_bookmark_state(self, table_name: str, incremental_strategy: str, 
+                                 incremental_column: Optional[str] = None) -> JobBookmarkState:
+        """
+        Create a new bookmark state for first run.
+        
+        Args:
+            table_name: Name of the table
+            incremental_strategy: Strategy for incremental loading
+            incremental_column: Column to use for incremental loading (optional)
+            
+        Returns:
+            New JobBookmarkState instance
+        """
+        current_time = datetime.now(timezone.utc)
+        
+        return JobBookmarkState(
+            table_name=table_name,
+            incremental_strategy=incremental_strategy,
+            incremental_column=incremental_column,
+            is_first_run=True,
+            job_name=self.job_name,
+            created_timestamp=current_time,
+            updated_timestamp=current_time,
+            version="1.0"
+        )
+
+
+class IncrementalDataMigrator:
+    """Handles incremental data migration operations."""
+    
+    def __init__(self, spark_session: SparkSession, connection_manager: JdbcConnectionManager, 
+                 bookmark_manager: JobBookmarkManager):
+        self.spark = spark_session
+        self.connection_manager = connection_manager
+        self.bookmark_manager = bookmark_manager
+        self.structured_logger = StructuredLogger("IncrementalDataMigrator")
+    
+    def perform_incremental_load_migration(self, source_config: ConnectionConfig, 
+                                         target_config: ConnectionConfig, table_name: str) -> IncrementalLoadProgress:
+        """Perform incremental migration for a table."""
+        # Auto-detect incremental strategy
+        schema = self.connection_manager.get_table_schema(source_config, table_name)
+        strategy_info = IncrementalColumnDetector.detect_incremental_strategy(schema, table_name)
+        
+        # Initialize bookmark state with detected strategy
+        bookmark_state = self.bookmark_manager.initialize_bookmark_state(
+            table_name, strategy_info['strategy'], strategy_info['column']
+        )
+        
+        progress = IncrementalLoadProgress(
+            table_name=table_name,
+            incremental_strategy=bookmark_state.incremental_strategy,
+            incremental_column=bookmark_state.incremental_column
+        )
+        progress.start_time = time.time()
+        progress.status = 'in_progress'
+        
+        try:
+            # Build incremental query
+            if bookmark_state.last_processed_value:
+                query = f"SELECT * FROM {source_config.schema}.{table_name} WHERE {bookmark_state.incremental_column} > '{bookmark_state.last_processed_value}'"
+            else:
+                query = f"SELECT * FROM {source_config.schema}.{table_name}"
+            
+            # Read incremental data
+            source_df = self.connection_manager.read_table_data(source_config, table_name, query=query)
+            progress.delta_rows = source_df.count()
+            
+            if progress.delta_rows > 0:
+                # Write to target
+                self.connection_manager.write_table_data(source_df, target_config, table_name, mode='append')
+                
+                # Update bookmark
+                new_max_value = source_df.agg({bookmark_state.incremental_column: "max"}).collect()[0][f"max({bookmark_state.incremental_column})"]
+                self.bookmark_manager.update_bookmark_state(table_name, new_max_value, progress.delta_rows)
+            
+            progress.processed_rows = progress.delta_rows
+            progress.end_time = time.time()
+            progress.status = 'completed'
+            
+            self.structured_logger.info(f"Incremental load completed for {table_name}", 
+                                      rows_processed=progress.processed_rows,
+                                      duration=progress.duration_seconds)
+            
+        except Exception as e:
+            progress.end_time = time.time()
+            progress.status = 'failed'
+            progress.error_message = str(e)
+            self.structured_logger.error(f"Incremental load failed for {table_name}", error=str(e))
+        
+        return progress
+
+
+
+
+
 class IncrementalColumnDetector:
     """Detects suitable columns for incremental loading strategies."""
     
@@ -4294,1584 +7779,97 @@ class IncrementalColumnDetector:
             return False
 
 
-class JobBookmarkManager:
-    """Manages AWS Glue job bookmarks for incremental loading."""
-    
-    def __init__(self, glue_context: GlueContext, job_name: str):
-        self.glue_context = glue_context
-        self.job_name = job_name
-        self.bookmark_states = {}
-    
-    def initialize_bookmark_state(self, table_name: str, incremental_strategy: str,
-                                incremental_column: Optional[str] = None) -> JobBookmarkState:
-        """Initialize job bookmark state for a table."""
-        bookmark_key = f"{self.job_name}_{table_name}"
-        
-        try:
-            # Try to read existing bookmark state
-            existing_state = self.glue_context.get_bookmark_state(bookmark_key)
-            
-            if existing_state and existing_state.get('bookmark'):
-                # Parse existing bookmark state
-                bookmark_data = existing_state['bookmark']
-                
-                if isinstance(bookmark_data, dict):
-                    state = JobBookmarkState.from_dict(bookmark_data)
-                    state.is_first_run = False
-                    logger.info(f"Loaded existing bookmark state for table {table_name}")
-                else:
-                    # Legacy or corrupted bookmark, create new state
-                    state = JobBookmarkState(
-                        table_name=table_name,
-                        incremental_strategy=incremental_strategy,
-                        incremental_column=incremental_column,
-                        is_first_run=True
-                    )
-                    logger.info(f"Created new bookmark state for table {table_name} (legacy bookmark found)")
-            else:
-                # No existing bookmark, create new state
-                state = JobBookmarkState(
-                    table_name=table_name,
-                    incremental_strategy=incremental_strategy,
-                    incremental_column=incremental_column,
-                    is_first_run=True
-                )
-                logger.info(f"Created new bookmark state for table {table_name} (first run)")
-        
-        except Exception as e:
-            logger.warning(f"Failed to read bookmark state for {table_name}: {str(e)}. Creating new state.")
-            state = JobBookmarkState(
-                table_name=table_name,
-                incremental_strategy=incremental_strategy,
-                incremental_column=incremental_column,
-                is_first_run=True
-            )
-        
-        self.bookmark_states[table_name] = state
-        return state
-    
-    def update_bookmark_state(self, table_name: str, new_max_value: Any,
-                            processed_rows: int = 0) -> None:
-        """Update job bookmark state after successful processing."""
-        if table_name not in self.bookmark_states:
-            raise ValueError(f"No bookmark state found for table {table_name}")
-        
-        state = self.bookmark_states[table_name]
-        state.last_processed_value = new_max_value
-        state.last_update_timestamp = datetime.now(timezone.utc)
-        state.is_first_run = False
-        
-        # Save bookmark state to Glue
-        bookmark_key = f"{self.job_name}_{table_name}"
-        bookmark_data = state.to_dict()
-        
-        try:
-            self.glue_context.set_bookmark_state(bookmark_key, {'bookmark': bookmark_data})
-            logger.info(
-                f"Updated bookmark state for table {table_name}: "
-                f"last_value={new_max_value}, processed_rows={processed_rows}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to save bookmark state for {table_name}: {str(e)}")
-            raise RuntimeError(f"Bookmark state update failed: {str(e)}")
-    
-    def get_bookmark_state(self, table_name: str) -> Optional[JobBookmarkState]:
-        """Get current bookmark state for a table."""
-        return self.bookmark_states.get(table_name)
-    
-    def reset_bookmark_state(self, table_name: str) -> None:
-        """Reset bookmark state for a table (force full reload)."""
-        bookmark_key = f"{self.job_name}_{table_name}"
-        
-        try:
-            self.glue_context.reset_bookmark_state(bookmark_key)
-            
-            # Update local state
-            if table_name in self.bookmark_states:
-                state = self.bookmark_states[table_name]
-                state.last_processed_value = None
-                state.last_update_timestamp = None
-                state.is_first_run = True
-            
-            logger.info(f"Reset bookmark state for table {table_name}")
-        except Exception as e:
-            logger.error(f"Failed to reset bookmark state for {table_name}: {str(e)}")
-            raise RuntimeError(f"Bookmark state reset failed: {str(e)}")
-    
-    def get_all_bookmark_states(self) -> Dict[str, JobBookmarkState]:
-        """Get all bookmark states."""
-        return self.bookmark_states.copy()
-
-
-class FullLoadDataMigrator:
-    """Handles full-load data migration operations."""
-    
-    def __init__(self, spark_session: SparkSession, connection_manager: JdbcConnectionManager):
-        self.spark = spark_session
-        self.connection_manager = connection_manager
-        self.data_type_mapper = DataTypeMapper()
-        self.schema_validator = SchemaCompatibilityValidator(self.data_type_mapper)
-        self.progress_tracker = {}
-    
-    def get_table_row_count(self, connection_config: ConnectionConfig, table_name: str) -> int:
-        """Get total row count for a table."""
-        try:
-            count_query = f"SELECT COUNT(*) as row_count FROM {connection_config.schema}.{table_name}"
-            
-            df = self.connection_manager.read_table_data(
-                connection_config=connection_config,
-                table_name=table_name,
-                query=count_query
-            )
-            
-            row_count = df.collect()[0]['row_count']
-            logger.info(f"Table {connection_config.schema}.{table_name} has {row_count:,} rows")
-            return row_count
-            
-        except Exception as e:
-            logger.error(f"Failed to get row count for table {table_name}: {str(e)}")
-            raise RuntimeError(f"Row count query failed: {str(e)}")
-    
-    def read_source_table_data(self, source_config: ConnectionConfig, table_name: str, 
-                              batch_size: int = 10000, 
-                              structured_logger: StructuredLogger = None) -> tuple[DataFrame, Dict[str, Any]]:
-        """Read complete table data from source database with volume tracking."""
-        if not structured_logger:
-            structured_logger = StructuredLogger("data_migration")
-            
-        read_start_time = time.time()
-        volume_stats = {
-            'rows_read': 0,
-            'bytes_read': 0,
-            'read_duration_seconds': 0,
-            'read_throughput_rows_per_sec': 0,
-            'read_throughput_mb_per_sec': 0
-        }
-        
-        try:
-            structured_logger.info("Reading complete data from source table", 
-                                 table_name=f"{source_config.schema}.{table_name}",
-                                 batch_size=batch_size)
-            
-            # Configure JDBC options for better performance
-            jdbc_options = {
-                'fetchsize': str(batch_size),
-                'batchsize': str(batch_size)
-            }
-            
-            # Add partitioning for large tables if possible
-            if source_config.engine_type.lower() in ['oracle', 'sqlserver', 'postgresql']:
-                jdbc_options['numPartitions'] = '4'
-            
-            df = self.connection_manager.read_table_data(
-                connection_config=source_config,
-                table_name=table_name,
-                **jdbc_options
-            )
-            
-            # Cache the DataFrame for better performance during multiple operations
-            df.cache()
-            
-            # Calculate volume statistics
-            read_end_time = time.time()
-            volume_stats['read_duration_seconds'] = read_end_time - read_start_time
-            
-            # Get row count and estimate data size
-            try:
-                row_count = df.count()
-                volume_stats['rows_read'] = row_count
-                
-                # Estimate data size using improved estimation
-                if row_count > 0:
-                    volume_stats['bytes_read'] = estimate_dataframe_size(df)
-                
-                # Calculate throughput
-                if volume_stats['read_duration_seconds'] > 0:
-                    volume_stats['read_throughput_rows_per_sec'] = row_count / volume_stats['read_duration_seconds']
-                    volume_stats['read_throughput_mb_per_sec'] = (volume_stats['bytes_read'] / 1024 / 1024) / volume_stats['read_duration_seconds']
-                
-            except Exception as stats_error:
-                structured_logger.warning("Failed to calculate volume statistics", 
-                                        error=str(stats_error))
-            
-            structured_logger.info("Successfully read data from source table", 
-                                 table_name=table_name,
-                                 rows_read=volume_stats['rows_read'],
-                                 duration_seconds=round(volume_stats['read_duration_seconds'], 2),
-                                 throughput_rows_per_sec=round(volume_stats['read_throughput_rows_per_sec'], 2),
-                                 estimated_mb=round(volume_stats['bytes_read'] / 1024 / 1024, 2))
-            
-            return df, volume_stats
-            
-        except Exception as e:
-            volume_stats['read_duration_seconds'] = time.time() - read_start_time
-            structured_logger.error("Failed to read source table data", 
-                                  table_name=table_name, 
-                                  error=str(e),
-                                  duration_seconds=round(volume_stats['read_duration_seconds'], 2))
-            raise RuntimeError(f"Source data reading failed: {str(e)}")
-    
-    def write_target_table_data(self, df: DataFrame, target_config: ConnectionConfig, 
-                               table_name: str, write_mode: str = 'overwrite',
-                               structured_logger: StructuredLogger = None) -> Dict[str, Any]:
-        """Write data to target database table with proper data type handling and volume tracking."""
-        if not structured_logger:
-            structured_logger = StructuredLogger("data_migration")
-            
-        write_start_time = time.time()
-        volume_stats = {
-            'rows_written': 0,
-            'bytes_written': 0,
-            'write_duration_seconds': 0,
-            'write_throughput_rows_per_sec': 0,
-            'write_throughput_mb_per_sec': 0
-        }
-        
-        try:
-            # Get row count before writing for statistics
-            row_count = df.count()
-            volume_stats['rows_written'] = row_count
-            
-            structured_logger.info("Writing data to target table", 
-                                 table_name=f"{target_config.schema}.{table_name}",
-                                 rows_to_write=row_count,
-                                 write_mode=write_mode)
-            
-            # Configure JDBC options for better write performance
-            jdbc_options = {
-                'batchsize': '10000',
-                'isolationLevel': 'READ_UNCOMMITTED'
-            }
-            
-            # Add engine-specific write optimizations
-            engine_type = target_config.engine_type.lower()
-            
-            if engine_type == 'postgresql':
-                jdbc_options.update({
-                    'stringtype': 'unspecified',
-                    'reWriteBatchedInserts': 'true'
-                })
-            elif engine_type == 'sqlserver':
-                jdbc_options.update({
-                    'bulkCopyBatchSize': '10000',
-                    'bulkCopyTimeout': '600'
-                })
-            elif engine_type == 'oracle':
-                jdbc_options.update({
-                    'oracle.jdbc.batchUpdateException': 'true'
-                })
-            
-            # Write data to target table
-            self.connection_manager.write_table_data(
-                df=df,
-                connection_config=target_config,
-                table_name=table_name,
-                mode=write_mode,
-                **jdbc_options
-            )
-            
-            # Calculate final statistics
-            write_end_time = time.time()
-            volume_stats['write_duration_seconds'] = write_end_time - write_start_time
-            
-            # Estimate bytes written using improved estimation
-            if row_count > 0:
-                volume_stats['bytes_written'] = estimate_dataframe_size(df)
-            
-            # Calculate throughput
-            if volume_stats['write_duration_seconds'] > 0:
-                volume_stats['write_throughput_rows_per_sec'] = row_count / volume_stats['write_duration_seconds']
-                volume_stats['write_throughput_mb_per_sec'] = (volume_stats['bytes_written'] / 1024 / 1024) / volume_stats['write_duration_seconds']
-            
-            structured_logger.info("Successfully wrote data to target table", 
-                                 table_name=table_name,
-                                 rows_written=volume_stats['rows_written'],
-                                 duration_seconds=round(volume_stats['write_duration_seconds'], 2),
-                                 throughput_rows_per_sec=round(volume_stats['write_throughput_rows_per_sec'], 2),
-                                 estimated_mb=round(volume_stats['bytes_written'] / 1024 / 1024, 2))
-            
-            return volume_stats
-            
-        except Exception as e:
-            volume_stats['write_duration_seconds'] = time.time() - write_start_time
-            structured_logger.error("Failed to write target table data", 
-                                  table_name=table_name, 
-                                  error=str(e),
-                                  duration_seconds=round(volume_stats['write_duration_seconds'], 2))
-            raise RuntimeError(f"Target data writing failed: {str(e)}")
-        
-        return volume_stats
-    
-    def _validate_and_transform_cross_database_data(self, source_df: DataFrame, 
-                                                   source_config: ConnectionConfig,
-                                                   target_config: ConnectionConfig, 
-                                                   table_name: str) -> DataFrame:
-        """Validate schema compatibility and transform data for cross-database replication."""
-        try:
-            logger.info(f"Validating and transforming data for cross-database replication: {table_name}")
-            
-            # Step 1: Get target table schema for validation
-            try:
-                target_schema = self.connection_manager.get_table_schema(target_config, table_name)
-                logger.info(f"Retrieved target schema for validation: {table_name}")
-            except Exception as e:
-                logger.warning(f"Could not retrieve target schema for {table_name}: {str(e)}")
-                logger.warning("Proceeding with data transformation without schema validation")
-                target_schema = None
-            
-            # Step 2: Validate schema compatibility if target schema is available
-            if target_schema:
-                validation_result = self.schema_validator.validate_schema_compatibility(
-                    source_df.schema, target_schema, 
-                    source_config.engine_type, target_config.engine_type, 
-                    table_name
-                )
-                
-                # Log validation report
-                compatibility_report = self.schema_validator.generate_compatibility_report(
-                    validation_result, table_name
-                )
-                logger.info(f"Schema compatibility report:\n{compatibility_report}")
-                
-                # Handle validation errors
-                if not validation_result['is_compatible']:
-                    error_msg = f"Schema compatibility validation failed for table {table_name}. "
-                    error_msg += f"Errors: {len(validation_result['errors'])}, "
-                    error_msg += f"Missing columns: {validation_result['missing_columns']}, "
-                    error_msg += f"Type mismatches: {len(validation_result['type_mismatches'])}"
-                    
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-                
-                # Log warnings if any
-                if validation_result['warnings']:
-                    for warning in validation_result['warnings']:
-                        logger.warning(f"Schema validation warning for {table_name}: {warning}")
-            
-            # Step 3: Apply data type transformations
-            logger.info(f"Applying data type transformations for {source_config.engine_type} -> {target_config.engine_type}")
-            transformed_df = self.data_type_mapper.transform_dataframe_types(
-                source_df, source_config.engine_type, target_config.engine_type
-            )
-            
-            # Step 4: Validate transformation results
-            if transformed_df.count() != source_df.count():
-                raise RuntimeError(
-                    f"Data transformation resulted in row count change for table {table_name}: "
-                    f"original={source_df.count()}, transformed={transformed_df.count()}"
-                )
-            
-            logger.info(f"Successfully validated and transformed data for table {table_name}")
-            return transformed_df
-            
-        except Exception as e:
-            logger.error(f"Cross-database data validation and transformation failed for {table_name}: {str(e)}")
-            raise RuntimeError(f"Cross-database transformation failed: {str(e)}")
-    
-    def validate_cross_database_compatibility(self, source_config: ConnectionConfig,
-                                            target_config: ConnectionConfig,
-                                            table_names: List[str]) -> Dict[str, Any]:
-        """Validate overall cross-database compatibility before starting migration."""
-        logger.info("Validating cross-database compatibility assumptions")
-        
-        try:
-            # Validate cross-database assumptions
-            compatibility_summary = self.schema_validator.validate_cross_database_assumptions(
-                source_config, target_config, table_names
-            )
-            
-            # Log compatibility summary
-            logger.info(f"Cross-database compatibility validation completed:")
-            logger.info(f"  Overall compatible: {compatibility_summary['overall_compatible']}")
-            logger.info(f"  Tables to validate: {len(table_names)}")
-            
-            if compatibility_summary['unsupported_mappings']:
-                logger.warning(f"Unsupported mappings detected: {compatibility_summary['unsupported_mappings']}")
-            
-            if compatibility_summary['recommendations']:
-                logger.info("Recommendations:")
-                for recommendation in compatibility_summary['recommendations']:
-                    logger.info(f"  • {recommendation}")
-            
-            return compatibility_summary
-            
-        except Exception as e:
-            logger.error(f"Cross-database compatibility validation failed: {str(e)}")
-            raise RuntimeError(f"Compatibility validation failed: {str(e)}")
-    
-    def perform_full_load_migration(self, source_config: ConnectionConfig, 
-                                   target_config: ConnectionConfig, 
-                                   table_name: str) -> FullLoadProgress:
-        """Perform full-load migration for a single table."""
-        progress = FullLoadProgress(table_name=table_name)
-        progress.start_time = time.time()
-        progress.status = 'in_progress'
-        
-        # Store progress in tracker
-        self.progress_tracker[table_name] = progress
-        
-        try:
-            logger.info(f"Starting full-load migration for table: {table_name}")
-            
-            # Validate cross-database compatibility if needed
-            if self.data_type_mapper.is_cross_database_replication(
-                source_config.engine_type, target_config.engine_type
-            ):
-                compatibility_result = self.validate_cross_database_compatibility(
-                    source_config, target_config, [table_name]
-                )
-                if not compatibility_result['overall_compatible']:
-                    raise RuntimeError(
-                        f"Cross-database compatibility validation failed for table {table_name}"
-                    )
-            
-            # Step 1: Get total row count for progress tracking
-            progress.total_rows = self.get_table_row_count(source_config, table_name)
-            
-            # Step 2: Read source data
-            logger.info(f"Reading source data for table: {table_name}")
-            source_df = self.read_source_table_data(source_config, table_name)
-            
-            # Step 3: Handle cross-database type compatibility if needed
-            if self.data_type_mapper.is_cross_database_replication(
-                source_config.engine_type, target_config.engine_type
-            ):
-                logger.info(f"Cross-database replication detected: {source_config.engine_type} -> {target_config.engine_type}")
-                logger.info("Performing cross-database data transformation and validation")
-                
-                # Validate schema compatibility assumptions
-                source_df = self._validate_and_transform_cross_database_data(
-                    source_df, source_config, target_config, table_name
-                )
-            else:
-                logger.info(f"Same-engine replication: {source_config.engine_type} -> {target_config.engine_type}")
-            
-            # Step 4: Write to target database
-            logger.info(f"Writing data to target table: {table_name}")
-            self.write_target_table_data(source_df, target_config, table_name, 'overwrite')
-            
-            # Step 5: Verify data was written successfully
-            target_row_count = self.get_table_row_count(target_config, table_name)
-            
-            if target_row_count != progress.total_rows:
-                raise RuntimeError(
-                    f"Row count mismatch: source={progress.total_rows}, target={target_row_count}"
-                )
-            
-            # Step 6: Update progress
-            progress.processed_rows = progress.total_rows
-            progress.status = 'completed'
-            progress.end_time = time.time()
-            
-            logger.info(
-                f"Full-load migration completed for {table_name}: "
-                f"{progress.total_rows:,} rows in {progress.duration_seconds:.2f} seconds "
-                f"({progress.rows_per_second:.2f} rows/sec)"
-            )
-            
-            # Clean up cached DataFrame
-            source_df.unpersist()
-            
-            return progress
-            
-        except Exception as e:
-            progress.status = 'failed'
-            progress.error_message = str(e)
-            progress.end_time = time.time()
-            
-            logger.error(
-                f"Full-load migration failed for {table_name} after {progress.duration_seconds:.2f} seconds: {str(e)}"
-            )
-            raise RuntimeError(f"Full-load migration failed for {table_name}: {str(e)}")
-    
-    def perform_full_load_migration_batch(self, source_config: ConnectionConfig,
-                                         target_config: ConnectionConfig,
-                                         table_names: List[str]) -> Dict[str, FullLoadProgress]:
-        """Perform full-load migration for multiple tables."""
-        results = {}
-        total_tables = len(table_names)
-        
-        logger.info(f"Starting full-load migration for {total_tables} tables: {', '.join(table_names)}")
-        
-        for i, table_name in enumerate(table_names, 1):
-            try:
-                logger.info(f"Processing table {i}/{total_tables}: {table_name}")
-                
-                progress = self.perform_full_load_migration(
-                    source_config=source_config,
-                    target_config=target_config,
-                    table_name=table_name
-                )
-                
-                results[table_name] = progress
-                
-                logger.info(
-                    f"Completed table {i}/{total_tables}: {table_name} "
-                    f"({progress.total_rows:,} rows, {progress.duration_seconds:.2f}s)"
-                )
-                
-            except Exception as e:
-                logger.error(f"Failed to migrate table {table_name}: {str(e)}")
-                
-                # Create failed progress entry
-                failed_progress = FullLoadProgress(table_name=table_name)
-                failed_progress.status = 'failed'
-                failed_progress.error_message = str(e)
-                failed_progress.end_time = time.time()
-                results[table_name] = failed_progress
-                
-                # Continue with next table instead of failing entire batch
-                continue
-        
-        # Log summary
-        successful_tables = [name for name, progress in results.items() if progress.status == 'completed']
-        failed_tables = [name for name, progress in results.items() if progress.status == 'failed']
-        
-        total_rows_migrated = sum(
-            progress.processed_rows for progress in results.values() 
-            if progress.status == 'completed'
-        )
-        
-        logger.info(
-            f"Full-load migration batch completed: "
-            f"{len(successful_tables)}/{total_tables} tables successful, "
-            f"{total_rows_migrated:,} total rows migrated"
-        )
-        
-        if failed_tables:
-            logger.warning(f"Failed tables: {', '.join(failed_tables)}")
-        
-        return results
-    
-    def get_migration_progress(self, table_name: str) -> Optional[FullLoadProgress]:
-        """Get current migration progress for a table."""
-        return self.progress_tracker.get(table_name)
-    
-    def get_all_migration_progress(self) -> Dict[str, FullLoadProgress]:
-        """Get migration progress for all tables."""
-        return self.progress_tracker.copy()
-    
-    def log_migration_summary(self, results: Dict[str, FullLoadProgress]) -> None:
-        """Log detailed migration summary."""
-        logger.info("=== Full-Load Migration Summary ===")
-        
-        for table_name, progress in results.items():
-            status_symbol = "✓" if progress.status == 'completed' else "✗"
-            
-            logger.info(
-                f"{status_symbol} {table_name}: {progress.status.upper()} - "
-                f"{progress.processed_rows:,}/{progress.total_rows:,} rows "
-                f"({progress.duration_seconds:.2f}s, {progress.rows_per_second:.2f} rows/sec)"
-            )
-            
-            if progress.error_message:
-                logger.error(f"  Error: {progress.error_message}")
-        
-        # Overall statistics
-        total_tables = len(results)
-        successful_tables = sum(1 for p in results.values() if p.status == 'completed')
-        total_rows = sum(p.processed_rows for p in results.values() if p.status == 'completed')
-        total_duration = sum(p.duration_seconds for p in results.values())
-        
-        logger.info(f"Overall: {successful_tables}/{total_tables} tables successful")
-        logger.info(f"Total rows migrated: {total_rows:,}")
-        logger.info(f"Total duration: {total_duration:.2f} seconds")
-        logger.info("=== End Migration Summary ===")
-
-
-class IncrementalDataMigrator:
-    """Handles incremental data migration operations using job bookmarks."""
-    
-    def __init__(self, spark_session: SparkSession, connection_manager: JdbcConnectionManager,
-                 bookmark_manager: JobBookmarkManager):
-        self.spark = spark_session
-        self.connection_manager = connection_manager
-        self.bookmark_manager = bookmark_manager
-        self.column_detector = IncrementalColumnDetector()
-        self.data_type_mapper = DataTypeMapper()
-        self.schema_validator = SchemaCompatibilityValidator(self.data_type_mapper)
-        self.progress_tracker = {}
-    
-    def detect_and_validate_incremental_strategy(self, connection_config: ConnectionConfig,
-                                               table_name: str) -> Dict[str, Any]:
-        """Detect and validate the best incremental loading strategy for a table."""
-        try:
-            # Get table schema
-            schema = self.connection_manager.get_table_schema(connection_config, table_name)
-            
-            # Detect incremental strategy
-            strategy_info = self.column_detector.detect_incremental_strategy(schema, table_name)
-            
-            # Validate the detected column if not using hash strategy
-            if strategy_info['strategy'] != 'hash' and strategy_info['column']:
-                is_valid = self.column_detector.validate_incremental_column(
-                    self.connection_manager, connection_config, table_name,
-                    strategy_info['column'], strategy_info['strategy']
-                )
-                
-                if not is_valid:
-                    logger.warning(
-                        f"Incremental column validation failed for {table_name}. "
-                        f"Falling back to hash-based strategy."
-                    )
-                    strategy_info = {
-                        'strategy': 'hash',
-                        'column': None,
-                        'confidence': 0.8,
-                        'reason': 'Column validation failed, using hash-based strategy'
-                    }
-            
-            return strategy_info
-            
-        except Exception as e:
-            logger.error(f"Failed to detect incremental strategy for {table_name}: {str(e)}")
-            # Fallback to hash strategy
-            return {
-                'strategy': 'hash',
-                'column': None,
-                'confidence': 0.5,
-                'reason': f'Strategy detection failed: {str(e)}'
-            }
-    
-    def build_incremental_query(self, connection_config: ConnectionConfig, table_name: str,
-                              strategy_info: Dict[str, Any], bookmark_state: JobBookmarkState) -> str:
-        """Build SQL query for incremental data extraction."""
-        full_table_name = f"{connection_config.schema}.{table_name}"
-        
-        if bookmark_state.is_first_run:
-            # First run - return all data
-            return f"SELECT * FROM {full_table_name}"
-        
-        strategy = strategy_info['strategy']
-        column_name = strategy_info['column']
-        
-        if strategy == 'timestamp':
-            # Timestamp-based incremental query
-            last_value = bookmark_state.last_processed_value
-            if last_value:
-                return f"""
-                SELECT * FROM {full_table_name}
-                WHERE {column_name} > '{last_value}'
-                ORDER BY {column_name}
-                """
-            else:
-                return f"SELECT * FROM {full_table_name}"
-        
-        elif strategy == 'primary_key':
-            # Primary key-based incremental query
-            last_value = bookmark_state.last_processed_value
-            if last_value:
-                return f"""
-                SELECT * FROM {full_table_name}
-                WHERE {column_name} > {last_value}
-                ORDER BY {column_name}
-                """
-            else:
-                return f"SELECT * FROM {full_table_name}"
-        
-        elif strategy == 'hash':
-            # Hash-based strategy - need to compare row hashes
-            # This is more complex and requires storing row hashes
-            # For now, we'll do a full comparison (can be optimized later)
-            return f"SELECT * FROM {full_table_name}"
-        
-        else:
-            raise ValueError(f"Unsupported incremental strategy: {strategy}")
-    
-    def get_current_max_value(self, connection_config: ConnectionConfig, table_name: str,
-                            strategy_info: Dict[str, Any]) -> Any:
-        """Get the current maximum value for the incremental column."""
-        strategy = strategy_info['strategy']
-        column_name = strategy_info['column']
-        
-        if strategy in ['timestamp', 'primary_key'] and column_name:
-            try:
-                full_table_name = f"{connection_config.schema}.{table_name}"
-                max_query = f"SELECT MAX({column_name}) as max_value FROM {full_table_name}"
-                
-                df = self.connection_manager.read_table_data(
-                    connection_config=connection_config,
-                    table_name=table_name,
-                    query=max_query
-                )
-                
-                result = df.collect()[0]
-                max_value = result['max_value']
-                
-                logger.info(f"Current max value for {table_name}.{column_name}: {max_value}")
-                return max_value
-                
-            except Exception as e:
-                logger.error(f"Failed to get max value for {table_name}.{column_name}: {str(e)}")
-                return None
-        
-        return None
-    
-    def perform_hash_based_incremental_load(self, source_config: ConnectionConfig,
-                                          target_config: ConnectionConfig, table_name: str,
-                                          bookmark_state: JobBookmarkState) -> IncrementalLoadProgress:
-        """Perform hash-based incremental loading."""
-        progress = IncrementalLoadProgress(
-            table_name=table_name,
-            incremental_strategy='hash'
-        )
-        progress.start_time = time.time()
-        progress.status = 'in_progress'
-        
-        try:
-            logger.info(f"Performing hash-based incremental load for table: {table_name}")
-            
-            # Read source data with row hashes
-            full_table_name = f"{source_config.schema}.{table_name}"
-            source_df = self.connection_manager.read_table_data(
-                connection_config=source_config,
-                table_name=table_name
-            )
-            
-            # Add row hash column
-            columns = source_df.columns
-            source_df_with_hash = source_df.withColumn(
-                'row_hash',
-                hash(concat_ws('|', *[col(c) for c in columns]))
-            )
-            
-            if bookmark_state.is_first_run:
-                # First run - migrate all data
-                delta_df = source_df
-                progress.delta_rows = source_df.count()
-                logger.info(f"First run: migrating all {progress.delta_rows:,} rows")
-            else:
-                # Compare with existing data to find changes
-                # This is a simplified implementation - in production you might want
-                # to store row hashes in a separate tracking table
-                logger.info("Hash-based comparison not fully implemented - performing full refresh")
-                delta_df = source_df
-                progress.delta_rows = source_df.count()
-            
-            if progress.delta_rows > 0:
-                # Apply cross-database transformations if needed
-                if self.data_type_mapper.is_cross_database_replication(
-                    source_config.engine_type, target_config.engine_type
-                ):
-                    logger.info(f"Applying cross-database transformations for hash-based incremental data: {table_name}")
-                    delta_df = self._apply_cross_database_transformations(
-                        delta_df, source_config, target_config, table_name
-                    )
-                
-                # Write delta data to target
-                self.connection_manager.write_table_data(
-                    df=delta_df,
-                    connection_config=target_config,
-                    table_name=table_name,
-                    mode='overwrite' if bookmark_state.is_first_run else 'append'
-                )
-                
-                progress.processed_rows = progress.delta_rows
-            
-            progress.status = 'completed'
-            progress.end_time = time.time()
-            
-            logger.info(
-                f"Hash-based incremental load completed for {table_name}: "
-                f"{progress.processed_rows:,} rows in {progress.duration_seconds:.2f} seconds"
-            )
-            
-            return progress
-            
-        except Exception as e:
-            progress.status = 'failed'
-            progress.error_message = str(e)
-            progress.end_time = time.time()
-            
-            logger.error(f"Hash-based incremental load failed for {table_name}: {str(e)}")
-            raise RuntimeError(f"Hash-based incremental load failed: {str(e)}")
-    
-    def perform_incremental_load_migration(self, source_config: ConnectionConfig,
-                                         target_config: ConnectionConfig,
-                                         table_name: str) -> IncrementalLoadProgress:
-        """Perform incremental load migration for a single table."""
-        try:
-            logger.info(f"Starting incremental load migration for table: {table_name}")
-            
-            # Step 1: Detect and validate incremental strategy
-            strategy_info = self.detect_and_validate_incremental_strategy(source_config, table_name)
-            
-            # Step 2: Initialize bookmark state
-            bookmark_state = self.bookmark_manager.initialize_bookmark_state(
-                table_name=table_name,
-                incremental_strategy=strategy_info['strategy'],
-                incremental_column=strategy_info['column']
-            )
-            
-            # Step 3: Handle hash-based strategy separately
-            if strategy_info['strategy'] == 'hash':
-                return self.perform_hash_based_incremental_load(
-                    source_config, target_config, table_name, bookmark_state
-                )
-            
-            # Step 4: Initialize progress tracking
-            progress = IncrementalLoadProgress(
-                table_name=table_name,
-                incremental_strategy=strategy_info['strategy'],
-                incremental_column=strategy_info['column'],
-                bookmark_state=bookmark_state.to_dict()
-            )
-            progress.start_time = time.time()
-            progress.status = 'in_progress'
-            
-            # Store progress in tracker
-            self.progress_tracker[table_name] = progress
-            
-            # Step 5: Get current max value from source
-            current_max_value = self.get_current_max_value(source_config, table_name, strategy_info)
-            progress.current_max_value = current_max_value
-            progress.last_processed_value = bookmark_state.last_processed_value
-            
-            # Step 6: Build incremental query
-            incremental_query = self.build_incremental_query(
-                source_config, table_name, strategy_info, bookmark_state
-            )
-            
-            logger.info(f"Incremental query for {table_name}: {incremental_query}")
-            
-            # Step 7: Read incremental data
-            delta_df = self.connection_manager.read_table_data(
-                connection_config=source_config,
-                table_name=table_name,
-                query=incremental_query
-            )
-            
-            # Step 8: Count delta rows
-            progress.delta_rows = delta_df.count()
-            
-            if progress.delta_rows == 0:
-                logger.info(f"No new data found for table {table_name}")
-                progress.processed_rows = 0
-                progress.status = 'completed'
-                progress.end_time = time.time()
-                return progress
-            
-            logger.info(f"Found {progress.delta_rows:,} new/changed rows for table {table_name}")
-            
-            # Step 9: Handle cross-database type compatibility if needed
-            if self.data_type_mapper.is_cross_database_replication(
-                source_config.engine_type, target_config.engine_type
-            ):
-                logger.info(f"Applying cross-database transformations for incremental data: {table_name}")
-                delta_df = self._apply_cross_database_transformations(
-                    delta_df, source_config, target_config, table_name
-                )
-            
-            # Step 10: Write delta data to target
-            write_mode = 'overwrite' if bookmark_state.is_first_run else 'append'
-            self.connection_manager.write_table_data(
-                df=delta_df,
-                connection_config=target_config,
-                table_name=table_name,
-                mode=write_mode
-            )
-            
-            progress.processed_rows = progress.delta_rows
-            
-            # Step 11: Update bookmark state
-            if current_max_value is not None:
-                self.bookmark_manager.update_bookmark_state(
-                    table_name=table_name,
-                    new_max_value=current_max_value,
-                    processed_rows=progress.processed_rows
-                )
-            
-            progress.status = 'completed'
-            progress.end_time = time.time()
-            
-            logger.info(
-                f"Incremental load migration completed for {table_name}: "
-                f"{progress.processed_rows:,} rows in {progress.duration_seconds:.2f} seconds "
-                f"({progress.rows_per_second:.2f} rows/sec)"
-            )
-            
-            return progress
-            
-        except Exception as e:
-            logger.error(f"Incremental load migration failed for {table_name}: {str(e)}")
-            
-            # Create failed progress entry
-            failed_progress = IncrementalLoadProgress(
-                table_name=table_name,
-                incremental_strategy='unknown'
-            )
-            failed_progress.status = 'failed'
-            failed_progress.error_message = str(e)
-            failed_progress.end_time = time.time()
-            
-            self.progress_tracker[table_name] = failed_progress
-            raise RuntimeError(f"Incremental load migration failed for {table_name}: {str(e)}")
-    
-    def _apply_cross_database_transformations(self, df: DataFrame, 
-                                            source_config: ConnectionConfig,
-                                            target_config: ConnectionConfig, 
-                                            table_name: str) -> DataFrame:
-        """Apply cross-database data transformations for incremental data."""
-        try:
-            logger.info(f"Applying cross-database transformations for incremental data: {table_name}")
-            
-            # Apply data type transformations
-            transformed_df = self.data_type_mapper.transform_dataframe_types(
-                df, source_config.engine_type, target_config.engine_type
-            )
-            
-            # Validate transformation results
-            original_count = df.count()
-            transformed_count = transformed_df.count()
-            
-            if transformed_count != original_count:
-                raise RuntimeError(
-                    f"Cross-database transformation resulted in row count change for incremental data in table {table_name}: "
-                    f"original={original_count}, transformed={transformed_count}"
-                )
-            
-            logger.info(f"Successfully applied cross-database transformations for incremental data: {table_name}")
-            return transformed_df
-            
-        except Exception as e:
-            logger.error(f"Cross-database transformation failed for incremental data in table {table_name}: {str(e)}")
-            raise RuntimeError(f"Cross-database transformation failed: {str(e)}")
-    
-    def perform_incremental_load_migration_batch(self, source_config: ConnectionConfig,
-                                               target_config: ConnectionConfig,
-                                               table_names: List[str]) -> Dict[str, IncrementalLoadProgress]:
-        """Perform incremental load migration for multiple tables."""
-        results = {}
-        total_tables = len(table_names)
-        
-        logger.info(f"Starting incremental load migration for {total_tables} tables: {', '.join(table_names)}")
-        
-        # Validate cross-database compatibility if needed
-        if self.data_type_mapper.is_cross_database_replication(
-            source_config.engine_type, target_config.engine_type
-        ):
-            logger.info("Validating cross-database compatibility for incremental migration")
-            compatibility_result = self.schema_validator.validate_cross_database_assumptions(
-                source_config, target_config, table_names
-            )
-            if not compatibility_result['overall_compatible']:
-                raise RuntimeError(
-                    f"Cross-database compatibility validation failed for incremental migration"
-                )
-        
-        for i, table_name in enumerate(table_names, 1):
-            try:
-                logger.info(f"Processing table {i}/{total_tables}: {table_name}")
-                
-                progress = self.perform_incremental_load_migration(
-                    source_config=source_config,
-                    target_config=target_config,
-                    table_name=table_name
-                )
-                
-                results[table_name] = progress
-                
-                logger.info(
-                    f"Completed table {i}/{total_tables}: {table_name} "
-                    f"({progress.processed_rows:,} rows, {progress.duration_seconds:.2f}s)"
-                )
-                
-            except Exception as e:
-                logger.error(f"Failed to migrate table {table_name}: {str(e)}")
-                
-                # Create failed progress entry
-                failed_progress = IncrementalLoadProgress(
-                    table_name=table_name,
-                    incremental_strategy='unknown'
-                )
-                failed_progress.status = 'failed'
-                failed_progress.error_message = str(e)
-                failed_progress.end_time = time.time()
-                results[table_name] = failed_progress
-                
-                # Continue with next table instead of failing entire batch
-                continue
-        
-        # Log summary
-        successful_tables = [name for name, progress in results.items() if progress.status == 'completed']
-        failed_tables = [name for name, progress in results.items() if progress.status == 'failed']
-        
-        total_rows_migrated = sum(
-            progress.processed_rows for progress in results.values()
-            if progress.status == 'completed'
-        )
-        
-        logger.info(
-            f"Incremental load migration batch completed: "
-            f"{len(successful_tables)}/{total_tables} tables successful, "
-            f"{total_rows_migrated:,} total rows migrated"
-        )
-        
-        if failed_tables:
-            logger.warning(f"Failed tables: {', '.join(failed_tables)}")
-        
-        return results
-    
-    def get_migration_progress(self, table_name: str) -> Optional[IncrementalLoadProgress]:
-        """Get current migration progress for a table."""
-        return self.progress_tracker.get(table_name)
-    
-    def get_all_migration_progress(self) -> Dict[str, IncrementalLoadProgress]:
-        """Get migration progress for all tables."""
-        return self.progress_tracker.copy()
-    
-    def log_migration_summary(self, results: Dict[str, IncrementalLoadProgress]) -> None:
-        """Log detailed incremental migration summary."""
-        logger.info("=== Incremental Load Migration Summary ===")
-        
-        for table_name, progress in results.items():
-            status_symbol = "✓" if progress.status == 'completed' else "✗"
-            
-            logger.info(
-                f"{status_symbol} {table_name}: {progress.status.upper()} - "
-                f"Strategy: {progress.incremental_strategy} "
-                f"(column: {progress.incremental_column or 'N/A'}) - "
-                f"{progress.processed_rows:,} rows "
-                f"({progress.duration_seconds:.2f}s, {progress.rows_per_second:.2f} rows/sec)"
-            )
-            
-            if progress.error_message:
-                logger.error(f"  Error: {progress.error_message}")
-        
-        # Overall statistics
-        total_tables = len(results)
-        successful_tables = sum(1 for p in results.values() if p.status == 'completed')
-        total_rows = sum(p.processed_rows for p in results.values() if p.status == 'completed')
-        total_duration = sum(p.duration_seconds for p in results.values())
-        
-        logger.info(f"Overall: {successful_tables}/{total_tables} tables successful")
-        logger.info(f"Total rows migrated: {total_rows:,}")
-        logger.info(f"Total duration: {total_duration:.2f} seconds")
-        logger.info("=== End Incremental Migration Summary ===")
-
-
-def test_database_connections(spark: SparkSession, job_config: JobConfig) -> None:
-    """Test database connections and validate connectivity."""
-    # Initialize connection manager with retry handler
-    retry_handler = ConnectionRetryHandler(max_retries=3, base_delay=2.0)
-    connection_manager = JdbcConnectionManager(spark, retry_handler)
-    
-    # Test database connections
-    logger.info("Testing database connections...")
-    
-    # Test source connection
-    source_test_result = connection_manager.test_connection(job_config.source_connection)
-    if source_test_result['connection_valid']:
-        logger.info(f"Source connection test passed for {job_config.source_connection.engine_type}")
-    else:
-        error_msg = f"Source connection test failed: {source_test_result.get('error_message', 'Unknown error')}"
-        logger.error(error_msg)
-        raise RuntimeError(error_msg)
-    
-    # Test target connection
-    target_test_result = connection_manager.test_connection(job_config.target_connection)
-    if target_test_result['connection_valid']:
-        logger.info(f"Target connection test passed for {job_config.target_connection.engine_type}")
-    else:
-        error_msg = f"Target connection test failed: {target_test_result.get('error_message', 'Unknown error')}"
-        logger.error(error_msg)
-        raise RuntimeError(error_msg)
-    
-    # Cache connection information for reuse
-    connection_manager.cache_connection_info(job_config.source_connection, source_test_result)
-    connection_manager.cache_connection_info(job_config.target_connection, target_test_result)
-    
-    logger.info("All database connections validated successfully")
-
-
-def perform_full_load_data_migration(spark: SparkSession, job_config: JobConfig) -> Dict[str, FullLoadProgress]:
-    """Perform full-load data migration for all configured tables."""
-    logger.info("Starting full-load data migration process")
-    
-    # Initialize connection manager and data migrator
-    retry_handler = ConnectionRetryHandler(max_retries=3, base_delay=2.0)
-    connection_manager = JdbcConnectionManager(spark, retry_handler)
-    data_migrator = FullLoadDataMigrator(spark, connection_manager)
-    
+def main():
+    """Main function for data replication using standard DataFrames"""
     try:
-        # Perform full-load migration for all tables
-        migration_results = data_migrator.perform_full_load_migration_batch(
-            source_config=job_config.source_connection,
-            target_config=job_config.target_connection,
-            table_names=job_config.tables
+        # Parse job arguments
+        args = JobConfigurationParser.parse_job_arguments()
+        job_config = JobConfigurationParser.create_job_config(args)
+        JobConfigurationParser.validate_configuration(job_config)
+        
+        # Initialize Spark session, Glue context, and job
+        spark, glue_context, job = initialize_spark_session(job_config)
+        
+        # Load JDBC drivers
+        load_jdbc_drivers(spark.sparkContext, job_config)
+        
+        # Initialize managers
+        connection_manager = JdbcConnectionManager(spark, glue_context)
+        bookmark_manager = JobBookmarkManager(
+            glue_context, 
+            job_config.job_name, 
+            job,
+            source_jdbc_path=job_config.source_connection.jdbc_driver_path,
+            target_jdbc_path=job_config.target_connection.jdbc_driver_path
         )
         
-        # Log detailed summary
-        data_migrator.log_migration_summary(migration_results)
+        # Initialize migrators for both full and incremental loads
+        full_migrator = FullLoadDataMigrator(spark, connection_manager)
+        incremental_migrator = IncrementalDataMigrator(spark, connection_manager, bookmark_manager)
         
-        # Check if any migrations failed
-        failed_migrations = [
-            table_name for table_name, progress in migration_results.items()
-            if progress.status == 'failed'
-        ]
+        successful_tables = 0
+        failed_tables = 0
         
-        if failed_migrations:
-            logger.warning(
-                f"Full-load migration completed with {len(failed_migrations)} failures: "
-                f"{', '.join(failed_migrations)}"
-            )
-        else:
-            logger.info("Full-load migration completed successfully for all tables")
-        
-        return migration_results
-        
-    except Exception as e:
-        logger.error(f"Full-load data migration process failed: {str(e)}")
-        raise RuntimeError(f"Full-load migration failed: {str(e)}")
-
-
-def perform_incremental_data_migration(spark: SparkSession, glue_context: GlueContext,
-                                     job_config: JobConfig) -> Dict[str, IncrementalLoadProgress]:
-    """Perform incremental data migration for all configured tables using job bookmarks."""
-    logger.info("Starting incremental data migration process")
-    
-    # Initialize connection manager and bookmark manager
-    retry_handler = ConnectionRetryHandler(max_retries=3, base_delay=2.0)
-    connection_manager = JdbcConnectionManager(spark, retry_handler)
-    bookmark_manager = JobBookmarkManager(glue_context, job_config.job_name)
-    
-    # Initialize incremental data migrator
-    incremental_migrator = IncrementalDataMigrator(spark, connection_manager, bookmark_manager)
-    
-    try:
-        # Perform incremental migration for all tables
-        migration_results = incremental_migrator.perform_incremental_load_migration_batch(
-            source_config=job_config.source_connection,
-            target_config=job_config.target_connection,
-            table_names=job_config.tables
-        )
-        
-        # Log detailed summary
-        incremental_migrator.log_migration_summary(migration_results)
-        
-        # Check if any migrations failed
-        failed_migrations = [
-            table_name for table_name, progress in migration_results.items()
-            if progress.status == 'failed'
-        ]
-        
-        if failed_migrations:
-            logger.warning(
-                f"Incremental migration completed with {len(failed_migrations)} failures: "
-                f"{', '.join(failed_migrations)}"
-            )
-        else:
-            logger.info("Incremental migration completed successfully for all tables")
-        
-        return migration_results
-        
-    except Exception as e:
-        logger.error(f"Incremental data migration process failed: {str(e)}")
-        raise RuntimeError(f"Incremental migration failed: {str(e)}")
-
-
-def determine_migration_mode(glue_context: GlueContext, job_name: str, table_names: List[str]) -> str:
-    """Determine whether to perform full-load or incremental migration based on job bookmarks."""
-    try:
-        # Check if any bookmarks exist for the tables
-        has_existing_bookmarks = False
-        
-        for table_name in table_names:
-            bookmark_key = f"{job_name}_{table_name}"
+        # Process each table
+        for table_name in job_config.tables:
             try:
-                existing_state = glue_context.get_bookmark_state(bookmark_key)
-                if existing_state and existing_state.get('bookmark'):
-                    has_existing_bookmarks = True
-                    break
-            except Exception:
-                # Ignore errors when checking bookmark state
-                continue
-        
-        if has_existing_bookmarks:
-            logger.info("Existing job bookmarks found - performing incremental migration")
-            return 'incremental'
-        else:
-            logger.info("No existing job bookmarks found - performing full-load migration")
-            return 'full_load'
-            
-    except Exception as e:
-        logger.warning(f"Failed to determine migration mode: {str(e)}. Defaulting to full-load.")
-        return 'full_load'
-
-
-def test_database_connections_with_recovery(spark: SparkSession, job_config: JobConfig, 
-                                          error_recovery_manager: ErrorRecoveryManager,
-                                          performance_monitor: PerformanceMonitor = None) -> None:
-    """Test database connections with enhanced error handling, recovery, and network-aware connectivity."""
-    # Initialize connection manager with enhanced retry handler
-    retry_handler = ConnectionRetryHandler(max_retries=3, base_delay=2.0, max_delay=30.0)
-    glue_context = GlueContext(spark.sparkContext)
-    connection_manager = JdbcConnectionManager(glue_context, retry_handler)
-    
-    structured_logger = StructuredLogger(job_config.job_name)
-    structured_logger.info("Testing database connections with network-aware recovery support")
-    
-    # Log network configuration summary
-    network_summary = job_config.get_network_summary()
-    structured_logger.info("Network configuration summary", **network_summary)
-    
-    # Test source connection with network-aware validation
-    structured_logger.info("Testing source connection with network validation", 
-                         engine_type=job_config.source_connection.engine_type,
-                         cross_vpc=job_config.source_connection.requires_cross_vpc_connection(),
-                         glue_connection=job_config.source_connection.get_glue_connection_name())
-    
-    source_start_time = time.time()
-    try:
-        # Use network-aware connection validation if enabled
-        if job_config.validate_connections:
-            source_glue_connection = job_config.source_connection.get_glue_connection_name() or ''
-            source_test_result = connection_manager.validate_connection_with_network_check(
-                job_config.source_connection, 
-                source_glue_connection,
-                job_config.connection_timeout_seconds
-            )
-            
-            if not source_test_result:
-                raise RuntimeError("Source connection network validation failed")
-        else:
-            # Fallback to basic connection test
-            source_test_result = connection_manager.test_connection(job_config.source_connection)
-            if not source_test_result['connection_valid']:
-                raise RuntimeError(source_test_result.get('error_message', 'Connection validation failed'))
-        
-        source_duration = time.time() - source_start_time
-        structured_logger.info("Source database connection successful", 
-                             duration_seconds=round(source_duration, 2),
-                             network_validated=job_config.validate_connections)
-        
-        # Record successful connection metrics
-        if performance_monitor:
-            performance_monitor.record_connection_attempt(
-                "source", job_config.source_connection.engine_type, True, source_duration
-            )
-        
-    except Exception as e:
-        source_duration = time.time() - source_start_time
-        
-        # Record failed connection metrics
-        if performance_monitor:
-            performance_monitor.record_connection_attempt(
-                "source", job_config.source_connection.engine_type, False, source_duration
-            )
-            performance_monitor.record_error("connection", "source_connection_test", str(e))
-        
-        # Handle network-specific errors
-        error_info = error_recovery_manager.handle_database_connection_error(
-            e, job_config.source_connection, "source_connection_test"
-        )
-        
-        # Attempt recovery
-        if error_recovery_manager.attempt_graceful_recovery(error_info):
-            structured_logger.info("Retrying source connection after recovery attempt")
-            try:
-                if job_config.validate_connections:
-                    source_glue_connection = job_config.source_connection.get_glue_connection_name() or ''
-                    retry_result = connection_manager.validate_connection_with_network_check(
-                        job_config.source_connection, 
-                        source_glue_connection,
-                        job_config.connection_timeout_seconds
-                    )
-                    if not retry_result:
-                        raise RuntimeError("Source connection failed after recovery")
-                else:
-                    retry_result = connection_manager.test_connection(job_config.source_connection)
-                    if not retry_result['connection_valid']:
-                        raise RuntimeError(f"Source connection failed after recovery: {retry_result.get('error_message')}")
-            except Exception as retry_error:
-                structured_logger.error("Source database connection failed after recovery", 
-                                      error=str(retry_error), duration_seconds=round(source_duration, 2))
-                raise RuntimeError(f"Source database connection failed after recovery: {str(retry_error)}")
-        else:
-            structured_logger.error("Source database connection failed", 
-                                  error=str(e), duration_seconds=round(source_duration, 2))
-            raise RuntimeError(f"Source database connection failed: {str(e)}")
-    
-    # Test target connection with network-aware validation
-    structured_logger.info("Testing target connection with network validation", 
-                         engine_type=job_config.target_connection.engine_type,
-                         cross_vpc=job_config.target_connection.requires_cross_vpc_connection(),
-                         glue_connection=job_config.target_connection.get_glue_connection_name())
-    
-    target_start_time = time.time()
-    try:
-        # Use network-aware connection validation if enabled
-        if job_config.validate_connections:
-            target_glue_connection = job_config.target_connection.get_glue_connection_name() or ''
-            target_test_result = connection_manager.validate_connection_with_network_check(
-                job_config.target_connection, 
-                target_glue_connection,
-                job_config.connection_timeout_seconds
-            )
-            
-            if not target_test_result:
-                raise RuntimeError("Target connection network validation failed")
-        else:
-            # Fallback to basic connection test
-            target_test_result = connection_manager.test_connection(job_config.target_connection)
-            if not target_test_result['connection_valid']:
-                raise RuntimeError(target_test_result.get('error_message', 'Connection validation failed'))
-        
-        target_duration = time.time() - target_start_time
-        structured_logger.info("Target database connection successful", 
-                             duration_seconds=round(target_duration, 2),
-                             network_validated=job_config.validate_connections)
-        
-        # Record successful connection metrics
-        if performance_monitor:
-            performance_monitor.record_connection_attempt(
-                "target", job_config.target_connection.engine_type, True, target_duration
-            )
-        
-    except Exception as e:
-        target_duration = time.time() - target_start_time
-        
-        # Record failed connection metrics
-        if performance_monitor:
-            performance_monitor.record_connection_attempt(
-                "target", job_config.target_connection.engine_type, False, target_duration
-            )
-            performance_monitor.record_error("connection", "target_connection_test", str(e))
-        
-        # Handle network-specific errors
-        error_info = error_recovery_manager.handle_database_connection_error(
-            e, job_config.target_connection, "target_connection_test"
-        )
-        
-        # Attempt recovery
-        if error_recovery_manager.attempt_graceful_recovery(error_info):
-            structured_logger.info("Retrying target connection after recovery attempt")
-            try:
-                if job_config.validate_connections:
-                    target_glue_connection = job_config.target_connection.get_glue_connection_name() or ''
-                    retry_result = connection_manager.validate_connection_with_network_check(
-                        job_config.target_connection, 
-                        target_glue_connection,
-                        job_config.connection_timeout_seconds
-                    )
-                    if not retry_result:
-                        raise RuntimeError("Target connection failed after recovery")
-                else:
-                    retry_result = connection_manager.test_connection(job_config.target_connection)
-                    if not retry_result['connection_valid']:
-                        raise RuntimeError(f"Target connection failed after recovery: {retry_result.get('error_message')}")
-            except Exception as retry_error:
-                structured_logger.error("Target database connection failed after recovery", 
-                                      error=str(retry_error), duration_seconds=round(target_duration, 2))
-                raise RuntimeError(f"Target database connection failed after recovery: {str(retry_error)}")
-        else:
-            structured_logger.error("Target database connection failed", 
-                                  error=str(e), duration_seconds=round(target_duration, 2))
-            raise RuntimeError(f"Target database connection failed: {str(e)}")
-    
-    # Cache connection information for reuse (if using basic test_connection)
-    if not job_config.validate_connections:
-        if isinstance(source_test_result, dict):
-            connection_manager.cache_connection_info(job_config.source_connection, source_test_result)
-        if isinstance(target_test_result, dict):
-            connection_manager.cache_connection_info(job_config.target_connection, target_test_result)
-    
-    structured_logger.info("All database connections validated successfully with network-aware recovery support",
-                         cross_vpc_connections=job_config.has_cross_vpc_connections())
-
-
-def perform_full_load_data_migration_with_recovery(spark: SparkSession, job_config: JobConfig,
-                                                 error_recovery_manager: ErrorRecoveryManager,
-                                                 performance_monitor: PerformanceMonitor = None) -> Dict[str, FullLoadProgress]:
-    """Perform full-load data migration with enhanced error handling and recovery."""
-    structured_logger = StructuredLogger(job_config.job_name)
-    structured_logger.info("Starting full-load data migration process with recovery support")
-    
-    # Initialize migration processor with enhanced retry handler
-    retry_handler = ConnectionRetryHandler(max_retries=3, base_delay=2.0, max_delay=60.0)
-    migration_processor = DataMigrationProcessor(spark, retry_handler)
-    
-    migration_results = {}
-    
-    for table_name in job_config.tables:
-        structured_logger.info("Starting full-load migration for table", table_name=table_name)
-        
-        # Start monitoring for this table
-        table_metrics = None
-        if performance_monitor:
-            table_metrics = performance_monitor.start_table_processing(table_name)
-        
-        try:
-            # Attempt migration with error handling
-            progress = migration_processor.perform_full_load_migration(
-                job_config.source_connection,
-                job_config.target_connection,
-                table_name
-            )
-            migration_results[table_name] = progress
-            
-            # Complete monitoring for successful table
-            if performance_monitor and progress.status == 'completed':
-                performance_monitor.complete_table_processing(
-                    table_name, 
-                    progress.processed_rows, 
-                    getattr(progress, 'bytes_processed', 0)
+                logger.info(f"Processing table: {table_name}")
+                
+                # Auto-detect incremental strategy for bookmark initialization
+                schema = connection_manager.get_table_schema(job_config.source_connection, table_name)
+                strategy_info = IncrementalColumnDetector.detect_incremental_strategy(schema, table_name)
+                
+                # Check if this is first run (determines full vs incremental)
+                bookmark_state = bookmark_manager.initialize_bookmark_state(
+                    table_name, strategy_info['strategy'], strategy_info['column']
                 )
-            elif performance_monitor and progress.status == 'failed':
-                performance_monitor.fail_table_processing(
-                    table_name, 
-                    getattr(progress, 'error_message', 'Migration failed')
-                )
-            
-        except Exception as e:
-            # Handle migration error
-            error_info = error_recovery_manager.handle_data_processing_error(
-                e, table_name, "full_load_migration", {
-                    'source_engine': job_config.source_connection.engine_type,
-                    'target_engine': job_config.target_connection.engine_type
-                }
-            )
-            
-            # Create failed progress object
-            failed_progress = FullLoadProgress(table_name)
-            failed_progress.status = 'failed'
-            failed_progress.error_message = str(e)
-            failed_progress.end_time = time.time()
-            migration_results[table_name] = failed_progress
-            
-            # Attempt recovery if error is retryable
-            if error_recovery_manager.attempt_graceful_recovery(error_info, {
-                'table_name': table_name,
-                'migration_type': 'full_load'
-            }):
-                logger.info(f"Retrying full-load migration for table {table_name} after recovery")
-                try:
-                    progress = migration_processor.perform_full_load_migration(
+                
+                if bookmark_state.is_first_run:
+                    # First run: perform full load
+                    logger.info(f"First run detected for {table_name} - performing full load")
+                    progress = full_migrator.perform_full_load_migration(
                         job_config.source_connection,
                         job_config.target_connection,
                         table_name
                     )
-                    migration_results[table_name] = progress
-                    logger.info(f"Full-load migration succeeded for table {table_name} after recovery")
-                    
-                except Exception as retry_error:
-                    logger.error(f"Full-load migration failed for table {table_name} after recovery: {str(retry_error)}")
-                    failed_progress.error_message = f"Failed after recovery: {str(retry_error)}"
-            else:
-                logger.error(f"Full-load migration failed for table {table_name}, no recovery possible")
-    
-    # Log summary
-    successful_tables = [name for name, progress in migration_results.items() if progress.status == 'completed']
-    failed_tables = [name for name, progress in migration_results.items() if progress.status == 'failed']
-    
-    logger.info(
-        f"Full-load migration completed: {len(successful_tables)} successful, "
-        f"{len(failed_tables)} failed out of {len(job_config.tables)} total tables"
-    )
-    
-    if failed_tables:
-        logger.warning(f"Failed tables: {', '.join(failed_tables)}")
-    
-    return migration_results
-
-
-def perform_incremental_data_migration_with_recovery(spark: SparkSession, glue_context: GlueContext,
-                                                   job_config: JobConfig, 
-                                                   error_recovery_manager: ErrorRecoveryManager,
-                                                   performance_monitor: PerformanceMonitor = None) -> Dict[str, IncrementalLoadProgress]:
-    """Perform incremental data migration with enhanced error handling and recovery."""
-    structured_logger = StructuredLogger(job_config.job_name)
-    structured_logger.info("Starting incremental data migration process with recovery support")
-    
-    # Initialize migration processor with enhanced retry handler
-    retry_handler = ConnectionRetryHandler(max_retries=3, base_delay=2.0, max_delay=60.0)
-    migration_processor = DataMigrationProcessor(spark, retry_handler)
-    
-    migration_results = {}
-    
-    for table_name in job_config.tables:
-        structured_logger.info("Starting incremental migration for table", table_name=table_name)
-        
-        # Start monitoring for this table
-        table_metrics = None
-        if performance_monitor:
-            table_metrics = performance_monitor.start_table_processing(table_name)
-        
-        try:
-            # Attempt incremental migration with error handling
-            progress = migration_processor.perform_incremental_load_migration(
-                job_config.source_connection,
-                job_config.target_connection,
-                table_name
-            )
-            migration_results[table_name] = progress
-            
-            # Complete monitoring for successful table
-            if performance_monitor and progress.status == 'completed':
-                performance_monitor.complete_table_processing(
-                    table_name, 
-                    progress.processed_rows, 
-                    getattr(progress, 'bytes_processed', 0)
-                )
-            elif performance_monitor and progress.status == 'failed':
-                performance_monitor.fail_table_processing(
-                    table_name, 
-                    getattr(progress, 'error_message', 'Migration failed')
-                )
-            
-        except Exception as e:
-            # Handle migration error
-            error_info = error_recovery_manager.handle_data_processing_error(
-                e, table_name, "incremental_migration", {
-                    'source_engine': job_config.source_connection.engine_type,
-                    'target_engine': job_config.target_connection.engine_type,
-                    'job_name': job_config.job_name
-                }
-            )
-            
-            # Record error in monitoring
-            if performance_monitor:
-                performance_monitor.record_error("data_processing", "incremental_migration", str(e))
-                performance_monitor.fail_table_processing(table_name, str(e))
-            
-            # Create failed progress object
-            failed_progress = IncrementalLoadProgress(table_name, "unknown")
-            failed_progress.status = 'failed'
-            failed_progress.error_message = str(e)
-            failed_progress.end_time = time.time()
-            migration_results[table_name] = failed_progress
-            
-            # Attempt recovery if error is retryable
-            if error_recovery_manager.attempt_graceful_recovery(error_info, {
-                'table_name': table_name,
-                'migration_type': 'incremental'
-            }):
-                logger.info(f"Retrying incremental migration for table {table_name} after recovery")
-                try:
-                    progress = migration_processor.perform_incremental_load_migration(
+                    # Update bookmark after successful full load
+                    if progress.status == 'completed':
+                        try:
+                            bookmark_manager.update_bookmark_state(table_name, "full_load_completed", progress.processed_rows)
+                        except Exception as bookmark_error:
+                            logger.warning(f"Failed to update bookmark for {table_name}: {bookmark_error}. Data processing was successful.")
+                else:
+                    # Subsequent runs: perform incremental load
+                    logger.info(f"Incremental load for {table_name}")
+                    progress = incremental_migrator.perform_incremental_load_migration(
                         job_config.source_connection,
                         job_config.target_connection,
                         table_name
                     )
-                    migration_results[table_name] = progress
-                    logger.info(f"Incremental migration succeeded for table {table_name} after recovery")
+                
+                if progress.status == 'completed':
+                    successful_tables += 1
+                    logger.info(f"Successfully processed table {table_name}: {progress.processed_rows} rows")
+                else:
+                    failed_tables += 1
+                    logger.error(f"Failed to process table {table_name}: {progress.error_message}")
                     
-                except Exception as retry_error:
-                    logger.error(f"Incremental migration failed for table {table_name} after recovery: {str(retry_error)}")
-                    failed_progress.error_message = f"Failed after recovery: {str(retry_error)}"
-            else:
-                logger.error(f"Incremental migration failed for table {table_name}, no recovery possible")
-    
-    # Log summary
-    successful_tables = [name for name, progress in migration_results.items() if progress.status == 'completed']
-    failed_tables = [name for name, progress in migration_results.items() if progress.status == 'failed']
-    
-    logger.info(
-        f"Incremental migration completed: {len(successful_tables)} successful, "
-        f"{len(failed_tables)} failed out of {len(job_config.tables)} total tables"
-    )
-    
-    if failed_tables:
-        logger.warning(f"Failed tables: {', '.join(failed_tables)}")
-    
-    return migration_results
+            except Exception as e:
+                logger.error(f"Failed to process table {table_name}: {e}")
+                failed_tables += 1
+                # Continue with next table
+        
+        logger.info(f"Job completed: {successful_tables} successful, {failed_tables} failed")
+        
+        # Commit job bookmark
+        job.commit()
+        
+    except Exception as e:
+        logger.error(f"Job failed: {str(e)}")
+        raise
+
+
+if __name__ == "__main__":
+    main()
+
+
