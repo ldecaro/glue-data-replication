@@ -1,19 +1,21 @@
 # AWS Glue Data Replication Solution
 
-A comprehensive AWS Glue-based data replication solution that supports full-load and incremental data migration across multiple database types with cross-VPC network connectivity.
+A comprehensive AWS Glue-based data replication solution that supports full-load and incremental data migration across multiple database types with cross-VPC network connectivity. Built with a modular architecture for maintainability and extensibility.
 
 ## Features
 
 - **Multi-Database Support**: Oracle, SQL Server, PostgreSQL, DB2
 - **Cross-VPC Connectivity**: Secure database access across different VPCs
-- **Incremental Processing**: Uses Glue job bookmarks for efficient data synchronization
+- **Incremental Processing**: Uses Glue job bookmarks for efficient data synchronization with automatic incremental column detection ([details](docs/BOOKMARK_DETAILS.md))
 - **Comprehensive Monitoring**: CloudWatch metrics, dashboards, and alarms
 - **Network Security**: VPC endpoints for private subnet access to AWS services
 - **Error Handling**: Robust error recovery and retry mechanisms
 - **Performance Optimization**: Configurable worker types and parallel processing
+- **Modular Architecture**: Clean separation of concerns with focused, maintainable modules
 
 ## Architecture
 
+### High-Level Architecture
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
 │   Source DB     │    │   AWS Glue Job   │    │   Target DB     │
@@ -28,12 +30,39 @@ A comprehensive AWS Glue-based data replication solution that supports full-load
                        └──────────────────┘
 ```
 
+### Modular Code Architecture
+```
+src/glue_job/
+├── main.py                    # Entry point and orchestration
+├── config/                    # Configuration management
+│   ├── job_config.py          # Job configuration dataclasses
+│   ├── database_engines.py    # Database engine management
+│   └── parsers.py             # Configuration parsing
+├── database/                  # Database operations
+│   ├── connection_manager.py  # Connection management
+│   ├── schema_validator.py    # Schema validation
+│   ├── migration.py           # Data migration logic
+│   └── incremental_detector.py # Incremental processing
+├── storage/                   # Storage and bookmarks
+│   ├── s3_bookmark.py         # S3 bookmark operations
+│   └── bookmark_manager.py    # Bookmark lifecycle
+├── monitoring/                # Observability
+│   ├── logging.py             # Structured logging
+│   ├── metrics.py             # CloudWatch metrics
+│   └── progress.py            # Progress tracking
+├── network/                   # Network and error handling
+│   ├── error_handler.py       # Error classification
+│   └── retry_handler.py       # Retry mechanisms
+└── utils/                     # Utilities
+    └── s3_utils.py            # S3 operations
+```
+
 ## Quick Start
 
 ### Prerequisites
 
 - AWS CLI configured with appropriate permissions
-- S3 bucket for hosting templates and scripts
+- S3 bucket for hosting templates and scripts (will be created automatically if needed)
 - Database connection details
 - VPC configuration (if using cross-VPC setup)
 
@@ -44,17 +73,20 @@ git clone <repository-url>
 cd glue-data-replication
 ```
 
-### 2. Upload Assets to S3
+### 2. Deploy with Automatic Asset Upload
 
 ```bash
-# Upload CloudFormation template (required due to size)
-aws s3 cp cloudformation/glue-data-replication.yaml s3://[your-bucket-name]/cloudformation/glue-data-replication.yaml
+# Single command deployment (uploads assets automatically)
+./deploy.sh -s my-glue-replication -b [your-bucket-name] -p my-parameters.json
+```
 
-# Upload Glue script
-aws s3 cp scripts/glue_data_replication.py s3://[your-bucket-name]/scripts/glue_data_replication.py
+**Or manually upload assets first (optional):**
+```bash
+# Upload modular Glue job structure
+./infrastructure/scripts/upload-modular-assets.sh [your-bucket-name] --include-drivers
 
-# Upload JDBC drivers (example for SQL Server)
-aws s3 cp jdbc-drivers/sqlserver/mssql-jdbc-12.2.0.jre11.jar s3://[your-bucket-name]/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar
+# Then deploy without upload
+./deploy.sh -s my-glue-replication -b [your-bucket-name] -p my-parameters.json --skip-upload
 ```
 
 ### 3. Configure Parameters
@@ -66,14 +98,12 @@ cp examples/sqlserver-to-sqlserver-parameters.json my-parameters.json
 # Edit my-parameters.json with your specific values
 ```
 
+**Note**: The `GlueJobScriptS3Path` parameter will be automatically updated by the deploy script to point to the correct S3 location.
+
 ### 4. Deploy Stack
 
 ```bash
-aws cloudformation create-stack \
-  --stack-name my-glue-replication \
-  --template-url https://s3.amazonaws.com/[your-bucket-name]/cloudformation/glue-data-replication.yaml \
-  --parameters file://my-parameters.json \
-  --capabilities CAPABILITY_NAMED_IAM
+./deploy.sh -s my-glue-replication -b [your-bucket-name] -p my-parameters.json
 ```
 
 ### 5. Run Job
@@ -84,9 +114,157 @@ aws glue start-job-run --job-name my-job-name
 
 ## Documentation
 
+### Core Documentation
 - **[Deployment Guide](DEPLOYMENT_GUIDE.md)**: Complete deployment instructions
-- **[VPC Endpoint Fix](GLUE_VPC_ENDPOINT_FIX.md)**: Troubleshooting private subnet connectivity
-- **[Mock Connection Fix](GLUE_JOB_MOCK_CONNECTION_FIX.md)**: Resolving connection validation issues
+- **[Quick Start Guide](QUICK_START_GUIDE.md)**: Step-by-step setup walkthrough
+- **[Architecture Guide](docs/ARCHITECTURE.md)**: Technical architecture and design decisions
+
+### Configuration and Setup
+- **[Parameter Reference](docs/PARAMETER_REFERENCE.md)**: Complete parameter documentation
+- **[Database Configuration Guide](docs/DATABASE_CONFIGURATION_GUIDE.md)**: Database-specific setup
+- **[Network Configuration Guide](docs/NETWORK_CONFIGURATION_GUIDE.md)**: VPC and networking setup
+- **[Bookmark Details](docs/BOOKMARK_DETAILS.md)**: Job bookmark system and incremental loading strategies
+
+### Operations and Monitoring
+- **[Observability Guide](docs/OBSERVABILITY_GUIDE.md)**: Monitoring and alerting setup
+- **[Testing Guide](docs/TESTING_GUIDE.md)**: Testing procedures and validation
+- **[DevOps Deployment Guide](docs/DEVOPS_DEPLOYMENT_GUIDE.md)**: CI/CD and automation
+
+### API Documentation
+- **[Module API Reference](#module-api-reference)**: Public interfaces for all modules
+
+## Project Structure
+
+```
+aws-glue-data-replication/
+├── src/
+│   └── glue_job/                           # Modular Glue job components
+│       ├── main.py                         # Entry point
+│       ├── config/                         # Configuration management
+│       ├── database/                       # Database operations
+│       ├── storage/                        # Storage and bookmarks
+│       ├── monitoring/                     # Observability
+│       ├── network/                        # Network and error handling
+│       └── utils/                          # Utilities
+├── infrastructure/
+│   ├── cloudformation/                     # CloudFormation templates
+│   ├── scripts/                            # Deployment scripts
+│   └── iam/                                # IAM policies
+├── tests/                                  # Test suites
+├── docs/                                   # Documentation
+├── examples/                               # Configuration examples
+└── config/                                 # Static configuration files
+```
+
+## Module API Reference
+
+### Configuration Modules (`glue_job.config`)
+
+#### JobConfig
+```python
+from glue_job.config.job_config import JobConfig, ConnectionConfig, NetworkConfig
+
+# Core configuration dataclasses
+config = JobConfig(
+    job_name="my-job",
+    source_config=ConnectionConfig(...),
+    target_config=ConnectionConfig(...)
+)
+```
+
+#### DatabaseEngineManager
+```python
+from glue_job.config.database_engines import DatabaseEngineManager
+
+engine_manager = DatabaseEngineManager()
+driver_class = engine_manager.get_driver_class("sqlserver")
+connection_url = engine_manager.build_connection_url(config)
+```
+
+### Database Modules (`glue_job.database`)
+
+#### ConnectionManager
+```python
+from glue_job.database.connection_manager import JdbcConnectionManager
+
+conn_manager = JdbcConnectionManager(glue_context)
+df = conn_manager.create_connection(connection_config)
+```
+
+#### DataMigrator
+```python
+from glue_job.database.migration import FullLoadDataMigrator, IncrementalDataMigrator
+
+# Full load migration
+full_migrator = FullLoadDataMigrator(glue_context)
+metrics = full_migrator.execute_full_load(source_df, target_config)
+
+# Incremental migration
+incr_migrator = IncrementalDataMigrator(glue_context)
+metrics = incr_migrator.execute_incremental_load(source_df, target_config, bookmark)
+```
+
+### Storage Modules (`glue_job.storage`)
+
+#### BookmarkManager
+```python
+from glue_job.storage.bookmark_manager import JobBookmarkManager
+
+bookmark_manager = JobBookmarkManager(s3_config)
+state = bookmark_manager.get_bookmark_state("table_name")
+bookmark_manager.update_bookmark_state("table_name", new_state)
+```
+
+#### S3BookmarkStorage
+```python
+from glue_job.storage.s3_bookmark import S3BookmarkStorage
+
+s3_storage = S3BookmarkStorage(s3_config)
+bookmark = s3_storage.read_bookmark("table_name")
+s3_storage.write_bookmark(bookmark_state)
+```
+
+### Monitoring Modules (`glue_job.monitoring`)
+
+#### StructuredLogger
+```python
+from glue_job.monitoring.logging import StructuredLogger
+
+logger = StructuredLogger("my-job")
+logger.info("Processing started", extra={"table": "users", "rows": 1000})
+```
+
+#### MetricsPublisher
+```python
+from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
+
+metrics = CloudWatchMetricsPublisher()
+metrics.publish_metric("RowsProcessed", 1000, "Count")
+```
+
+### Network Modules (`glue_job.network`)
+
+#### ErrorHandler
+```python
+from glue_job.network.error_handler import NetworkErrorHandler
+from glue_job.network.retry_handler import ConnectionRetryHandler
+
+error_handler = NetworkErrorHandler()
+retry_handler = ConnectionRetryHandler(max_retries=3)
+```
+
+### Utility Modules (`glue_job.utils`)
+
+#### S3Utilities
+```python
+from glue_job.utils.s3_utils import S3PathUtilities, EnhancedS3ParallelOperations
+
+s3_utils = S3PathUtilities()
+valid_path = s3_utils.validate_s3_path("s3://bucket/key")
+
+s3_ops = EnhancedS3ParallelOperations()
+result = s3_ops.parallel_upload(files, bucket)
+```
 
 ## Supported Databases
 

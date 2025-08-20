@@ -51,7 +51,7 @@ These parameters must be provided for every deployment:
 |-----------|------|-------------|--------|---------|
 | `SourceJdbcDriverS3Path` | String | S3 path to source database JDBC driver JAR file | `s3://bucket/path/driver.jar` | `s3://bucket/drivers/ojdbc11.jar` |
 | `TargetJdbcDriverS3Path` | String | S3 path to target database JDBC driver JAR file | `s3://bucket/path/driver.jar` | `s3://bucket/drivers/postgresql.jar` |
-| `GlueJobScriptS3Path` | String | S3 path to the PySpark Glue job script | `s3://bucket/path/script.py` | `s3://bucket/scripts/glue_data_replication.py` |
+| `GlueJobScriptS3Path` | String | S3 path to the PySpark Glue job script | `s3://bucket/path/script.py` | `s3://bucket/src/glue_job/main.py` |
 
 ## Optional Parameters
 
@@ -189,7 +189,7 @@ The CloudFormation template creates named IAM resources (roles with custom names
 ```bash
 aws cloudformation create-stack \
   --stack-name my-data-replication \
-  --template-body file://cloudformation/glue-data-replication.yaml \
+  --template-body file://infrastructure/cloudformation/glue-data-replication.yaml \
   --parameters file://examples/parameters.json \
   --capabilities CAPABILITY_NAMED_IAM
 ```

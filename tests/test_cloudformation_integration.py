@@ -31,7 +31,7 @@ class TestCloudFormationTemplateValidation(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        self.template_path = "cloudformation/glue-data-replication.yaml"
+        self.template_path = "infrastructure/cloudformation/glue-data-replication.yaml"
         with open(self.template_path, 'r') as f:
             self.template_content = yaml.safe_load(f)
     
@@ -150,14 +150,20 @@ class TestCloudFormationDeployment(unittest.TestCase):
             Key='drivers/postgresql.jar',
             Body=b'mock postgresql driver'
         )
+        # Upload modular structure files
         self.s3_client.put_object(
             Bucket=self.test_bucket,
-            Key='scripts/glue_data_replication.py',
-            Body=b'mock glue script'
+            Key='src/glue_job/main.py',
+            Body=b'mock glue main script'
+        )
+        self.s3_client.put_object(
+            Bucket=self.test_bucket,
+            Key='src/glue_job/__init__.py',
+            Body=b'# Glue job package'
         )
         
         # Load CloudFormation template
-        with open('cloudformation/glue-data-replication.yaml', 'r') as f:
+        with open('infrastructure/cloudformation/glue-data-replication.yaml', 'r') as f:
             self.template_body = f.read()
         
         self.test_parameters = [
@@ -177,7 +183,7 @@ class TestCloudFormationDeployment(unittest.TestCase):
             {'ParameterKey': 'TargetConnectionString', 'ParameterValue': 'jdbc:postgresql://localhost:5432/testdb'},
             {'ParameterKey': 'SourceJdbcDriverS3Path', 'ParameterValue': f's3://{self.test_bucket}/drivers/oracle.jar'},
             {'ParameterKey': 'TargetJdbcDriverS3Path', 'ParameterValue': f's3://{self.test_bucket}/drivers/postgresql.jar'},
-            {'ParameterKey': 'GlueJobScriptS3Path', 'ParameterValue': f's3://{self.test_bucket}/scripts/glue_data_replication.py'}
+            {'ParameterKey': 'GlueJobScriptS3Path', 'ParameterValue': f's3://{self.test_bucket}/src/glue_job/main.py'}
         ]
     
     def test_template_validation_success(self):
@@ -263,7 +269,7 @@ class TestIAMRoleAndPolicyCreation(unittest.TestCase):
         self.cf_client = boto3.client('cloudformation', region_name='us-east-1')
         self.iam_client = boto3.client('iam', region_name='us-east-1')
         
-        with open('cloudformation/glue-data-replication.yaml', 'r') as f:
+        with open('infrastructure/cloudformation/glue-data-replication.yaml', 'r') as f:
             self.template_body = f.read()
         
         # Minimal parameters for IAM testing
@@ -396,7 +402,7 @@ class TestGlueJobCreation(unittest.TestCase):
         self.test_bucket = 'test-glue-job-bucket'
         self.s3_client.create_bucket(Bucket=self.test_bucket)
         
-        with open('cloudformation/glue-data-replication.yaml', 'r') as f:
+        with open('infrastructure/cloudformation/glue-data-replication.yaml', 'r') as f:
             self.template_body = f.read()
         
         self.test_parameters = [
@@ -583,7 +589,7 @@ class TestCloudFormationOutputs(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        with open('cloudformation/glue-data-replication.yaml', 'r') as f:
+        with open('infrastructure/cloudformation/glue-data-replication.yaml', 'r') as f:
             self.template_content = yaml.safe_load(f)
     
     def test_required_outputs_defined(self):

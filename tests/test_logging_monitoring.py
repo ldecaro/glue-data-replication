@@ -11,8 +11,7 @@ import os
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 # Mock AWS dependencies for testing
 sys.modules['boto3'] = Mock()
@@ -26,12 +25,14 @@ sys.modules['pyspark.sql'] = Mock()
 sys.modules['pyspark.sql.types'] = Mock()
 sys.modules['pyspark.sql.functions'] = Mock()
 
-# Import our classes after mocking dependencies
-from scripts.glue_data_replication import (
+# Add src directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
+
+# Import our classes from new modular structure
+from glue_job.monitoring import (
     ProcessingMetrics, 
     StructuredLogger, 
-    CloudWatchMetricsPublisher, 
-    PerformanceMonitor
+    CloudWatchMetricsPublisher
 )
 
 def test_processing_metrics():

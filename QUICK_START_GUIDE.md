@@ -1,6 +1,6 @@
 # Quick Start Guide - AWS Glue Data Replication
 
-This guide walks you through deploying the data replication system step by step.
+This guide walks you through deploying the modular data replication system step by step.
 
 ## Prerequisites Checklist
 
@@ -19,13 +19,20 @@ git clone <repository-url>
 cd aws-glue-data-replication
 ```
 
-### Step 2: Upload Assets to S3
-```bash
-# Upload the Glue script
-aws s3 cp scripts/glue_data_replication.py s3://your-bucket/scripts/glue_data_replication.py
+### Step 2: Deploy with Automatic Upload
 
-# Upload JDBC drivers (download from vendors first)
-aws s3 cp mssql-jdbc-12.2.0.jre11.jar s3://your-bucket/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar
+```bash
+# Complete deployment in one command
+./deploy.sh -s my-data-replication -b your-bucket -p my-parameters.json
+```
+
+**Optional: Manual Asset Upload First**
+```bash
+# Upload the complete modular structure
+./infrastructure/scripts/upload-modular-assets.sh your-bucket --include-drivers
+
+# Then deploy without upload
+./deploy.sh -s my-data-replication -b your-bucket -p my-parameters.json --skip-upload
 ```
 
 ### Step 3: Get Network Configuration (VPC Databases Only)
@@ -102,9 +109,11 @@ Edit `my-parameters.json` and replace these values:
 },
 {
   "ParameterKey": "GlueJobScriptS3Path", 
-  "ParameterValue": "s3://YOUR-BUCKET/scripts/glue_data_replication.py"  // Change this
+  "ParameterValue": "s3://YOUR-BUCKET/src/glue_job/main.py"  // UPDATED: New modular entry point
 }
 ```
+
+**Important**: The `GlueJobScriptS3Path` now points to the new modular entry point at `src/glue_job/main.py` instead of the old monolithic script.
 
 #### Network Configuration (If you did Step 3):
 Replace these placeholder values with the actual values from Step 3:
@@ -131,22 +140,14 @@ Replace these placeholder values with the actual values from Step 3:
 
 ### Step 5: Deploy CloudFormation Stack
 
+The deployment is handled automatically by the deploy script in Step 2. If you need to deploy separately:
+
 ```bash
-aws cloudformation create-stack \
-  --stack-name my-data-replication \
-  --template-body file://cloudformation/glue-data-replication.yaml \
-  --parameters file://my-parameters.json \
-  --capabilities CAPABILITY_NAMED_IAM
+./deploy.sh -s my-data-replication -b your-bucket -p my-parameters.json
 ```
 
 **Monitor deployment:**
-```bash
-# Check stack status
-aws cloudformation describe-stacks --stack-name my-data-replication --query 'Stacks[0].StackStatus'
-
-# Watch events (if there are errors)
-aws cloudformation describe-stack-events --stack-name my-data-replication
-```
+The deploy script will automatically wait for completion and show the results.
 
 ### Step 6: Run the Glue Job
 
@@ -188,7 +189,7 @@ After successful deployment, verify everything works:
 
 - Monitor job execution in CloudWatch Logs
 - Set up CloudWatch alarms for job failures
-- Configure incremental loading for ongoing replication
+- Configure incremental loading for ongoing replication (see [Bookmark Details](docs/BOOKMARK_DETAILS.md))
 - Review the [Observability Guide](docs/OBSERVABILITY_GUIDE.md) for monitoring setup
 
 ## Getting Help

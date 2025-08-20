@@ -1,6 +1,6 @@
 import yaml
 
-with open('cloudformation/glue-data-replication.yaml', 'r') as f:
+with open('infrastructure/cloudformation/glue-data-replication.yaml', 'r') as f:
     template = yaml.safe_load(f.read())
 
 # Check if VPC endpoint resources exist

@@ -19,8 +19,8 @@ import json
 import sys
 import os
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add src directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
 
 # Mock PySpark and AWS Glue imports for testing
 from unittest.mock import MagicMock
@@ -35,15 +35,24 @@ mock_modules = [
 for module in mock_modules:
     sys.modules[module] = MagicMock()
 
-# Import the classes and functions to test after mocking
-from scripts.glue_data_replication import (
+# Import the classes and functions to test from new modular structure
+from glue_job.config import (
     ConnectionConfig, JobConfig, DatabaseEngineManager, JdbcDriverLoader,
-    JobConfigurationParser, JdbcConnectionManager, ConnectionRetryHandler,
-    IncrementalColumnDetector, JobBookmarkManager, JobBookmarkState,
-    FullLoadDataMigrator, IncrementalDataMigrator, ProcessingMetrics,
-    StructuredLogger, CloudWatchMetricsPublisher, PerformanceMonitor,
-    ErrorRecoveryManager, ConnectionStringBuilder, ErrorClassifier,
+    JobConfigurationParser, ConnectionStringBuilder
+)
+from glue_job.database import (
+    JdbcConnectionManager, IncrementalColumnDetector,
+    FullLoadDataMigrator, IncrementalDataMigrator,
     DataTypeMapper, SchemaCompatibilityValidator
+)
+from glue_job.storage import (
+    JobBookmarkManager, JobBookmarkState
+)
+from glue_job.monitoring import (
+    ProcessingMetrics, StructuredLogger, CloudWatchMetricsPublisher
+)
+from glue_job.network import (
+    ConnectionRetryHandler, ErrorRecoveryManager, ErrorClassifier
 )
 
 
@@ -610,7 +619,15 @@ class TestJobBookmarkManager(unittest.TestCase):
         """Set up test fixtures."""
         self.mock_glue_context = Mock()
         self.job_name = 'test-replication-job'
-        self.bookmark_manager = JobBookmarkManager(self.mock_glue_context, self.job_name)
+        # Test with enhanced constructor including JDBC S3 paths for backward compatibility
+        self.source_jdbc_path = 's3://test-bucket/drivers/postgresql-driver.jar'
+        self.target_jdbc_path = 's3://test-bucket/drivers/oracle-driver.jar'
+        self.bookmark_manager = JobBookmarkManager(
+            self.mock_glue_context, 
+            self.job_name,
+            source_jdbc_path=self.source_jdbc_path,
+            target_jdbc_path=self.target_jdbc_path
+        )
     
     def test_initialize_bookmark_state_new(self):
         """Test initializing new bookmark state."""

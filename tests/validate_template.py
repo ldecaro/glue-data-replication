@@ -8,7 +8,7 @@ import sys
 
 def validate_template():
     try:
-        with open('cloudformation/glue-data-replication.yaml', 'r') as f:
+        with open('infrastructure/cloudformation/glue-data-replication.yaml', 'r') as f:
             template_content = f.read()
         
         # Parse YAML

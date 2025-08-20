@@ -1,0 +1,6 @@
+Starting validation...
+Added src path: /Users/lddecaro/git/glue-datareplication/src
+Mocked dependencies
+✓ JobConfig imported
+✓ S3BookmarkStorage imported
+Validation complete!

@@ -4,9 +4,24 @@ Test script to verify network-aware database connection functionality
 """
 
 import sys
-sys.path.append('/tmp')
+import os
 
-from scripts.glue_data_replication import (
+
+# Add src directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
+
+# Mock PySpark and AWS Glue imports for testing
+from unittest.mock import MagicMock
+mock_modules = [
+    'awsglue', 'awsglue.utils', 'awsglue.context', 'awsglue.job',
+    'pyspark', 'pyspark.context', 'pyspark.sql', 'pyspark.sql.types',
+    'pyspark.sql.functions', 'boto3'
+]
+
+for module in mock_modules:
+    sys.modules[module] = MagicMock()
+
+from glue_job.config import (
     NetworkConfig, 
     ConnectionConfig, 
     JobConfig, 

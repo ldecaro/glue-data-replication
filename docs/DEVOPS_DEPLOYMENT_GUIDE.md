@@ -22,7 +22,7 @@ This guide provides detailed instructions for DevOps engineers to deploy and man
 
 ### DevOps Engineer Permissions
 
-DevOps engineers need specific IAM permissions to deploy the CloudFormation stack. Apply the policy from `iam/devops-policy.json` to your deployment user or role.
+DevOps engineers need specific IAM permissions to deploy the CloudFormation stack. Apply the policy from `infrastructure/iam/devops-policy.json` to your deployment user or role.
 
 #### Policy Overview
 
@@ -53,7 +53,7 @@ The DevOps policy includes permissions for:
 aws iam put-user-policy \
   --user-name your-devops-user \
   --policy-name GlueDataReplicationDeployment \
-  --policy-document file://iam/devops-policy.json
+  --policy-document file://infrastructure/iam/devops-policy.json
 ```
 
 **Option 2: Create dedicated deployment role**
@@ -78,7 +78,7 @@ aws iam create-role \
 aws iam put-role-policy \
   --role-name GlueDataReplicationDeploymentRole \
   --policy-name GlueDataReplicationDeployment \
-  --policy-document file://iam/devops-policy.json
+  --policy-document file://infrastructure/iam/devops-policy.json
 ```
 
 ### Service-Linked Roles
@@ -95,8 +95,8 @@ Before deploying the stack, ensure JDBC drivers are available in S3:
 # Create S3 bucket for drivers (if not exists)
 aws s3 mb s3://your-glue-assets-bucket
 
-# Upload Glue job script
-aws s3 cp scripts/glue_data_replication.py s3://your-glue-assets-bucket/scripts/glue_data_replication.py
+# Upload modular Glue job structure
+aws s3 sync src/glue_job/ s3://your-glue-assets-bucket/src/glue_job/ --delete
 
 # Upload JDBC drivers using recommended structure
 aws s3 cp ojdbc11.jar s3://your-glue-assets-bucket/jdbc-drivers/oracle/21.7.0.0/ojdbc11.jar
@@ -165,7 +165,7 @@ Always validate the CloudFormation template before deployment:
 
 ```bash
 aws cloudformation validate-template \
-  --template-body file://cloudformation/glue-data-replication.yaml
+  --template-body file://infrastructure/cloudformation/glue-data-replication.yaml
 ```
 
 ### Step 2: Parameter File Creation
@@ -374,7 +374,7 @@ Deploy the CloudFormation stack:
 # Create new stack
 aws cloudformation create-stack \
   --stack-name glue-data-replication-prod \
-  --template-body file://cloudformation/glue-data-replication.yaml \
+  --template-body file://infrastructure/cloudformation/glue-data-replication.yaml \
   --parameters file://parameters/prod-parameters.json \
   --capabilities CAPABILITY_NAMED_IAM \
   --tags Key=Environment,Value=Production Key=Project,Value=DataReplication
@@ -469,7 +469,7 @@ For development and testing:
 # Use smaller instance types and reduced monitoring
 aws cloudformation create-stack \
   --stack-name glue-data-replication-dev \
-  --template-body file://cloudformation/glue-data-replication.yaml \
+  --template-body file://infrastructure/cloudformation/glue-data-replication.yaml \
   --parameters file://parameters/dev-parameters.json \
   --capabilities CAPABILITY_NAMED_IAM \
   --tags Key=Environment,Value=Development
@@ -494,7 +494,7 @@ for region in us-east-1 us-west-2 eu-west-1; do
   aws cloudformation create-stack \
     --region $region \
     --stack-name glue-data-replication-prod-$region \
-    --template-body file://cloudformation/glue-data-replication.yaml \
+    --template-body file://infrastructure/cloudformation/glue-data-replication.yaml \
     --parameters file://parameters/prod-$region-parameters.json \
     --capabilities CAPABILITY_NAMED_IAM
 done
@@ -510,7 +510,7 @@ Update existing stacks when configuration changes:
 # Update stack with new parameters
 aws cloudformation update-stack \
   --stack-name glue-data-replication-prod \
-  --template-body file://cloudformation/glue-data-replication.yaml \
+  --template-body file://infrastructure/cloudformation/glue-data-replication.yaml \
   --parameters file://parameters/prod-parameters-updated.json \
   --capabilities CAPABILITY_NAMED_IAM
 ```
@@ -532,13 +532,13 @@ aws s3 cp ojdbc11-new-version.jar s3://company-glue-assets/jdbc-drivers/oracle/2
 Update the PySpark job code:
 
 ```bash
-# Upload updated script to S3
-aws s3 cp scripts/glue_data_replication.py s3://company-glue-assets/scripts/
+# Upload updated modular structure to S3
+aws s3 sync src/glue_job/ s3://company-glue-assets/src/glue_job/ --delete
 
 # Update Glue job
 aws glue update-job \
   --job-name prod-oracle-to-postgres \
-  --job-update ScriptLocation=s3://company-glue-assets/scripts/glue_data_replication.py
+  --job-update ScriptLocation=s3://company-glue-assets/src/glue_job/main.py
 ```
 
 ## Troubleshooting
@@ -704,7 +704,7 @@ aws logs put-retention-policy \
 Implement backup strategies:
 
 - **Configuration Backup**: Store parameter files in version control
-- **State Backup**: Regular snapshots of job bookmark data
+- **State Backup**: Regular snapshots of job bookmark data (see [Bookmark Details](BOOKMARK_DETAILS.md) for S3 storage details)
 - **Code Backup**: Version control for all scripts and templates
 
 ## Security Best Practices

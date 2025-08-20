@@ -156,7 +156,7 @@ def main():
     
     # Check if template file exists
     import os
-    template_path = 'cloudformation/glue-data-replication.yaml'
+    template_path = 'infrastructure/cloudformation/glue-data-replication.yaml'
     if os.path.exists(template_path):
         print(f"✓ Template file exists: {template_path}")
     else:

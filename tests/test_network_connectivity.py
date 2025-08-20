@@ -21,8 +21,7 @@ import boto3
 from moto import mock_glue, mock_ec2, mock_cloudformation
 import time
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 # Mock PySpark and AWS Glue imports for testing
 mock_modules = [
@@ -34,12 +33,16 @@ mock_modules = [
 for module in mock_modules:
     sys.modules[module] = MagicMock()
 
-# Import the classes and functions to test after mocking
-from scripts.glue_data_replication import (
-    NetworkConfig, ConnectionConfig, JobConfig, JobConfigurationParser,
-    GlueConnectionManager, GlueConnectionError, NetworkValidationError,
-    StructuredLogger
+# Add src directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
+
+# Import the classes and functions to test from new modular structure
+from glue_job.config import (
+    NetworkConfig, ConnectionConfig, JobConfig, JobConfigurationParser
 )
+from glue_job.database import GlueConnectionManager
+from glue_job.network import GlueConnectionError
+from glue_job.monitoring import StructuredLogger
 
 
 class TestNetworkConfigurationParsing(unittest.TestCase):

@@ -1,6 +1,6 @@
 # AWS Glue Data Replication - Deployment Guide
 
-This guide covers the complete deployment process for the AWS Glue data replication solution, including fixes for mock connection issues and VPC endpoint configuration.
+This guide covers the complete deployment process for the AWS Glue data replication solution with its new modular architecture, including fixes for mock connection issues and VPC endpoint configuration.
 
 ## Prerequisites
 
@@ -13,20 +13,79 @@ This guide covers the complete deployment process for the AWS Glue data replicat
 
 **Important**: The CloudFormation template exceeds the 51,200 character limit for direct uploads and must be hosted in S3.
 
+## Enhanced Deployment Process
+
+The deployment process has been streamlined with automatic S3 asset management:
+
+### Key Features
+- **Single Command Deployment**: Complete deployment in one command
+- **Automatic S3 Management**: Creates bucket and uploads all assets automatically
+- **Parameter Processing**: Automatically updates parameter files with correct S3 paths
+- **Template Hosting**: Uses S3-hosted CloudFormation template (required for large templates)
+- **Comprehensive Validation**: Validates AWS CLI, bucket format, and modular structure
+
+### Available Scripts
+- `deploy.sh`: Enhanced deployment script with automatic S3 uploads and validation
+- `infrastructure/scripts/upload-modular-assets.sh`: Manual upload of modular structure (optional)
+- `infrastructure/scripts/upload-assets.sh`: Legacy single-file upload script
+
 ## Deployment Steps
 
-### 1. Upload CloudFormation Template to S3
+### 1. Deploy with Automatic Asset Upload (Recommended)
 
 ```bash
-# Upload the CloudFormation template to your S3 bucket
-aws s3 cp cloudformation/glue-data-replication.yaml s3://[your-bucket-name]/cloudformation/glue-data-replication.yaml
+# For new stack deployment
+./deploy.sh -s your-glue-replication-stack -b [your-bucket-name] -p examples/your-parameters.json
+
+# For stack updates
+./deploy.sh -s your-glue-replication-stack -b [your-bucket-name] -p examples/your-parameters.json --update
+
+# Validate template only
+./deploy.sh -s your-glue-replication-stack -b [your-bucket-name] -p examples/your-parameters.json --validate-only
+
+# Dry run to see what would be deployed
+./deploy.sh -s your-glue-replication-stack -b [your-bucket-name] -p examples/your-parameters.json --dry-run
 ```
 
-### 2. Upload Glue Script to S3
+The deploy script automatically:
+- Creates S3 bucket if it doesn't exist
+- Uploads CloudFormation template to S3
+- Uploads complete modular Glue job structure
+- Updates parameter file with correct S3 paths
+- Deploys using S3-hosted template
 
+### 2. Manual Asset Upload (Optional)
+
+If you prefer to upload assets separately:
+
+#### Option A: Upload Complete Modular Structure (Recommended)
 ```bash
-# Upload the Glue PySpark script to your S3 bucket
-aws s3 cp scripts/glue_data_replication.py s3://[your-bucket-name]/scripts/glue_data_replication.py
+# Upload the complete modular Glue job structure
+./infrastructure/scripts/upload-modular-assets.sh [your-bucket-name] --include-drivers
+```
+
+This script uploads:
+- Main entry point: `src/glue_job/main.py`
+- All supporting modules in `src/glue_job/`
+- Configuration files from `config/`
+- JDBC drivers (if `--include-drivers` is specified)
+
+#### Option B: Manual Upload
+```bash
+# Upload the main Glue script
+aws s3 cp src/glue_job/main.py s3://[your-bucket-name]/src/glue_job/main.py
+
+# Upload all supporting modules
+aws s3 sync src/ s3://[your-bucket-name]/src/ --exclude "*.pyc" --exclude "__pycache__/*"
+
+# Upload configuration files
+aws s3 sync config/ s3://[your-bucket-name]/config/
+```
+
+#### Option C: Legacy Single-File Upload (Deprecated)
+```bash
+# For backward compatibility only - not recommended
+./infrastructure/scripts/upload-assets.sh [your-bucket-name]
 ```
 
 ### 3. Upload JDBC Drivers to S3
@@ -36,7 +95,7 @@ aws s3 cp scripts/glue_data_replication.py s3://[your-bucket-name]/scripts/glue_
 aws s3 cp jdbc-drivers/sqlserver/mssql-jdbc-12.2.0.jre11.jar s3://[your-bucket-name]/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar
 ```
 
-### 4. Configure Parameters
+### 3. Configure Parameters
 
 Update your parameter file (e.g., `examples/sqlserver-to-sqlserver-parameters.json`) with your specific values:
 
@@ -45,10 +104,6 @@ Update your parameter file (e.g., `examples/sqlserver-to-sqlserver-parameters.js
   {
     "ParameterKey": "JobName",
     "ParameterValue": "your-job-name"
-  },
-  {
-    "ParameterKey": "GlueJobScriptS3Path",
-    "ParameterValue": "s3://[your-bucket-name]/scripts/glue_data_replication.py"
   },
   {
     "ParameterKey": "SourceJdbcDriverS3Path",
@@ -61,27 +116,34 @@ Update your parameter file (e.g., `examples/sqlserver-to-sqlserver-parameters.js
 ]
 ```
 
-### 5. Deploy CloudFormation Stack
-
-#### For New Stack Deployment:
-```bash
-aws cloudformation create-stack \
-  --stack-name your-glue-replication-stack \
-  --template-url https://s3.amazonaws.com/[your-bucket-name]/cloudformation/glue-data-replication.yaml \
-  --parameters file://examples/your-parameters.json \
-  --capabilities CAPABILITY_NAMED_IAM
+**Note**: The `GlueJobScriptS3Path` parameter will be automatically updated by the deploy script to point to the correct S3 location (`s3://bucket/src/glue_job/main.py`).
 ```
 
-#### For Stack Updates:
+### 4. Deploy CloudFormation Stack
+
+The enhanced deploy script handles the complete deployment process:
+
 ```bash
-aws cloudformation update-stack \
-  --stack-name your-glue-replication-stack \
-  --template-url https://s3.amazonaws.com/[your-bucket-name]/cloudformation/glue-data-replication.yaml \
-  --parameters file://examples/your-parameters.json \
-  --capabilities CAPABILITY_NAMED_IAM
+# Deploy new stack
+./deploy.sh -s your-glue-replication-stack -b [your-bucket-name] -p examples/your-parameters.json
+
+# Update existing stack
+./deploy.sh -s your-glue-replication-stack -b [your-bucket-name] -p examples/your-parameters.json --update
 ```
 
-### 6. Verify Deployment
+**Advanced Options:**
+```bash
+# Skip upload if assets already in S3
+./deploy.sh -s your-stack -b your-bucket -p your-params.json --skip-upload
+
+# Validate template only
+./deploy.sh -s your-stack -b your-bucket -p your-params.json --validate-only
+
+# Dry run to see what would be deployed
+./deploy.sh -s your-stack -b your-bucket -p your-params.json --dry-run
+```
+
+### 5. Verify Deployment
 
 #### Check Stack Status:
 ```bash
@@ -100,7 +162,7 @@ aws ec2 describe-vpc-endpoints \
 aws glue get-job --job-name your-job-name
 ```
 
-### 7. Test Glue Job
+### 6. Test Glue Job
 
 ```bash
 aws glue start-job-run --job-name your-job-name
@@ -174,27 +236,60 @@ Monitor your Glue job through:
 1. **Use private subnets** with VPC endpoints for security
 2. **Enable CloudWatch monitoring** for observability
 3. **Set appropriate timeouts** based on data volume
-4. **Use job bookmarks** for incremental processing
+4. **Use job bookmarks** for incremental processing (see [Bookmark Details](docs/BOOKMARK_DETAILS.md) for comprehensive guide)
 5. **Test with small datasets** before full production runs
 6. **Monitor costs** through AWS Cost Explorer
 
-## File Structure
+## Project Structure
 
 ```
-glue-data-replication/
-├── cloudformation/
-│   └── glue-data-replication.yaml          # Main CloudFormation template
-├── scripts/
-│   └── glue_data_replication.py            # Glue PySpark script
-├── examples/
-│   └── sqlserver-to-sqlserver-parameters.json  # Example parameters
-├── jdbc-drivers/
-│   └── [database-type]/                    # JDBC driver files
-└── docs/
-    ├── DEPLOYMENT_GUIDE.md                 # This file
-    ├── GLUE_VPC_ENDPOINT_FIX.md           # VPC endpoint troubleshooting
-    └── GLUE_JOB_MOCK_CONNECTION_FIX.md    # Mock connection fix
+aws-glue-data-replication/
+├── src/
+│   └── glue_job/                           # Modular Glue job components
+│       ├── main.py                         # Entry point (replaces legacy monolithic script)
+│       ├── config/                         # Configuration management
+│       │   ├── job_config.py                # Job configuration dataclasses
+│       │   ├── database_engines.py          # Database engine management
+│       │   └── parsers.py                   # Configuration parsing
+│       ├── database/                       # Database operations
+│       │   ├── connection_manager.py        # Connection management
+│       │   ├── schema_validator.py          # Schema validation
+│       │   ├── migration.py                 # Data migration logic
+│       │   └── incremental_detector.py      # Incremental processing
+│       ├── storage/                        # Storage and bookmarks
+│       │   ├── s3_bookmark.py               # S3 bookmark operations
+│       │   └── bookmark_manager.py          # Bookmark lifecycle
+│       ├── monitoring/                     # Observability
+│       │   ├── logging.py                   # Structured logging
+│       │   ├── metrics.py                   # CloudWatch metrics
+│       │   └── progress.py                  # Progress tracking
+│       ├── network/                        # Network and error handling
+│       │   ├── error_handler.py             # Error classification
+│       │   └── retry_handler.py             # Retry mechanisms
+│       └── utils/                          # Utilities
+│           └── s3_utils.py                  # S3 operations
+├── infrastructure/
+│   ├── cloudformation/                     # CloudFormation templates
+│   │   └── glue-data-replication.yaml      # Main CloudFormation template
+│   ├── scripts/                            # Deployment scripts
+│   │   ├── upload-modular-assets.sh         # Upload modular structure
+│   │   ├── upload-assets.sh                 # Legacy upload script
+│   │   └── get-rds-network-info.sh          # Network configuration helper
+│   └── iam/                                # IAM policies
+├── tests/                                  # Test suites
+├── docs/                                   # Documentation
+├── examples/                               # Configuration examples
+├── config/                                 # Static configuration files
+└── jdbc-drivers/                           # JDBC driver files
 ```
+
+## Modular Architecture Benefits
+
+- **Maintainability**: Each module has a single responsibility
+- **Testability**: Individual modules can be tested in isolation
+- **Reusability**: Modules can be imported and used independently
+- **Scalability**: New features can be added as separate modules
+- **Debugging**: Easier to locate and fix issues in specific modules
 
 ## Support
 

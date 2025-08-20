@@ -65,7 +65,7 @@
   },
   {
     "ParameterKey": "GlueJobScriptS3Path",
-    "ParameterValue": "s3://my-glue-assets/scripts/glue_data_replication.py"
+    "ParameterValue": "s3://my-glue-assets/src/glue_job/main.py"
   },
   {
     "ParameterKey": "MaxRetries",

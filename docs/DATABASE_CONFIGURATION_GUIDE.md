@@ -208,8 +208,13 @@ s3://your-glue-assets/
 │   └── db2/
 │       └── 11.5.8.0/
 │           └── db2jcc4.jar
-└── scripts/
-    └── glue_data_replication.py
+└── src/
+    └── glue_job/
+        ├── main.py
+        ├── config/
+        ├── database/
+        ├── storage/
+        └── utils/
 ```
 
 **Version Management**:

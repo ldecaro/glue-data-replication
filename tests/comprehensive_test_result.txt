@@ -1,0 +1,1063 @@
+Starting comprehensive test validation...
+
+================================================================================
+MODULE IMPORT VALIDATION
+================================================================================
+✓ glue_job.config.JobConfig
+✓ glue_job.config.ConnectionConfig
+✓ glue_job.config.DatabaseEngineManager
+✓ glue_job.storage.S3BookmarkStorage
+✓ glue_job.storage.JobBookmarkManager
+✓ glue_job.database.JdbcConnectionManager
+✓ glue_job.database.SchemaCompatibilityValidator
+✓ glue_job.monitoring.StructuredLogger
+✓ glue_job.monitoring.CloudWatchMetricsPublisher
+✓ glue_job.network.NetworkErrorHandler
+✓ glue_job.network.ConnectionRetryHandler
+✓ glue_job.utils.S3PathUtilities
+✓ glue_job.utils.EnhancedS3ParallelOperations
+
+🎉 All module imports successful!
+================================================================================
+AWS Glue Data Replication - Comprehensive Test Suite
+Modular Architecture Validation
+================================================================================
+
+✓ Loaded tests from test_config
+✓ Loaded tests from test_storage
+✓ Loaded tests from test_database
+✓ Loaded tests from test_monitoring
+✓ Loaded tests from test_network
+✓ Loaded tests from test_utils
+
+Running tests...
+--------------------------------------------------------------------------------
+test_connection_config_creation (test_config.TestConnectionConfig)
+Test creating a ConnectionConfig instance. ... ok
+test_build_mysql_connection_string (test_config.TestConnectionStringBuilder)
+Test building MySQL connection string. ... ERROR
+test_build_postgresql_connection_string (test_config.TestConnectionStringBuilder)
+Test building PostgreSQL connection string. ... ERROR
+test_get_driver_class_mysql (test_config.TestDatabaseEngineManager)
+Test getting MySQL driver class. ... ERROR
+test_get_driver_class_oracle (test_config.TestDatabaseEngineManager)
+Test getting Oracle driver class. ... FAIL
+test_get_driver_class_postgresql (test_config.TestDatabaseEngineManager)
+Test getting PostgreSQL driver class. ... ok
+test_get_driver_class_sqlserver (test_config.TestDatabaseEngineManager)
+Test getting SQL Server driver class. ... ok
+test_get_driver_class_unknown (test_config.TestDatabaseEngineManager)
+Test getting driver class for unknown engine. ... ok
+test_job_config_creation (test_config.TestJobConfig)
+Test creating a JobConfig instance. ... ok
+test_get_bookmark_state_existing (test_storage.TestJobBookmarkManager)
+Test getting existing bookmark state. ... ERROR
+test_get_bookmark_state_new (test_storage.TestJobBookmarkManager)
+Test getting bookmark state for new table. ... ERROR
+test_update_bookmark_state (test_storage.TestJobBookmarkManager)
+Test updating bookmark state. ... ERROR
+test_job_bookmark_state_creation (test_storage.TestJobBookmarkState)
+Test creating JobBookmarkState instance. ... ERROR
+test_job_bookmark_state_to_dict (test_storage.TestJobBookmarkState)
+Test converting JobBookmarkState to dictionary. ... ERROR
+test_s3_bookmark_config_creation (test_storage.TestS3BookmarkConfig)
+Test creating S3BookmarkConfig instance. ... ERROR
+test_read_bookmark_not_found (test_storage.TestS3BookmarkStorage)
+Test reading bookmark when file doesn't exist. ... ERROR
+test_read_bookmark_success (test_storage.TestS3BookmarkStorage)
+Test successful bookmark reading from S3. ... ERROR
+test_write_bookmark_success (test_storage.TestS3BookmarkStorage)
+Test successful bookmark writing to S3. ... ERROR
+test_map_mysql_to_spark_types (test_database.TestDataTypeMapper)
+Test mapping MySQL types to Spark types. ... ERROR
+test_map_postgresql_to_spark_types (test_database.TestDataTypeMapper)
+Test mapping PostgreSQL types to Spark types. ... ERROR
+test_execute_full_load (test_database.TestFullLoadDataMigrator)
+Test executing full load migration. ... ERROR
+test_detect_no_incremental_column (test_database.TestIncrementalColumnDetector)
+Test when no suitable incremental column is found. ... ERROR
+test_detect_timestamp_column (test_database.TestIncrementalColumnDetector)
+Test detecting timestamp-based incremental column. ... ERROR
+test_execute_incremental_load (test_database.TestIncrementalDataMigrator)
+Test executing incremental load migration. ... ERROR
+test_create_connection_success (test_database.TestJdbcConnectionManager)
+Test successful JDBC connection creation. ... ERROR
+test_validate_connection_failure (test_database.TestJdbcConnectionManager)
+Test connection validation failure. ... ERROR
+test_validate_connection_success (test_database.TestJdbcConnectionManager)
+Test successful connection validation. ... ERROR
+test_validate_compatible_schemas (test_database.TestSchemaCompatibilityValidator)
+Test validation of compatible schemas. ... ERROR
+test_validate_incompatible_schemas (test_database.TestSchemaCompatibilityValidator)
+Test validation of incompatible schemas. ... ERROR
+test_publish_metric_failure (test_monitoring.TestCloudWatchMetricsPublisher)
+Test metric publishing failure handling. ... FAIL
+test_publish_metric_success (test_monitoring.TestCloudWatchMetricsPublisher)
+Test successful metric publishing. ... ERROR
+test_publish_metric_with_dimensions (test_monitoring.TestCloudWatchMetricsPublisher)
+Test publishing metric with dimensions. ... ERROR
+test_estimate_dataframe_size (test_monitoring.TestEstimateDataFrameSize)
+Test estimating DataFrame size. ... FAIL
+test_full_load_progress_creation (test_monitoring.TestFullLoadProgress)
+Test creating FullLoadProgress instance. ... ERROR
+test_full_load_progress_is_complete (test_monitoring.TestFullLoadProgress)
+Test checking if progress is complete. ... ERROR
+test_full_load_progress_percentage (test_monitoring.TestFullLoadProgress)
+Test calculating progress percentage. ... ERROR
+test_incremental_load_progress_creation (test_monitoring.TestIncrementalLoadProgress)
+Test creating IncrementalLoadProgress instance. ... ERROR
+test_incremental_load_progress_update (test_monitoring.TestIncrementalLoadProgress)
+Test updating incremental load progress. ... ERROR
+test_processing_metrics_creation (test_monitoring.TestProcessingMetrics)
+Test creating ProcessingMetrics instance. ... ERROR
+test_processing_metrics_success_rate (test_monitoring.TestProcessingMetrics)
+Test calculating success rate. ... ERROR
+test_processing_metrics_throughput (test_monitoring.TestProcessingMetrics)
+Test calculating throughput. ... ERROR
+test_log_error_message (test_monitoring.TestStructuredLogger)
+Test logging error message. ... ERROR
+test_log_info_message (test_monitoring.TestStructuredLogger)
+Test logging info message. ... ERROR
+test_log_warning_message (test_monitoring.TestStructuredLogger)
+Test logging warning message. ... ERROR
+test_logger_initialization (test_monitoring.TestStructuredLogger)
+Test logger initialization. ... ok
+test_exponential_backoff_delay (test_network.TestConnectionRetryHandler)
+Test exponential backoff delay calculation. ... ERROR
+test_non_retryable_error (test_network.TestConnectionRetryHandler)
+Test handling of non-retryable errors. ... FAIL
+test_operation_exceeds_max_retries (test_network.TestConnectionRetryHandler)
+Test operation that exceeds maximum retries. ... FAIL
+test_operation_with_retries (test_network.TestConnectionRetryHandler)
+Test operation that succeeds after retries. ... ERROR
+test_successful_operation_no_retry (test_network.TestConnectionRetryHandler)
+Test successful operation without retries. ... ERROR
+test_classify_connection_refused_error (test_network.TestErrorClassifier)
+Test classifying connection refused errors. ... FAIL
+test_classify_glue_error (test_network.TestErrorClassifier)
+Test classifying Glue-specific errors. ... ERROR
+test_classify_network_timeout_error (test_network.TestErrorClassifier)
+Test classifying network timeout errors. ... FAIL
+test_classify_unknown_error (test_network.TestErrorClassifier)
+Test classifying unknown errors. ... ok
+test_classify_vpc_error (test_network.TestErrorClassifier)
+Test classifying VPC-related errors. ... ERROR
+test_is_not_retryable_authentication_error (test_network.TestErrorClassifier)
+Test identifying non-retryable authentication errors. ... ok
+test_is_retryable_network_error (test_network.TestErrorClassifier)
+Test identifying retryable network errors. ... ok
+test_suggest_recovery_for_glue_error (test_network.TestErrorRecoveryManager)
+Test suggesting recovery for Glue errors. ... ERROR
+test_suggest_recovery_for_network_error (test_network.TestErrorRecoveryManager)
+Test suggesting recovery for network errors. ... ERROR
+test_suggest_recovery_for_unknown_error (test_network.TestErrorRecoveryManager)
+Test suggesting recovery for unknown errors. ... ERROR
+test_suggest_recovery_for_vpc_error (test_network.TestErrorRecoveryManager)
+Test suggesting recovery for VPC errors. ... ERROR
+test_get_error_context (test_network.TestNetworkErrorHandler)
+Test getting error context information. ... ERROR
+test_handle_generic_exception (test_network.TestNetworkErrorHandler)
+Test handling generic exceptions. ... ERROR
+test_handle_network_connectivity_error (test_network.TestNetworkErrorHandler)
+Test handling network connectivity errors. ... ERROR
+test_eni_creation_error (test_network.TestNetworkExceptions)
+Test ENICreationError exception. ... FAIL
+test_glue_connection_error (test_network.TestNetworkExceptions)
+Test GlueConnectionError exception. ... ERROR
+test_network_connectivity_error (test_network.TestNetworkExceptions)
+Test NetworkConnectivityError exception. ... ERROR
+test_vpc_endpoint_error (test_network.TestNetworkExceptions)
+Test VpcEndpointError exception. ... ERROR
+test_copy_object_failure (test_utils.TestEnhancedS3ParallelOperations)
+Test object copying failure. ... ERROR
+test_copy_object_success (test_utils.TestEnhancedS3ParallelOperations)
+Test successful object copying. ... ERROR
+test_delete_object_success (test_utils.TestEnhancedS3ParallelOperations)
+Test successful object deletion. ... ERROR
+test_get_object_size (test_utils.TestEnhancedS3ParallelOperations)
+Test getting object size. ... ERROR
+test_list_objects_multiple_pages (test_utils.TestEnhancedS3ParallelOperations)
+Test listing objects with pagination. ... ERROR
+test_list_objects_single_page (test_utils.TestEnhancedS3ParallelOperations)
+Test listing objects with single page response. ... ERROR
+test_object_exists_false (test_utils.TestEnhancedS3ParallelOperations)
+Test checking if object exists (false case). ... ERROR
+test_object_exists_true (test_utils.TestEnhancedS3ParallelOperations)
+Test checking if object exists (true case). ... ERROR
+test_build_s3_path (test_utils.TestS3PathUtilities)
+Test building S3 path from bucket and key. ... ERROR
+test_build_s3_path_empty_key (test_utils.TestS3PathUtilities)
+Test building S3 path with empty key. ... ERROR
+test_extract_bucket_from_jdbc_path (test_utils.TestS3PathUtilities)
+Test extracting S3 bucket from JDBC driver path. ... ERROR
+test_extract_bucket_from_jdbc_path_invalid (test_utils.TestS3PathUtilities)
+Test extracting bucket from invalid JDBC path. ... ERROR
+test_get_parent_path (test_utils.TestS3PathUtilities)
+Test getting parent path. ... ERROR
+test_get_parent_path_root (test_utils.TestS3PathUtilities)
+Test getting parent path for root level. ... ERROR
+test_is_valid_s3_path (test_utils.TestS3PathUtilities)
+Test validating S3 paths. ... ERROR
+test_normalize_s3_path (test_utils.TestS3PathUtilities)
+Test normalizing S3 paths. ... ERROR
+test_parse_s3_path_invalid (test_utils.TestS3PathUtilities)
+Test parsing invalid S3 path. ... ERROR
+test_parse_s3_path_root (test_utils.TestS3PathUtilities)
+Test parsing S3 path at bucket root. ... ERROR
+test_parse_s3_path_valid (test_utils.TestS3PathUtilities)
+Test parsing valid S3 path. ... ERROR
+test_parse_s3_path_with_prefix (test_utils.TestS3PathUtilities)
+Test parsing S3 path with prefix. ... ERROR
+
+======================================================================
+ERROR: test_build_mysql_connection_string (test_config.TestConnectionStringBuilder)
+Test building MySQL connection string.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_config.py", line 169, in test_build_mysql_connection_string
+    connection_string = self.builder.build_connection_string(config)
+TypeError: build_connection_string() missing 3 required positional arguments: 'host', 'port', and 'database'
+
+======================================================================
+ERROR: test_build_postgresql_connection_string (test_config.TestConnectionStringBuilder)
+Test building PostgreSQL connection string.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_config.py", line 153, in test_build_postgresql_connection_string
+    connection_string = self.builder.build_connection_string(config)
+TypeError: build_connection_string() missing 3 required positional arguments: 'host', 'port', and 'database'
+
+======================================================================
+ERROR: test_get_driver_class_mysql (test_config.TestDatabaseEngineManager)
+Test getting MySQL driver class.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_config.py", line 115, in test_get_driver_class_mysql
+    driver_class = self.engine_manager.get_driver_class("mysql")
+  File "/Users/lddecaro/git/glue-datareplication/src/glue_job/config/database_engines.py", line 66, in get_driver_class
+    raise ValueError(f"Unsupported database engine: {engine_type}")
+ValueError: Unsupported database engine: mysql
+
+======================================================================
+ERROR: test_get_bookmark_state_existing (test_storage.TestJobBookmarkManager)
+Test getting existing bookmark state.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 174, in setUp
+    self.manager = JobBookmarkManager(self.mock_storage)
+TypeError: __init__() missing 1 required positional argument: 'job_name'
+
+======================================================================
+ERROR: test_get_bookmark_state_new (test_storage.TestJobBookmarkManager)
+Test getting bookmark state for new table.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 174, in setUp
+    self.manager = JobBookmarkManager(self.mock_storage)
+TypeError: __init__() missing 1 required positional argument: 'job_name'
+
+======================================================================
+ERROR: test_update_bookmark_state (test_storage.TestJobBookmarkManager)
+Test updating bookmark state.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 174, in setUp
+    self.manager = JobBookmarkManager(self.mock_storage)
+TypeError: __init__() missing 1 required positional argument: 'job_name'
+
+======================================================================
+ERROR: test_job_bookmark_state_creation (test_storage.TestJobBookmarkState)
+Test creating JobBookmarkState instance.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 61, in test_job_bookmark_state_creation
+    state = JobBookmarkState(
+TypeError: __init__() got an unexpected keyword argument 'processing_mode'
+
+======================================================================
+ERROR: test_job_bookmark_state_to_dict (test_storage.TestJobBookmarkState)
+Test converting JobBookmarkState to dictionary.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 76, in test_job_bookmark_state_to_dict
+    state = JobBookmarkState(
+TypeError: __init__() got an unexpected keyword argument 'processing_mode'
+
+======================================================================
+ERROR: test_s3_bookmark_config_creation (test_storage.TestS3BookmarkConfig)
+Test creating S3BookmarkConfig instance.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 45, in test_s3_bookmark_config_creation
+    config = S3BookmarkConfig(
+TypeError: __init__() got an unexpected keyword argument 'key_prefix'
+
+======================================================================
+ERROR: test_read_bookmark_not_found (test_storage.TestS3BookmarkStorage)
+Test reading bookmark when file doesn't exist.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 96, in setUp
+    self.config = S3BookmarkConfig(
+TypeError: __init__() got an unexpected keyword argument 'key_prefix'
+
+======================================================================
+ERROR: test_read_bookmark_success (test_storage.TestS3BookmarkStorage)
+Test successful bookmark reading from S3.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 96, in setUp
+    self.config = S3BookmarkConfig(
+TypeError: __init__() got an unexpected keyword argument 'key_prefix'
+
+======================================================================
+ERROR: test_write_bookmark_success (test_storage.TestS3BookmarkStorage)
+Test successful bookmark writing to S3.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_storage.py", line 96, in setUp
+    self.config = S3BookmarkConfig(
+TypeError: __init__() got an unexpected keyword argument 'key_prefix'
+
+======================================================================
+ERROR: test_map_mysql_to_spark_types (test_database.TestDataTypeMapper)
+Test mapping MySQL types to Spark types.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 169, in test_map_mysql_to_spark_types
+    spark_type = self.mapper.map_to_spark_type("mysql", "int")
+AttributeError: 'DataTypeMapper' object has no attribute 'map_to_spark_type'
+
+======================================================================
+ERROR: test_map_postgresql_to_spark_types (test_database.TestDataTypeMapper)
+Test mapping PostgreSQL types to Spark types.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 155, in test_map_postgresql_to_spark_types
+    spark_type = self.mapper.map_to_spark_type("postgresql", "integer")
+AttributeError: 'DataTypeMapper' object has no attribute 'map_to_spark_type'
+
+======================================================================
+ERROR: test_execute_full_load (test_database.TestFullLoadDataMigrator)
+Test executing full load migration.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 219, in setUp
+    self.migrator = FullLoadDataMigrator()
+TypeError: __init__() missing 2 required positional arguments: 'spark_session' and 'connection_manager'
+
+======================================================================
+ERROR: test_detect_no_incremental_column (test_database.TestIncrementalColumnDetector)
+Test when no suitable incremental column is found.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 209, in test_detect_no_incremental_column
+    result = self.detector.detect_incremental_column(mock_df)
+AttributeError: 'IncrementalColumnDetector' object has no attribute 'detect_incremental_column'
+
+======================================================================
+ERROR: test_detect_timestamp_column (test_database.TestIncrementalColumnDetector)
+Test detecting timestamp-based incremental column.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 195, in test_detect_timestamp_column
+    result = self.detector.detect_incremental_column(mock_df)
+AttributeError: 'IncrementalColumnDetector' object has no attribute 'detect_incremental_column'
+
+======================================================================
+ERROR: test_execute_incremental_load (test_database.TestIncrementalDataMigrator)
+Test executing incremental load migration.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 262, in setUp
+    self.migrator = IncrementalDataMigrator()
+TypeError: __init__() missing 3 required positional arguments: 'spark_session', 'connection_manager', and 'bookmark_manager'
+
+======================================================================
+ERROR: test_create_connection_success (test_database.TestJdbcConnectionManager)
+Test successful JDBC connection creation.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 57, in setUp
+    self.connection_manager = JdbcConnectionManager(self.mock_spark)
+TypeError: __init__() missing 1 required positional argument: 'glue_context'
+
+======================================================================
+ERROR: test_validate_connection_failure (test_database.TestJdbcConnectionManager)
+Test connection validation failure.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 57, in setUp
+    self.connection_manager = JdbcConnectionManager(self.mock_spark)
+TypeError: __init__() missing 1 required positional argument: 'glue_context'
+
+======================================================================
+ERROR: test_validate_connection_success (test_database.TestJdbcConnectionManager)
+Test successful connection validation.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 57, in setUp
+    self.connection_manager = JdbcConnectionManager(self.mock_spark)
+TypeError: __init__() missing 1 required positional argument: 'glue_context'
+
+======================================================================
+ERROR: test_validate_compatible_schemas (test_database.TestSchemaCompatibilityValidator)
+Test validation of compatible schemas.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 102, in setUp
+    self.validator = SchemaCompatibilityValidator()
+TypeError: __init__() missing 1 required positional argument: 'data_type_mapper'
+
+======================================================================
+ERROR: test_validate_incompatible_schemas (test_database.TestSchemaCompatibilityValidator)
+Test validation of incompatible schemas.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_database.py", line 102, in setUp
+    self.validator = SchemaCompatibilityValidator()
+TypeError: __init__() missing 1 required positional argument: 'data_type_mapper'
+
+======================================================================
+ERROR: test_publish_metric_success (test_monitoring.TestCloudWatchMetricsPublisher)
+Test successful metric publishing.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1337, in patched
+    return func(*newargs, **newkeywargs)
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 98, in test_publish_metric_success
+    self.publisher.publish_metric("TestMetric", 100.0, "Count")
+AttributeError: 'CloudWatchMetricsPublisher' object has no attribute 'publish_metric'
+
+======================================================================
+ERROR: test_publish_metric_with_dimensions (test_monitoring.TestCloudWatchMetricsPublisher)
+Test publishing metric with dimensions.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1337, in patched
+    return func(*newargs, **newkeywargs)
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 111, in test_publish_metric_with_dimensions
+    self.publisher.publish_metric("RecordsProcessed", 1000.0, "Count", dimensions)
+AttributeError: 'CloudWatchMetricsPublisher' object has no attribute 'publish_metric'
+
+======================================================================
+ERROR: test_full_load_progress_creation (test_monitoring.TestFullLoadProgress)
+Test creating FullLoadProgress instance.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 191, in test_full_load_progress_creation
+    progress = FullLoadProgress(
+TypeError: __init__() got an unexpected keyword argument 'total_records'
+
+======================================================================
+ERROR: test_full_load_progress_is_complete (test_monitoring.TestFullLoadProgress)
+Test checking if progress is complete.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 214, in test_full_load_progress_is_complete
+    progress = FullLoadProgress(
+TypeError: __init__() got an unexpected keyword argument 'total_records'
+
+======================================================================
+ERROR: test_full_load_progress_percentage (test_monitoring.TestFullLoadProgress)
+Test calculating progress percentage.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 203, in test_full_load_progress_percentage
+    progress = FullLoadProgress(
+TypeError: __init__() got an unexpected keyword argument 'total_records'
+
+======================================================================
+ERROR: test_incremental_load_progress_creation (test_monitoring.TestIncrementalLoadProgress)
+Test creating IncrementalLoadProgress instance.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 231, in test_incremental_load_progress_creation
+    progress = IncrementalLoadProgress(
+TypeError: __init__() got an unexpected keyword argument 'current_batch_size'
+
+======================================================================
+ERROR: test_incremental_load_progress_update (test_monitoring.TestIncrementalLoadProgress)
+Test updating incremental load progress.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 243, in test_incremental_load_progress_update
+    progress = IncrementalLoadProgress(
+TypeError: __init__() got an unexpected keyword argument 'current_batch_size'
+
+======================================================================
+ERROR: test_processing_metrics_creation (test_monitoring.TestProcessingMetrics)
+Test creating ProcessingMetrics instance.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 143, in test_processing_metrics_creation
+    metrics = ProcessingMetrics(
+TypeError: __init__() got an unexpected keyword argument 'records_processed'
+
+======================================================================
+ERROR: test_processing_metrics_success_rate (test_monitoring.TestProcessingMetrics)
+Test calculating success rate.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 159, in test_processing_metrics_success_rate
+    metrics = ProcessingMetrics(
+TypeError: __init__() got an unexpected keyword argument 'records_processed'
+
+======================================================================
+ERROR: test_processing_metrics_throughput (test_monitoring.TestProcessingMetrics)
+Test calculating throughput.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 173, in test_processing_metrics_throughput
+    metrics = ProcessingMetrics(
+TypeError: __init__() got an unexpected keyword argument 'records_processed'
+
+======================================================================
+ERROR: test_log_error_message (test_monitoring.TestStructuredLogger)
+Test logging error message.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1337, in patched
+    return func(*newargs, **newkeywargs)
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 67, in test_log_error_message
+    logger.error("Test error", {"error_code": "E001"})
+TypeError: error() takes 2 positional arguments but 3 were given
+
+======================================================================
+ERROR: test_log_info_message (test_monitoring.TestStructuredLogger)
+Test logging info message.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1337, in patched
+    return func(*newargs, **newkeywargs)
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 56, in test_log_info_message
+    logger.info("Test message", {"key": "value"})
+TypeError: info() takes 2 positional arguments but 3 were given
+
+======================================================================
+ERROR: test_log_warning_message (test_monitoring.TestStructuredLogger)
+Test logging warning message.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1337, in patched
+    return func(*newargs, **newkeywargs)
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 78, in test_log_warning_message
+    logger.warning("Test warning", {"warning_type": "performance"})
+TypeError: warning() takes 2 positional arguments but 3 were given
+
+======================================================================
+ERROR: test_exponential_backoff_delay (test_network.TestConnectionRetryHandler)
+Test exponential backoff delay calculation.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1337, in patched
+    return func(*newargs, **newkeywargs)
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 211, in test_exponential_backoff_delay
+    result = self.retry_handler.execute_with_retry(mock_operation)
+TypeError: execute_with_retry() missing 1 required positional argument: 'operation_name'
+
+======================================================================
+ERROR: test_operation_with_retries (test_network.TestConnectionRetryHandler)
+Test operation that succeeds after retries.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 171, in test_operation_with_retries
+    result = self.retry_handler.execute_with_retry(mock_operation)
+TypeError: execute_with_retry() missing 1 required positional argument: 'operation_name'
+
+======================================================================
+ERROR: test_successful_operation_no_retry (test_network.TestConnectionRetryHandler)
+Test successful operation without retries.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 156, in test_successful_operation_no_retry
+    result = self.retry_handler.execute_with_retry(mock_operation)
+TypeError: execute_with_retry() missing 1 required positional argument: 'operation_name'
+
+======================================================================
+ERROR: test_classify_glue_error (test_network.TestErrorClassifier)
+Test classifying Glue-specific errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 104, in test_classify_glue_error
+    self.assertEqual(category, ErrorCategory.GLUE)
+AttributeError: type object 'ErrorCategory' has no attribute 'GLUE'
+
+======================================================================
+ERROR: test_classify_vpc_error (test_network.TestErrorClassifier)
+Test classifying VPC-related errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 112, in test_classify_vpc_error
+    self.assertEqual(category, ErrorCategory.VPC)
+AttributeError: type object 'ErrorCategory' has no attribute 'VPC'
+
+======================================================================
+ERROR: test_suggest_recovery_for_glue_error (test_network.TestErrorRecoveryManager)
+Test suggesting recovery for Glue errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 262, in setUp
+    self.recovery_manager = ErrorRecoveryManager()
+TypeError: __init__() missing 1 required positional argument: 'job_name'
+
+======================================================================
+ERROR: test_suggest_recovery_for_network_error (test_network.TestErrorRecoveryManager)
+Test suggesting recovery for network errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 262, in setUp
+    self.recovery_manager = ErrorRecoveryManager()
+TypeError: __init__() missing 1 required positional argument: 'job_name'
+
+======================================================================
+ERROR: test_suggest_recovery_for_unknown_error (test_network.TestErrorRecoveryManager)
+Test suggesting recovery for unknown errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 262, in setUp
+    self.recovery_manager = ErrorRecoveryManager()
+TypeError: __init__() missing 1 required positional argument: 'job_name'
+
+======================================================================
+ERROR: test_suggest_recovery_for_vpc_error (test_network.TestErrorRecoveryManager)
+Test suggesting recovery for VPC errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 262, in setUp
+    self.recovery_manager = ErrorRecoveryManager()
+TypeError: __init__() missing 1 required positional argument: 'job_name'
+
+======================================================================
+ERROR: test_get_error_context (test_network.TestNetworkErrorHandler)
+Test getting error context information.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 249, in test_get_error_context
+    context = self.error_handler.get_error_context(error)
+AttributeError: 'NetworkErrorHandler' object has no attribute 'get_error_context'
+
+======================================================================
+ERROR: test_handle_generic_exception (test_network.TestNetworkErrorHandler)
+Test handling generic exceptions.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 240, in test_handle_generic_exception
+    handled_error = self.error_handler.handle_error(error)
+AttributeError: 'NetworkErrorHandler' object has no attribute 'handle_error'
+
+======================================================================
+ERROR: test_handle_network_connectivity_error (test_network.TestNetworkErrorHandler)
+Test handling network connectivity errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 230, in test_handle_network_connectivity_error
+    handled_error = self.error_handler.handle_error(error)
+AttributeError: 'NetworkErrorHandler' object has no attribute 'handle_error'
+
+======================================================================
+ERROR: test_glue_connection_error (test_network.TestNetworkExceptions)
+Test GlueConnectionError exception.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 55, in test_glue_connection_error
+    self.assertEqual(error.error_code, "GLUE_001")
+AttributeError: 'GlueConnectionError' object has no attribute 'error_code'
+
+======================================================================
+ERROR: test_network_connectivity_error (test_network.TestNetworkExceptions)
+Test NetworkConnectivityError exception.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 47, in test_network_connectivity_error
+    self.assertEqual(error.error_code, "CONN_001")
+AttributeError: 'NetworkConnectivityError' object has no attribute 'error_code'
+
+======================================================================
+ERROR: test_vpc_endpoint_error (test_network.TestNetworkExceptions)
+Test VpcEndpointError exception.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 63, in test_vpc_endpoint_error
+    self.assertEqual(error.error_code, "VPC_001")
+AttributeError: 'VpcEndpointError' object has no attribute 'error_code'
+
+======================================================================
+ERROR: test_copy_object_failure (test_utils.TestEnhancedS3ParallelOperations)
+Test object copying failure.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 145, in setUp
+    self.s3_ops = EnhancedS3ParallelOperations()
+TypeError: __init__() missing 1 required positional argument: 's3_bookmark_storage'
+
+======================================================================
+ERROR: test_copy_object_success (test_utils.TestEnhancedS3ParallelOperations)
+Test successful object copying.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 145, in setUp
+    self.s3_ops = EnhancedS3ParallelOperations()
+TypeError: __init__() missing 1 required positional argument: 's3_bookmark_storage'
+
+======================================================================
+ERROR: test_delete_object_success (test_utils.TestEnhancedS3ParallelOperations)
+Test successful object deletion.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 145, in setUp
+    self.s3_ops = EnhancedS3ParallelOperations()
+TypeError: __init__() missing 1 required positional argument: 's3_bookmark_storage'
+
+======================================================================
+ERROR: test_get_object_size (test_utils.TestEnhancedS3ParallelOperations)
+Test getting object size.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 145, in setUp
+    self.s3_ops = EnhancedS3ParallelOperations()
+TypeError: __init__() missing 1 required positional argument: 's3_bookmark_storage'
+
+======================================================================
+ERROR: test_list_objects_multiple_pages (test_utils.TestEnhancedS3ParallelOperations)
+Test listing objects with pagination.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 145, in setUp
+    self.s3_ops = EnhancedS3ParallelOperations()
+TypeError: __init__() missing 1 required positional argument: 's3_bookmark_storage'
+
+======================================================================
+ERROR: test_list_objects_single_page (test_utils.TestEnhancedS3ParallelOperations)
+Test listing objects with single page response.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 145, in setUp
+    self.s3_ops = EnhancedS3ParallelOperations()
+TypeError: __init__() missing 1 required positional argument: 's3_bookmark_storage'
+
+======================================================================
+ERROR: test_object_exists_false (test_utils.TestEnhancedS3ParallelOperations)
+Test checking if object exists (false case).
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 145, in setUp
+    self.s3_ops = EnhancedS3ParallelOperations()
+TypeError: __init__() missing 1 required positional argument: 's3_bookmark_storage'
+
+======================================================================
+ERROR: test_object_exists_true (test_utils.TestEnhancedS3ParallelOperations)
+Test checking if object exists (true case).
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 145, in setUp
+    self.s3_ops = EnhancedS3ParallelOperations()
+TypeError: __init__() missing 1 required positional argument: 's3_bookmark_storage'
+
+======================================================================
+ERROR: test_build_s3_path (test_utils.TestS3PathUtilities)
+Test building S3 path from bucket and key.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 78, in test_build_s3_path
+    s3_path = self.s3_utils.build_s3_path(bucket, key)
+AttributeError: 'S3PathUtilities' object has no attribute 'build_s3_path'
+
+======================================================================
+ERROR: test_build_s3_path_empty_key (test_utils.TestS3PathUtilities)
+Test building S3 path with empty key.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 87, in test_build_s3_path_empty_key
+    s3_path = self.s3_utils.build_s3_path(bucket, key)
+AttributeError: 'S3PathUtilities' object has no attribute 'build_s3_path'
+
+======================================================================
+ERROR: test_extract_bucket_from_jdbc_path (test_utils.TestS3PathUtilities)
+Test extracting S3 bucket from JDBC driver path.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 95, in test_extract_bucket_from_jdbc_path
+    bucket = self.s3_utils.extract_bucket_from_jdbc_path(jdbc_path)
+AttributeError: 'S3PathUtilities' object has no attribute 'extract_bucket_from_jdbc_path'
+
+======================================================================
+ERROR: test_extract_bucket_from_jdbc_path_invalid (test_utils.TestS3PathUtilities)
+Test extracting bucket from invalid JDBC path.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 103, in test_extract_bucket_from_jdbc_path_invalid
+    bucket = self.s3_utils.extract_bucket_from_jdbc_path(invalid_path)
+AttributeError: 'S3PathUtilities' object has no attribute 'extract_bucket_from_jdbc_path'
+
+======================================================================
+ERROR: test_get_parent_path (test_utils.TestS3PathUtilities)
+Test getting parent path.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 127, in test_get_parent_path
+    parent = self.s3_utils.get_parent_path(s3_path)
+AttributeError: 'S3PathUtilities' object has no attribute 'get_parent_path'
+
+======================================================================
+ERROR: test_get_parent_path_root (test_utils.TestS3PathUtilities)
+Test getting parent path for root level.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 135, in test_get_parent_path_root
+    parent = self.s3_utils.get_parent_path(s3_path)
+AttributeError: 'S3PathUtilities' object has no attribute 'get_parent_path'
+
+======================================================================
+ERROR: test_is_valid_s3_path (test_utils.TestS3PathUtilities)
+Test validating S3 paths.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 112, in test_is_valid_s3_path
+    self.assertTrue(self.s3_utils.is_valid_s3_path(valid_path))
+AttributeError: 'S3PathUtilities' object has no attribute 'is_valid_s3_path'
+
+======================================================================
+ERROR: test_normalize_s3_path (test_utils.TestS3PathUtilities)
+Test normalizing S3 paths.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 119, in test_normalize_s3_path
+    normalized = self.s3_utils.normalize_s3_path(path_with_double_slashes)
+AttributeError: 'S3PathUtilities' object has no attribute 'normalize_s3_path'
+
+======================================================================
+ERROR: test_parse_s3_path_invalid (test_utils.TestS3PathUtilities)
+Test parsing invalid S3 path.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 71, in test_parse_s3_path_invalid
+    self.s3_utils.parse_s3_path(invalid_path)
+AttributeError: 'S3PathUtilities' object has no attribute 'parse_s3_path'
+
+======================================================================
+ERROR: test_parse_s3_path_root (test_utils.TestS3PathUtilities)
+Test parsing S3 path at bucket root.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 61, in test_parse_s3_path_root
+    bucket, key = self.s3_utils.parse_s3_path(s3_path)
+AttributeError: 'S3PathUtilities' object has no attribute 'parse_s3_path'
+
+======================================================================
+ERROR: test_parse_s3_path_valid (test_utils.TestS3PathUtilities)
+Test parsing valid S3 path.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 43, in test_parse_s3_path_valid
+    bucket, key = self.s3_utils.parse_s3_path(s3_path)
+AttributeError: 'S3PathUtilities' object has no attribute 'parse_s3_path'
+
+======================================================================
+ERROR: test_parse_s3_path_with_prefix (test_utils.TestS3PathUtilities)
+Test parsing S3 path with prefix.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_utils.py", line 52, in test_parse_s3_path_with_prefix
+    bucket, key = self.s3_utils.parse_s3_path(s3_path)
+AttributeError: 'S3PathUtilities' object has no attribute 'parse_s3_path'
+
+======================================================================
+FAIL: test_get_driver_class_oracle (test_config.TestDatabaseEngineManager)
+Test getting Oracle driver class.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_config.py", line 126, in test_get_driver_class_oracle
+    self.assertEqual(driver_class, "oracle.jdbc.driver.OracleDriver")
+AssertionError: 'oracle.jdbc.OracleDriver' != 'oracle.jdbc.driver.OracleDriver'
+- oracle.jdbc.OracleDriver
++ oracle.jdbc.driver.OracleDriver
+?            +++++++
+
+
+======================================================================
+FAIL: test_publish_metric_failure (test_monitoring.TestCloudWatchMetricsPublisher)
+Test metric publishing failure handling.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 130, in test_publish_metric_failure
+    self.publisher.publish_metric("TestMetric", 100.0, "Count")
+AttributeError: 'CloudWatchMetricsPublisher' object has no attribute 'publish_metric'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/unittest/mock.py", line 1337, in patched
+    return func(*newargs, **newkeywargs)
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 132, in test_publish_metric_failure
+    self.fail("publish_metric should handle exceptions gracefully")
+AssertionError: publish_metric should handle exceptions gracefully
+
+======================================================================
+FAIL: test_estimate_dataframe_size (test_monitoring.TestEstimateDataFrameSize)
+Test estimating DataFrame size.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_monitoring.py", line 276, in test_estimate_dataframe_size
+    self.assertGreater(estimated_size, 0)
+AssertionError: 0 not greater than 0
+
+======================================================================
+FAIL: test_non_retryable_error (test_network.TestConnectionRetryHandler)
+Test handling of non-retryable errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 199, in test_non_retryable_error
+    self.assertEqual(mock_operation.call_count, 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_operation_exceeds_max_retries (test_network.TestConnectionRetryHandler)
+Test operation that exceeds maximum retries.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 186, in test_operation_exceeds_max_retries
+    self.assertEqual(mock_operation.call_count, 4)
+AssertionError: 0 != 4
+
+======================================================================
+FAIL: test_classify_connection_refused_error (test_network.TestErrorClassifier)
+Test classifying connection refused errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 96, in test_classify_connection_refused_error
+    self.assertEqual(category, ErrorCategory.NETWORK)
+AssertionError: 'connection' != 'network'
+- connection
++ network
+
+
+======================================================================
+FAIL: test_classify_network_timeout_error (test_network.TestErrorClassifier)
+Test classifying network timeout errors.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 88, in test_classify_network_timeout_error
+    self.assertEqual(category, ErrorCategory.NETWORK)
+AssertionError: 'connection' != 'network'
+- connection
++ network
+
+
+======================================================================
+FAIL: test_eni_creation_error (test_network.TestNetworkExceptions)
+Test ENICreationError exception.
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/lddecaro/git/glue-datareplication/tests/test_network.py", line 71, in test_eni_creation_error
+    self.assertEqual(error.error_code, "ENI_001")
+AssertionError: None != 'ENI_001'
+
+----------------------------------------------------------------------
+Ran 88 tests in 0.179s
+
+FAILED (failures=8, errors=71)
+
+================================================================================
+TEST SUMMARY
+================================================================================
+Tests run: 88
+Failures: 8
+Errors: 71
+Skipped: 0
+
+FAILURES:
+- test_get_driver_class_oracle (test_config.TestDatabaseEngineManager): 'oracle.jdbc.OracleDriver' != 'oracle.jdbc.driver.OracleDriver'
+- oracle.jdbc.OracleDriver
++ oracle.jdbc.driver.OracleDriver
+?            +++++++
+- test_publish_metric_failure (test_monitoring.TestCloudWatchMetricsPublisher): publish_metric should handle exceptions gracefully
+- test_estimate_dataframe_size (test_monitoring.TestEstimateDataFrameSize): 0 not greater than 0
+- test_non_retryable_error (test_network.TestConnectionRetryHandler): 0 != 1
+- test_operation_exceeds_max_retries (test_network.TestConnectionRetryHandler): 0 != 4
+- test_classify_connection_refused_error (test_network.TestErrorClassifier): 'connection' != 'network'
+- connection
++ network
+- test_classify_network_timeout_error (test_network.TestErrorClassifier): 'connection' != 'network'
+- connection
++ network
+- test_eni_creation_error (test_network.TestNetworkExceptions): None != 'ENI_001'
+
+ERRORS:
+- test_build_mysql_connection_string (test_config.TestConnectionStringBuilder): See details above
+- test_build_postgresql_connection_string (test_config.TestConnectionStringBuilder): See details above
+- test_get_driver_class_mysql (test_config.TestDatabaseEngineManager): See details above
+- test_get_bookmark_state_existing (test_storage.TestJobBookmarkManager): See details above
+- test_get_bookmark_state_new (test_storage.TestJobBookmarkManager): See details above
+- test_update_bookmark_state (test_storage.TestJobBookmarkManager): See details above
+- test_job_bookmark_state_creation (test_storage.TestJobBookmarkState): See details above
+- test_job_bookmark_state_to_dict (test_storage.TestJobBookmarkState): See details above
+- test_s3_bookmark_config_creation (test_storage.TestS3BookmarkConfig): See details above
+- test_read_bookmark_not_found (test_storage.TestS3BookmarkStorage): See details above
+- test_read_bookmark_success (test_storage.TestS3BookmarkStorage): See details above
+- test_write_bookmark_success (test_storage.TestS3BookmarkStorage): See details above
+- test_map_mysql_to_spark_types (test_database.TestDataTypeMapper): See details above
+- test_map_postgresql_to_spark_types (test_database.TestDataTypeMapper): See details above
+- test_execute_full_load (test_database.TestFullLoadDataMigrator): See details above
+- test_detect_no_incremental_column (test_database.TestIncrementalColumnDetector): See details above
+- test_detect_timestamp_column (test_database.TestIncrementalColumnDetector): See details above
+- test_execute_incremental_load (test_database.TestIncrementalDataMigrator): See details above
+- test_create_connection_success (test_database.TestJdbcConnectionManager): See details above
+- test_validate_connection_failure (test_database.TestJdbcConnectionManager): See details above
+- test_validate_connection_success (test_database.TestJdbcConnectionManager): See details above
+- test_validate_compatible_schemas (test_database.TestSchemaCompatibilityValidator): See details above
+- test_validate_incompatible_schemas (test_database.TestSchemaCompatibilityValidator): See details above
+- test_publish_metric_success (test_monitoring.TestCloudWatchMetricsPublisher): See details above
+- test_publish_metric_with_dimensions (test_monitoring.TestCloudWatchMetricsPublisher): See details above
+- test_full_load_progress_creation (test_monitoring.TestFullLoadProgress): See details above
+- test_full_load_progress_is_complete (test_monitoring.TestFullLoadProgress): See details above
+- test_full_load_progress_percentage (test_monitoring.TestFullLoadProgress): See details above
+- test_incremental_load_progress_creation (test_monitoring.TestIncrementalLoadProgress): See details above
+- test_incremental_load_progress_update (test_monitoring.TestIncrementalLoadProgress): See details above
+- test_processing_metrics_creation (test_monitoring.TestProcessingMetrics): See details above
+- test_processing_metrics_success_rate (test_monitoring.TestProcessingMetrics): See details above
+- test_processing_metrics_throughput (test_monitoring.TestProcessingMetrics): See details above
+- test_log_error_message (test_monitoring.TestStructuredLogger): See details above
+- test_log_info_message (test_monitoring.TestStructuredLogger): See details above
+- test_log_warning_message (test_monitoring.TestStructuredLogger): See details above
+- test_exponential_backoff_delay (test_network.TestConnectionRetryHandler): See details above
+- test_operation_with_retries (test_network.TestConnectionRetryHandler): See details above
+- test_successful_operation_no_retry (test_network.TestConnectionRetryHandler): See details above
+- test_classify_glue_error (test_network.TestErrorClassifier): See details above
+- test_classify_vpc_error (test_network.TestErrorClassifier): See details above
+- test_suggest_recovery_for_glue_error (test_network.TestErrorRecoveryManager): See details above
+- test_suggest_recovery_for_network_error (test_network.TestErrorRecoveryManager): See details above
+- test_suggest_recovery_for_unknown_error (test_network.TestErrorRecoveryManager): See details above
+- test_suggest_recovery_for_vpc_error (test_network.TestErrorRecoveryManager): See details above
+- test_get_error_context (test_network.TestNetworkErrorHandler): See details above
+- test_handle_generic_exception (test_network.TestNetworkErrorHandler): See details above
+- test_handle_network_connectivity_error (test_network.TestNetworkErrorHandler): See details above
+- test_glue_connection_error (test_network.TestNetworkExceptions): See details above
+- test_network_connectivity_error (test_network.TestNetworkExceptions): See details above
+- test_vpc_endpoint_error (test_network.TestNetworkExceptions): See details above
+- test_copy_object_failure (test_utils.TestEnhancedS3ParallelOperations): See details above
+- test_copy_object_success (test_utils.TestEnhancedS3ParallelOperations): See details above
+- test_delete_object_success (test_utils.TestEnhancedS3ParallelOperations): See details above
+- test_get_object_size (test_utils.TestEnhancedS3ParallelOperations): See details above
+- test_list_objects_multiple_pages (test_utils.TestEnhancedS3ParallelOperations): See details above
+- test_list_objects_single_page (test_utils.TestEnhancedS3ParallelOperations): See details above
+- test_object_exists_false (test_utils.TestEnhancedS3ParallelOperations): See details above
+- test_object_exists_true (test_utils.TestEnhancedS3ParallelOperations): See details above
+- test_build_s3_path (test_utils.TestS3PathUtilities): See details above
+- test_build_s3_path_empty_key (test_utils.TestS3PathUtilities): See details above
+- test_extract_bucket_from_jdbc_path (test_utils.TestS3PathUtilities): See details above
+- test_extract_bucket_from_jdbc_path_invalid (test_utils.TestS3PathUtilities): See details above
+- test_get_parent_path (test_utils.TestS3PathUtilities): See details above
+- test_get_parent_path_root (test_utils.TestS3PathUtilities): See details above
+- test_is_valid_s3_path (test_utils.TestS3PathUtilities): See details above
+- test_normalize_s3_path (test_utils.TestS3PathUtilities): See details above
+- test_parse_s3_path_invalid (test_utils.TestS3PathUtilities): See details above
+- test_parse_s3_path_root (test_utils.TestS3PathUtilities): See details above
+- test_parse_s3_path_valid (test_utils.TestS3PathUtilities): See details above
+- test_parse_s3_path_with_prefix (test_utils.TestS3PathUtilities): See details above
+
+Success Rate: 10.2%
+
+❌ 79 test(s) failed. Please review and fix issues.
+
+❌ Unit tests failed. Skipping integration tests.
