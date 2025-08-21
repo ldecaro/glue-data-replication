@@ -94,6 +94,7 @@ aws s3 sync config/ s3://[your-bucket-name]/config/
 # Example for SQL Server JDBC driver
 aws s3 cp jdbc-drivers/sqlserver/mssql-jdbc-12.2.0.jre11.jar s3://[your-bucket-name]/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar
 ```
+For more details, please check [Driver Download and Storage.](docs/DATABASE_CONFIGURATION_GUIDE.md#driver-download-and-storage).
 
 ### 3. Configure Parameters
 

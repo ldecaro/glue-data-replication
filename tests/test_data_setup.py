@@ -159,7 +159,7 @@ class TestDataGenerator:
                 'weight_kg': round(random.uniform(0.1, 50.0), 2),
                 'dimensions_cm': f"{random.randint(5, 100)}x{random.randint(5, 100)}x{random.randint(5, 100)}",
                 'color': random.choice(['Black', 'White', 'Red', 'Blue', 'Green', 'Yellow', 'Gray', 'Brown']),
-                'size': random.choice(['XS', 'S', 'M', 'L', 'XL', 'XXL']) if category == 'Clothing' else None,
+                'product_size': random.choice(['XS', 'S', 'M', 'L', 'XL', 'XXL']) if category == 'Clothing' else None,
                 'description': self.fake.text(max_nb_chars=500),
                 'features': self._generate_product_features(category),
                 'is_active': random.choice([True, False]),

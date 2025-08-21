@@ -9,7 +9,7 @@ A comprehensive AWS Glue-based data replication solution that supports full-load
 - **Incremental Processing**: Uses Glue job bookmarks for efficient data synchronization with automatic incremental column detection ([details](docs/BOOKMARK_DETAILS.md))
 - **Comprehensive Monitoring**: CloudWatch metrics, dashboards, and alarms
 - **Network Security**: VPC endpoints for private subnet access to AWS services
-- **Error Handling**: Robust error recovery and retry mechanisms
+- **Error Handling**: Robust error recovery and retry mechanisms with table-level isolation ([details](docs/ERROR_HANDLING_GUIDE.md))
 - **Performance Optimization**: Configurable worker types and parallel processing
 - **Modular Architecture**: Clean separation of concerns with focused, maintainable modules
 
@@ -126,6 +126,7 @@ aws glue start-job-run --job-name my-job-name
 - **[Bookmark Details](docs/BOOKMARK_DETAILS.md)**: Job bookmark system and incremental loading strategies
 
 ### Operations and Monitoring
+- **[Error Handling Guide](docs/ERROR_HANDLING_GUIDE.md)**: Comprehensive error handling during data transfer
 - **[Observability Guide](docs/OBSERVABILITY_GUIDE.md)**: Monitoring and alerting setup
 - **[Testing Guide](docs/TESTING_GUIDE.md)**: Testing procedures and validation
 - **[DevOps Deployment Guide](docs/DEVOPS_DEPLOYMENT_GUIDE.md)**: CI/CD and automation

@@ -101,19 +101,19 @@ Parameters:
   
   SourceConnectionString:
     Type: String
-    Description: 'JDBC connection string for source database (format: jdbc:engine://host:port/database or jdbc:engine://host:port;databaseName=database)'
+    Description: 'JDBC connection string for source database (format: jdbc:engine://host:port/database or jdbc:engine://host:port;databaseName=database or jdbc:oracle:thin:@//host:port/database)'
     MinLength: 10
     MaxLength: 512
-    AllowedPattern: '^jdbc:[a-zA-Z0-9]+://[a-zA-Z0-9.-]+:[0-9]+[/;].*$'
-    ConstraintDescription: 'Must be a valid JDBC connection string starting with jdbc:engine://host:port'
+    AllowedPattern: '^jdbc:[a-zA-Z0-9]+:(thin:@//|//)[a-zA-Z0-9.-]+:[0-9]+[/;].*$'
+    ConstraintDescription: 'Must be a valid JDBC connection string starting with jdbc:engine://host:port or jdbc:oracle:thin:@//host:port'
   
   TargetConnectionString:
     Type: String
-    Description: 'JDBC connection string for target database (format: jdbc:engine://host:port/database or jdbc:engine://host:port;databaseName=database)'
+    Description: 'JDBC connection string for target database (format: jdbc:engine://host:port/database or jdbc:engine://host:port;databaseName=database or jdbc:oracle:thin:@//host:port/database)'
     MinLength: 10
     MaxLength: 512
-    AllowedPattern: '^jdbc:[a-zA-Z0-9]+://[a-zA-Z0-9.-]+:[0-9]+[/;].*$'
-    ConstraintDescription: 'Must be a valid JDBC connection string starting with jdbc:engine://host:port'
+    AllowedPattern: '^jdbc:[a-zA-Z0-9]+:(thin:@//|//)[a-zA-Z0-9.-]+:[0-9]+[/;].*$'
+    ConstraintDescription: 'Must be a valid JDBC connection string starting with jdbc:engine://host:port or jdbc:oracle:thin:@//host:port'
   
   SourceJdbcDriverS3Path:
     Type: String

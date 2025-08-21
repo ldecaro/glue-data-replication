@@ -73,7 +73,7 @@ class DatabaseDDLGenerator:
                 'DECIMAL(5,2)': 'NUMBER(5,2)',
                 'DECIMAL(5,4)': 'NUMBER(5,4)',
                 'TEXT': 'CLOB',
-                'BOOLEAN': 'NUMBER(1) CHECK (VALUE IN (0,1))'
+                'BOOLEAN': 'NUMBER(1)'
             },
             'sqlserver': {
                 'INTEGER': 'INT',
@@ -127,7 +127,7 @@ class DatabaseDDLGenerator:
                 'DECIMAL(5,2)': 'DECIMAL(5,2)',
                 'DECIMAL(5,4)': 'DECIMAL(5,4)',
                 'TEXT': 'CLOB',
-                'BOOLEAN': 'SMALLINT CHECK (VALUE IN (0,1))'
+                'BOOLEAN': 'SMALLINT'
             }
         }
     
@@ -199,7 +199,7 @@ class DatabaseDDLGenerator:
                     TableColumn('weight_kg', 'DECIMAL(8,2)', True),
                     TableColumn('dimensions_cm', 'VARCHAR(50)', True),
                     TableColumn('color', 'VARCHAR(20)', True),
-                    TableColumn('size', 'VARCHAR(10)', True),
+                    TableColumn('product_size', 'VARCHAR(10)', True),
                     TableColumn('description', 'TEXT', True),
                     TableColumn('features', 'TEXT', True),
                     TableColumn('is_active', 'BOOLEAN', True),
@@ -276,6 +276,10 @@ class DatabaseDDLGenerator:
             # Build column definition
             col_def = f"    {col.name} {col_type}"
             
+            # Add inline check constraint for boolean columns in Oracle
+            if self.engine == 'oracle' and col.data_type == 'BOOLEAN':
+                col_def += " CHECK ({} IN (0,1))".format(col.name)
+            
             # Add NOT NULL constraint
             if not col.nullable:
                 col_def += " NOT NULL"
@@ -285,6 +289,13 @@ class DatabaseDDLGenerator:
                 col_def += f" DEFAULT {col.default_value}"
             
             column_defs.append(col_def)
+        
+        # Add check constraints for boolean columns in DB2 (Oracle done inline)
+        if self.engine == 'db2':
+            for col in table_schema.columns:
+                if col.data_type == 'BOOLEAN':
+                    check_constraint = f"    CONSTRAINT chk_{table_schema.name}_{col.name} CHECK ({col.name} IN (0,1))"
+                    column_defs.append(check_constraint)
         
         # Add primary key constraint
         if table_schema.primary_key:
@@ -331,16 +342,21 @@ class DatabaseDDLGenerator:
                 elif isinstance(value, (datetime, date)):
                     if self.engine == 'oracle':
                         if isinstance(value, datetime):
-                            values.append(f"TIMESTAMP '{value.strftime('%Y-%m-%d %H:%M:%S')}'")
+                            values.append(f"TO_TIMESTAMP('{value.strftime('%Y-%m-%d %H:%M:%S')}', 'YYYY-MM-DD HH24:MI:SS')")
                         else:
-                            values.append(f"DATE '{value.strftime('%Y-%m-%d')}'")
+                            values.append(f"TO_DATE('{value.strftime('%Y-%m-%d')}', 'YYYY-MM-DD')")
                     elif self.engine == 'sqlserver':
                         values.append(f"'{value.isoformat()}'")
                     else:  # PostgreSQL, DB2
                         values.append(f"'{value.isoformat()}'")
                 elif isinstance(value, time):
                     # Handle time objects separately
-                    values.append(f"'{value.isoformat()}'")
+                    if self.engine == 'oracle':
+                        # Convert time to timestamp for Oracle
+                        time_str = value.strftime('%H:%M:%S')
+                        values.append(f"TO_TIMESTAMP('1970-01-01 {time_str}', 'YYYY-MM-DD HH24:MI:SS')")
+                    else:
+                        values.append(f"'{value.isoformat()}'")
                 elif isinstance(value, bool):
                     if self.engine in ['oracle', 'db2']:
                         values.append('1' if value else '0')
@@ -405,6 +421,10 @@ Examples:
     parser.add_argument('--drop-tables',
                        action='store_true',
                        help='Include DROP TABLE statements')
+    
+    parser.add_argument('--transaction-blocks',
+                       action='store_true',
+                       help='Use explicit BEGIN/END transaction blocks (Oracle PL/SQL)')
     
     args = parser.parse_args()
     
@@ -484,12 +504,55 @@ Examples:
             product_count = counts['products'] if 'products' in schemas_to_generate else 200
             sample_data['order_items'] = data_generator.generate_order_items_data(order_count, product_count)
         
-        # Generate INSERT statements
+        # Add transaction management for Oracle
+        if args.engine == 'oracle':
+            if args.transaction_blocks:
+                output_lines.append("-- Begin explicit transaction block")
+                output_lines.append("BEGIN")
+                output_lines.append("")
+            else:
+                output_lines.append("-- Begin transaction (implicit - Oracle starts transaction on first DML)")
+                output_lines.append("")
+        
+        # Generate INSERT statements with batch commits for Oracle
+        batch_size = 100 if args.engine == 'oracle' else 0  # Commit every 100 inserts for Oracle
+        insert_count = 0
+        
         for table_name in schemas_to_generate.keys():
             if table_name in sample_data:
                 output_lines.append(f"-- Data for {table_name}")
                 insert_statements = generator.generate_insert_statements(table_name, sample_data[table_name])
-                output_lines.extend(insert_statements)
+                
+                # Add batch commits for Oracle if dataset is large
+                if args.engine == 'oracle' and len(insert_statements) > batch_size:
+                    for i, stmt in enumerate(insert_statements):
+                        output_lines.append(stmt)
+                        insert_count += 1
+                        
+                        # Add intermediate commit every batch_size inserts
+                        if insert_count % batch_size == 0:
+                            if args.transaction_blocks:
+                                output_lines.append("    COMMIT; -- Batch commit")
+                            else:
+                                output_lines.append("COMMIT; -- Batch commit")
+                            output_lines.append("")
+                else:
+                    output_lines.extend(insert_statements)
+                    insert_count += len(insert_statements)
+                
+                output_lines.append("")
+        
+        # Add final commit for Oracle
+        if args.engine == 'oracle':
+            if args.transaction_blocks:
+                output_lines.append("    -- Final commit")
+                output_lines.append("    COMMIT;")
+                output_lines.append("END;")
+                output_lines.append("/")
+                output_lines.append("")
+            else:
+                output_lines.append("-- Final commit")
+                output_lines.append("COMMIT;")
                 output_lines.append("")
     
     # Output results
