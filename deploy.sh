@@ -339,21 +339,19 @@ if [[ "$SKIP_UPLOAD" == false ]]; then
     
     # Package Glue job modules using dedicated script
     print_status "Packaging Glue job modules..."
-    if [[ ! -f "dist/glue-job-modules.zip" ]] || [[ ! -f "dist/main.py" ]]; then
-        print_status "Running packaging script..."
-        if [[ -x "infrastructure/scripts/package-glue-modules.sh" ]]; then
-            ./infrastructure/scripts/package-glue-modules.sh
-        else
-            print_warning "Packaging script not found or not executable, using fallback method"
-            mkdir -p dist
-            CURRENT_DIR="$(pwd)"
-            cd src && zip -r "$CURRENT_DIR/dist/glue-job-modules.zip" glue_job/ -x "glue_job/main.py" && cd ..
-            cp src/glue_job/main.py dist/
-        fi
-        print_success "Created Glue job packages"
+    print_status "Cleaning and rebuilding artifacts to ensure latest code changes..."
+    if [[ -x "infrastructure/scripts/package-glue-modules.sh" ]]; then
+        ./infrastructure/scripts/package-glue-modules.sh --clean
     else
-        print_status "Using existing Glue job packages"
+        print_warning "Packaging script not found or not executable, using fallback method"
+        # Clean and recreate dist directory
+        rm -rf dist
+        mkdir -p dist
+        CURRENT_DIR="$(pwd)"
+        cd src && zip -r "$CURRENT_DIR/dist/glue-job-modules.zip" glue_job/ -x "glue_job/main.py" && cd ..
+        cp src/glue_job/main.py dist/
     fi
+    print_success "Created fresh Glue job packages with latest code changes"
     
     # Upload main script
     print_status "Uploading Glue job main script..."

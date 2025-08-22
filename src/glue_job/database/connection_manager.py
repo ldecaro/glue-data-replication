@@ -10,6 +10,7 @@ import boto3
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
 from botocore.config import Config
+from botocore.exceptions import ClientError
 # Conditional imports for PySpark and AWS Glue (only available in Glue runtime)
 try:
     from pyspark.sql import SparkSession, DataFrame
@@ -35,6 +36,10 @@ from ..network.error_handler import (
     ENICreationError, ErrorCategory
 )
 from ..network.retry_handler import ConnectionRetryHandler, ErrorClassifier
+from ..config.iceberg_connection_handler import IcebergConnectionHandler
+from ..config.iceberg_models import (
+    IcebergConfig, IcebergEngineError, IcebergConnectionError, IcebergValidationError
+)
 
 
 class GlueConnectionManager:
@@ -1102,3 +1107,783 @@ class JdbcConnectionManager:
         """Get cached connection information."""
         cache_key = self.get_connection_cache_key(connection_config)
         return self._connection_cache.get(cache_key)
+
+
+class UnifiedConnectionManager:
+    """Unified connection manager that routes between JDBC and Iceberg connections.
+    
+    This class provides a single interface for managing both traditional JDBC database
+    connections and Iceberg table connections, automatically routing requests to the
+    appropriate handler based on the engine type.
+    """
+    
+    def __init__(self, spark_session: SparkSession, glue_context: GlueContext,
+                 retry_handler: Optional[ConnectionRetryHandler] = None):
+        """Initialize the unified connection manager.
+        
+        Args:
+            spark_session: Active Spark session
+            glue_context: AWS Glue context
+            retry_handler: Optional retry handler for connection operations
+        """
+        self.spark = spark_session
+        self.glue_context = glue_context
+        self.retry_handler = retry_handler or ConnectionRetryHandler()
+        
+        # Initialize JDBC connection manager
+        self.jdbc_manager = JdbcConnectionManager(
+            spark_session, glue_context, retry_handler
+        )
+        
+        # Initialize Iceberg connection handler
+        self.iceberg_handler = IcebergConnectionHandler(
+            spark_session, glue_context
+        )
+        
+        self.structured_logger = StructuredLogger("UnifiedConnectionManager")
+        
+        # Connection validation cache
+        self._validation_cache = {}
+        
+        self.structured_logger.info("Initialized UnifiedConnectionManager with JDBC and Iceberg support")
+    
+    def is_iceberg_engine(self, engine_type: str) -> bool:
+        """Check if the engine type is Iceberg.
+        
+        Args:
+            engine_type: Database engine type to check
+            
+        Returns:
+            bool: True if engine is Iceberg, False otherwise
+        """
+        return DatabaseEngineManager.is_iceberg_engine(engine_type)
+    
+    def validate_connection_config(self, connection_config: ConnectionConfig) -> bool:
+        """Validate connection configuration with engine-specific validation.
+        
+        Args:
+            connection_config: Connection configuration to validate
+            
+        Returns:
+            bool: True if configuration is valid, False otherwise
+            
+        Raises:
+            IcebergValidationError: For Iceberg-specific validation errors
+            ValueError: For general configuration errors
+        """
+        try:
+            self.structured_logger.info(
+                "Validating connection configuration",
+                engine_type=connection_config.engine_type
+            )
+            
+            # Check if engine is supported
+            if not DatabaseEngineManager.is_engine_supported(connection_config.engine_type):
+                raise ValueError(f"Unsupported database engine: {connection_config.engine_type}")
+            
+            # Route validation based on engine type
+            if self.is_iceberg_engine(connection_config.engine_type):
+                return self._validate_iceberg_connection_config(connection_config)
+            else:
+                return self._validate_jdbc_connection_config(connection_config)
+                
+        except (IcebergValidationError, ValueError):
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during connection configuration validation",
+                engine_type=connection_config.engine_type,
+                error=str(e)
+            )
+            raise ValueError(f"Connection configuration validation failed: {str(e)}")
+    
+    def _validate_iceberg_connection_config(self, connection_config: ConnectionConfig) -> bool:
+        """Validate Iceberg-specific connection configuration.
+        
+        Args:
+            connection_config: Connection configuration to validate
+            
+        Returns:
+            bool: True if configuration is valid
+            
+        Raises:
+            IcebergValidationError: If validation fails
+        """
+        try:
+            # For Iceberg, we need to extract configuration from connection_config
+            # Since Iceberg doesn't use traditional JDBC parameters, we need to
+            # parse the configuration differently
+            
+            # Create Iceberg config from connection parameters
+            # Get Iceberg configuration from the connection config
+            connection_iceberg_config = connection_config.get_iceberg_config()
+            if not connection_iceberg_config:
+                raise ValueError(f"Iceberg configuration missing for connection")
+            
+            iceberg_config_dict = {
+                'database_name': connection_config.database,
+                'table_name': getattr(connection_config, 'table_name', ''),
+                'warehouse_location': connection_iceberg_config.get('warehouse_location', ''),
+                'catalog_id': connection_iceberg_config.get('catalog_id', None),
+                'format_version': connection_iceberg_config.get('format_version', '2')
+            }
+            
+            # Use DatabaseEngineManager to validate Iceberg configuration
+            is_valid = DatabaseEngineManager.validate_iceberg_config(iceberg_config_dict)
+            
+            if not is_valid:
+                raise IcebergValidationError(
+                    "Iceberg configuration validation failed",
+                    field="configuration",
+                    value=str(iceberg_config_dict)
+                )
+            
+            self.structured_logger.info(
+                "Iceberg connection configuration validation passed",
+                database=connection_config.database
+            )
+            
+            return True
+            
+        except IcebergValidationError:
+            raise
+        except Exception as e:
+            raise IcebergValidationError(
+                f"Iceberg configuration validation error: {str(e)}",
+                field="validation",
+                value=str(e)
+            )
+    
+    def _validate_jdbc_connection_config(self, connection_config: ConnectionConfig) -> bool:
+        """Validate JDBC connection configuration.
+        
+        Args:
+            connection_config: Connection configuration to validate
+            
+        Returns:
+            bool: True if configuration is valid
+            
+        Raises:
+            ValueError: If validation fails
+        """
+        try:
+            # Validate connection string format
+            is_valid = DatabaseEngineManager.validate_connection_string(
+                connection_config.engine_type,
+                connection_config.connection_string
+            )
+            
+            if not is_valid:
+                raise ValueError(
+                    f"Invalid connection string format for {connection_config.engine_type}"
+                )
+            
+            # Validate required JDBC parameters
+            connection_config.validate()
+            
+            self.structured_logger.info(
+                "JDBC connection configuration validation passed",
+                engine_type=connection_config.engine_type,
+                database=connection_config.database
+            )
+            
+            return True
+            
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(f"JDBC configuration validation error: {str(e)}")
+    
+    def validate_connection(self, connection_config: ConnectionConfig,
+                          timeout_seconds: int = 30) -> bool:
+        """Validate database connection with engine-specific routing.
+        
+        Args:
+            connection_config: Connection configuration to validate
+            timeout_seconds: Connection timeout in seconds
+            
+        Returns:
+            bool: True if connection is valid, False otherwise
+            
+        Raises:
+            IcebergConnectionError: For Iceberg connection issues
+            NetworkConnectivityError: For network connectivity issues
+        """
+        try:
+            # Check validation cache first
+            cache_key = self._get_validation_cache_key(connection_config)
+            cached_result = self._validation_cache.get(cache_key)
+            if cached_result is not None:
+                cache_age = time.time() - cached_result['timestamp']
+                if cache_age < 300:  # 5 minutes cache
+                    self.structured_logger.debug(
+                        "Using cached connection validation result",
+                        engine_type=connection_config.engine_type,
+                        result=cached_result['valid']
+                    )
+                    return cached_result['valid']
+            
+            self.structured_logger.info(
+                "Validating database connection",
+                engine_type=connection_config.engine_type,
+                timeout_seconds=timeout_seconds
+            )
+            
+            start_time = time.time()
+            
+            # Route validation based on engine type
+            if self.is_iceberg_engine(connection_config.engine_type):
+                result = self._validate_iceberg_connection(connection_config, timeout_seconds)
+            else:
+                result = self._validate_jdbc_connection(connection_config, timeout_seconds)
+            
+            # Cache the result
+            self._validation_cache[cache_key] = {
+                'valid': result,
+                'timestamp': time.time()
+            }
+            
+            duration = time.time() - start_time
+            self.structured_logger.info(
+                "Connection validation completed",
+                engine_type=connection_config.engine_type,
+                result="passed" if result else "failed",
+                duration_seconds=round(duration, 2)
+            )
+            
+            return result
+            
+        except (IcebergConnectionError, NetworkConnectivityError):
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during connection validation",
+                engine_type=connection_config.engine_type,
+                error=str(e)
+            )
+            raise NetworkConnectivityError(
+                f"Connection validation failed: {str(e)}",
+                error_type='validation_error',
+                connection_name=connection_config.get_glue_connection_name()
+            )
+    
+    def _validate_iceberg_connection(self, connection_config: ConnectionConfig,
+                                   timeout_seconds: int) -> bool:
+        """Validate Iceberg connection by checking catalog access.
+        
+        Args:
+            connection_config: Iceberg connection configuration
+            timeout_seconds: Connection timeout (not used for Iceberg)
+            
+        Returns:
+            bool: True if connection is valid
+            
+        Raises:
+            IcebergConnectionError: If validation fails
+        """
+        try:
+            self.structured_logger.info(
+                "Validating Iceberg connection",
+                database=connection_config.database
+            )
+            
+            # Create Iceberg config from connection parameters
+            # Get Iceberg configuration from the connection config
+            connection_iceberg_config = connection_config.get_iceberg_config()
+            if not connection_iceberg_config:
+                raise IcebergConnectionError(
+                    "Iceberg configuration missing for connection validation",
+                    warehouse_location=""
+                )
+            
+            warehouse_location = connection_iceberg_config.get('warehouse_location', '')
+            catalog_id = connection_iceberg_config.get('catalog_id', None)
+            
+            if not warehouse_location:
+                raise IcebergConnectionError(
+                    "Warehouse location is required for Iceberg connection validation",
+                    warehouse_location=warehouse_location
+                )
+            
+            # Configure Iceberg catalog to test connectivity
+            self.iceberg_handler.configure_iceberg_catalog(
+                warehouse_location=warehouse_location,
+                catalog_id=catalog_id
+            )
+            
+            # Test catalog access by checking if database exists
+            try:
+                # This will test Glue Data Catalog access
+                glue_client = boto3.client('glue')
+                get_database_kwargs = {'Name': connection_config.database}
+                if catalog_id:
+                    get_database_kwargs['CatalogId'] = catalog_id
+                
+                glue_client.get_database(**get_database_kwargs)
+                
+                self.structured_logger.info(
+                    "Iceberg connection validation successful",
+                    database=connection_config.database,
+                    warehouse_location=warehouse_location
+                )
+                return True
+                
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', '')
+                if error_code == 'EntityNotFoundException':
+                    # Database doesn't exist, but catalog access works
+                    self.structured_logger.warning(
+                        "Iceberg database not found, but catalog access is valid",
+                        database=connection_config.database
+                    )
+                    return True
+                else:
+                    raise IcebergConnectionError(
+                        f"Iceberg catalog access failed: {str(e)}",
+                        warehouse_location=warehouse_location,
+                        aws_error=e
+                    )
+            
+        except IcebergConnectionError:
+            raise
+        except Exception as e:
+            # Get warehouse location for error context
+            connection_iceberg_config = connection_config.get_iceberg_config()
+            warehouse_location = connection_iceberg_config.get('warehouse_location', '') if connection_iceberg_config else ''
+            
+            raise IcebergConnectionError(
+                f"Iceberg connection validation failed: {str(e)}",
+                warehouse_location=warehouse_location,
+                spark_error=e
+            )
+    
+    def _validate_jdbc_connection(self, connection_config: ConnectionConfig,
+                                timeout_seconds: int) -> bool:
+        """Validate JDBC connection using the JDBC manager.
+        
+        Args:
+            connection_config: JDBC connection configuration
+            timeout_seconds: Connection timeout in seconds
+            
+        Returns:
+            bool: True if connection is valid
+        """
+        return self.jdbc_manager.validate_connection_with_network_check(
+            connection_config=connection_config,
+            glue_connection_name=connection_config.get_glue_connection_name() or '',
+            timeout_seconds=timeout_seconds
+        )
+    
+    def create_connection(self, connection_config: ConnectionConfig) -> Any:
+        """Create appropriate connection based on engine type.
+        
+        Args:
+            connection_config: Connection configuration
+            
+        Returns:
+            Connection object (DataFrame reader for JDBC, IcebergConnectionHandler for Iceberg)
+            
+        Raises:
+            IcebergConnectionError: For Iceberg connection issues
+            RuntimeError: For JDBC connection issues
+        """
+        try:
+            self.structured_logger.info(
+                "Creating connection",
+                engine_type=connection_config.engine_type
+            )
+            
+            # Route connection creation based on engine type
+            if self.is_iceberg_engine(connection_config.engine_type):
+                return self._create_iceberg_connection(connection_config)
+            else:
+                return self._create_jdbc_connection(connection_config)
+                
+        except (IcebergConnectionError, RuntimeError):
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during connection creation",
+                engine_type=connection_config.engine_type,
+                error=str(e)
+            )
+            raise RuntimeError(f"Connection creation failed: {str(e)}")
+    
+    def _create_iceberg_connection(self, connection_config: ConnectionConfig) -> IcebergConnectionHandler:
+        """Create Iceberg connection handler.
+        
+        Args:
+            connection_config: Iceberg connection configuration
+            
+        Returns:
+            IcebergConnectionHandler: Configured Iceberg handler
+            
+        Raises:
+            IcebergConnectionError: If connection creation fails
+        """
+        try:
+            # Configure Iceberg catalog
+            # Get Iceberg configuration from the connection config
+            connection_iceberg_config = connection_config.get_iceberg_config()
+            if not connection_iceberg_config:
+                raise IcebergConnectionError(
+                    "Iceberg configuration missing for connection creation",
+                    warehouse_location=""
+                )
+            
+            warehouse_location = connection_iceberg_config.get('warehouse_location', '')
+            catalog_id = connection_iceberg_config.get('catalog_id', None)
+            
+            if warehouse_location:
+                self.iceberg_handler.configure_iceberg_catalog(
+                    warehouse_location=warehouse_location,
+                    catalog_id=catalog_id
+                )
+            
+            self.structured_logger.info(
+                "Created Iceberg connection",
+                database=connection_config.database,
+                warehouse_location=warehouse_location
+            )
+            
+            return self.iceberg_handler
+            
+        except Exception as e:
+            # Get warehouse location for error context
+            connection_iceberg_config = connection_config.get_iceberg_config()
+            warehouse_location = connection_iceberg_config.get('warehouse_location', '') if connection_iceberg_config else ''
+            
+            raise IcebergConnectionError(
+                f"Failed to create Iceberg connection: {str(e)}",
+                warehouse_location=warehouse_location,
+                spark_error=e
+            )
+    
+    def _create_jdbc_connection(self, connection_config: ConnectionConfig) -> DataFrame:
+        """Create JDBC connection using the JDBC manager.
+        
+        Args:
+            connection_config: JDBC connection configuration
+            
+        Returns:
+            DataFrame: Spark DataFrame reader configured for JDBC
+        """
+        return self.jdbc_manager.create_connection_with_glue_support(
+            connection_config=connection_config,
+            glue_connection_name=connection_config.get_glue_connection_name() or ''
+        )
+    
+    def read_table(self, connection_config: ConnectionConfig, table_name: str,
+                  query: Optional[str] = None, **options) -> DataFrame:
+        """Read data from table with engine-specific routing.
+        
+        Args:
+            connection_config: Connection configuration
+            table_name: Table name to read from
+            query: Optional custom query (JDBC only)
+            **options: Additional read options
+            
+        Returns:
+            DataFrame: Spark DataFrame containing table data
+            
+        Raises:
+            IcebergConnectionError: For Iceberg read issues
+            RuntimeError: For JDBC read issues
+        """
+        try:
+            self.structured_logger.info(
+                "Reading table data",
+                engine_type=connection_config.engine_type,
+                table_name=table_name
+            )
+            
+            # Route read operation based on engine type
+            if self.is_iceberg_engine(connection_config.engine_type):
+                return self._read_iceberg_table(connection_config, table_name, **options)
+            else:
+                return self._read_jdbc_table(connection_config, table_name, query, **options)
+                
+        except (IcebergConnectionError, RuntimeError):
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during table read",
+                engine_type=connection_config.engine_type,
+                table_name=table_name,
+                error=str(e)
+            )
+            raise RuntimeError(f"Table read failed: {str(e)}")
+    
+    def _read_iceberg_table(self, connection_config: ConnectionConfig,
+                           table_name: str, **options) -> DataFrame:
+        """Read data from Iceberg table.
+        
+        Args:
+            connection_config: Iceberg connection configuration
+            table_name: Table name to read from
+            **options: Additional read options
+            
+        Returns:
+            DataFrame: Spark DataFrame containing table data
+        """
+        catalog_id = getattr(connection_config, 'catalog_id', None)
+        return self.iceberg_handler.read_table(
+            database=connection_config.database,
+            table=table_name,
+            catalog_id=catalog_id,
+            additional_options=options
+        )
+    
+    def _read_jdbc_table(self, connection_config: ConnectionConfig,
+                        table_name: str, query: Optional[str] = None,
+                        **options) -> DataFrame:
+        """Read data from JDBC table.
+        
+        Args:
+            connection_config: JDBC connection configuration
+            table_name: Table name to read from
+            query: Optional custom query
+            **options: Additional read options
+            
+        Returns:
+            DataFrame: Spark DataFrame containing table data
+        """
+        return self.jdbc_manager.read_table_data(
+            connection_config=connection_config,
+            table_name=table_name,
+            query=query,
+            **options
+        )
+    
+    def write_table(self, df: DataFrame, connection_config: ConnectionConfig,
+                   table_name: str, mode: str = 'append', **options) -> None:
+        """Write data to table with engine-specific routing.
+        
+        Args:
+            df: DataFrame to write
+            connection_config: Connection configuration
+            table_name: Table name to write to
+            mode: Write mode ('append', 'overwrite', 'create')
+            **options: Additional write options
+            
+        Raises:
+            IcebergConnectionError: For Iceberg write issues
+            RuntimeError: For JDBC write issues
+        """
+        try:
+            self.structured_logger.info(
+                "Writing table data",
+                engine_type=connection_config.engine_type,
+                table_name=table_name,
+                mode=mode
+            )
+            
+            # Route write operation based on engine type
+            if self.is_iceberg_engine(connection_config.engine_type):
+                self._write_iceberg_table(df, connection_config, table_name, mode, **options)
+            else:
+                self._write_jdbc_table(df, connection_config, table_name, mode, **options)
+                
+        except (IcebergConnectionError, RuntimeError):
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during table write",
+                engine_type=connection_config.engine_type,
+                table_name=table_name,
+                error=str(e)
+            )
+            raise RuntimeError(f"Table write failed: {str(e)}")
+    
+    def _write_iceberg_table(self, df: DataFrame, connection_config: ConnectionConfig,
+                            table_name: str, mode: str, **options) -> None:
+        """Write data to Iceberg table.
+        
+        Args:
+            df: DataFrame to write
+            connection_config: Iceberg connection configuration
+            table_name: Table name to write to
+            mode: Write mode
+            **options: Additional write options
+        """
+        print(f"=== _WRITE_ICEBERG_TABLE CALLED FOR {table_name} ===")
+        try:
+            self.structured_logger.info(
+                f"Starting Iceberg table write for {table_name}",
+                database=connection_config.database,
+                mode=mode
+            )
+            
+            # Create Iceberg config from connection parameters
+            # Get Iceberg configuration from the connection config
+            connection_iceberg_config = connection_config.get_iceberg_config()
+            if not connection_iceberg_config:
+                raise ValueError(f"Iceberg configuration missing for connection")
+            
+            self.structured_logger.info(
+                warehouse_location=connection_iceberg_config.get('warehouse_location', ''),
+                catalog_id=connection_iceberg_config.get('catalog_id', None)
+            )
+            
+            iceberg_config = IcebergConfig(
+                database_name=connection_config.database,
+                table_name=table_name,
+                warehouse_location=connection_iceberg_config.get('warehouse_location', ''),
+                catalog_id=connection_iceberg_config.get('catalog_id', None),
+                format_version=connection_iceberg_config.get('format_version', '2')
+            )
+            
+            self.iceberg_handler.write_table(
+                dataframe=df,
+                database=connection_config.database,
+                table=table_name,
+                mode=mode,
+                iceberg_config=iceberg_config
+            )
+            
+            self.structured_logger.info(f"Successfully completed Iceberg table write for {table_name}")
+            
+        except Exception as e:
+            self.structured_logger.error(
+                f"Failed to write Iceberg table {table_name}",
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            raise
+    
+    def _write_jdbc_table(self, df: DataFrame, connection_config: ConnectionConfig,
+                         table_name: str, mode: str, **options) -> None:
+        """Write data to JDBC table.
+        
+        Args:
+            df: DataFrame to write
+            connection_config: JDBC connection configuration
+            table_name: Table name to write to
+            mode: Write mode
+            **options: Additional write options
+        """
+        self.jdbc_manager.write_table_data(
+            df=df,
+            connection_config=connection_config,
+            table_name=table_name,
+            mode=mode,
+            **options
+        )
+    
+    def get_table_schema(self, connection_config: ConnectionConfig,
+                        table_name: str) -> StructType:
+        """Get table schema with engine-specific routing.
+        
+        Args:
+            connection_config: Connection configuration
+            table_name: Table name to get schema for
+            
+        Returns:
+            StructType: Spark schema for the table
+            
+        Raises:
+            IcebergConnectionError: For Iceberg schema issues
+            RuntimeError: For JDBC schema issues
+        """
+        try:
+            self.structured_logger.info(
+                "Getting table schema",
+                engine_type=connection_config.engine_type,
+                table_name=table_name
+            )
+            
+            # Route schema retrieval based on engine type
+            if self.is_iceberg_engine(connection_config.engine_type):
+                return self._get_iceberg_table_schema(connection_config, table_name)
+            else:
+                return self._get_jdbc_table_schema(connection_config, table_name)
+                
+        except (IcebergConnectionError, RuntimeError):
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during schema retrieval",
+                engine_type=connection_config.engine_type,
+                table_name=table_name,
+                error=str(e)
+            )
+            raise RuntimeError(f"Schema retrieval failed: {str(e)}")
+    
+    def _get_iceberg_table_schema(self, connection_config: ConnectionConfig,
+                                 table_name: str) -> StructType:
+        """Get schema for Iceberg table.
+        
+        Args:
+            connection_config: Iceberg connection configuration
+            table_name: Table name to get schema for
+            
+        Returns:
+            StructType: Spark schema for the table
+        """
+        # Read table with limit 0 to get schema
+        df = self._read_iceberg_table(connection_config, table_name)
+        return df.limit(0).schema
+    
+    def _get_jdbc_table_schema(self, connection_config: ConnectionConfig,
+                              table_name: str) -> StructType:
+        """Get schema for JDBC table.
+        
+        Args:
+            connection_config: JDBC connection configuration
+            table_name: Table name to get schema for
+            
+        Returns:
+            StructType: Spark schema for the table
+        """
+        return self.jdbc_manager.get_table_schema(connection_config, table_name)
+    
+    def _get_validation_cache_key(self, connection_config: ConnectionConfig) -> str:
+        """Generate cache key for connection validation.
+        
+        Args:
+            connection_config: Connection configuration
+            
+        Returns:
+            str: Cache key for validation results
+        """
+        if self.is_iceberg_engine(connection_config.engine_type):
+            # Get Iceberg configuration from the connection config
+            connection_iceberg_config = connection_config.get_iceberg_config()
+            if connection_iceberg_config:
+                warehouse_location = connection_iceberg_config.get('warehouse_location', '')
+                catalog_id = connection_iceberg_config.get('catalog_id', '')
+            else:
+                warehouse_location = ''
+                catalog_id = ''
+            return f"iceberg_{connection_config.database}_{warehouse_location}_{catalog_id}"
+        else:
+            return f"jdbc_{connection_config.engine_type}_{connection_config.database}_{connection_config.schema}_{connection_config.username}"
+    
+    # Compatibility methods for existing migration classes
+    def read_table_data(self, connection_config: ConnectionConfig, table_name: str,
+                       query: Optional[str] = None, **options) -> DataFrame:
+        """Compatibility method for migration classes - delegates to read_table.
+        
+        Args:
+            connection_config: Connection configuration
+            table_name: Table name to read from
+            query: Optional custom query (JDBC only)
+            **options: Additional read options
+            
+        Returns:
+            DataFrame: Spark DataFrame containing table data
+        """
+        return self.read_table(connection_config, table_name, query, **options)
+    
+    def write_table_data(self, df: DataFrame, connection_config: ConnectionConfig,
+                        table_name: str, mode: str = 'append', **options) -> None:
+        """Compatibility method for migration classes - delegates to write_table.
+        
+        Args:
+            df: DataFrame to write
+            connection_config: Connection configuration
+            table_name: Table name to write to
+            mode: Write mode ('append', 'overwrite', 'create')
+            **options: Additional write options
+        """
+        self.write_table(df, connection_config, table_name, mode, **options)

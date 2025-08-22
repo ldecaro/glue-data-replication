@@ -109,6 +109,14 @@ class DatabaseEngineManager:
         
     def validate_engine_type(self, engine_type: str) -> bool:
         """Validate if engine type is supported"""
+        
+    @classmethod
+    def is_iceberg_engine(cls, engine_type: str) -> bool:
+        """Check if engine is Iceberg type"""
+        
+    @classmethod
+    def validate_iceberg_config(cls, config: Dict[str, Any]) -> bool:
+        """Validate Iceberg-specific configuration"""
 ```
 
 #### JdbcDriverLoader Class
@@ -123,6 +131,119 @@ class JdbcDriverLoader:
         
     def validate_driver_path(self, s3_path: str) -> bool:
         """Validate S3 driver path exists and is accessible"""
+```
+
+### IcebergConnectionHandler
+
+Iceberg table operations through Glue Data Catalog and Spark integration.
+
+```python
+from glue_job.config.iceberg_connection_handler import IcebergConnectionHandler
+```
+
+#### IcebergConnectionHandler Class
+
+```python
+class IcebergConnectionHandler:
+    def __init__(self, spark_session: SparkSession, glue_context: GlueContext):
+        """Initialize with Spark session and Glue context"""
+        
+    def configure_iceberg_catalog(self, warehouse_location: str, catalog_id: Optional[str] = None) -> None:
+        """Configure Spark for Iceberg operations with Glue Data Catalog"""
+        
+    def table_exists(self, database: str, table: str) -> bool:
+        """Check if Iceberg table exists in Glue Data Catalog"""
+        
+    def create_table_if_not_exists(self, database: str, table: str, source_schema: StructType, 
+                                 bookmark_column: str, warehouse_location: str) -> None:
+        """Create Iceberg table with identifier-field-ids if it doesn't exist"""
+        
+    def read_table(self, database: str, table: str) -> DataFrame:
+        """Read data from Iceberg table"""
+        
+    def write_table(self, dataframe: DataFrame, database: str, table: str, 
+                   mode: str = "append") -> None:
+        """Write data to Iceberg table with proper job options"""
+```
+
+### IcebergSchemaManager
+
+Schema operations and data type mapping for Iceberg tables.
+
+```python
+from glue_job.config.iceberg_schema_manager import IcebergSchemaManager
+```
+
+#### IcebergSchemaManager Class
+
+```python
+class IcebergSchemaManager:
+    def __init__(self):
+        """Initialize Iceberg schema manager"""
+        
+    def create_iceberg_schema_from_jdbc(self, jdbc_metadata: ResultSetMetaData, 
+                                      bookmark_column: str) -> Dict[str, Any]:
+        """Convert JDBC metadata to Iceberg schema with identifier-field-ids"""
+        
+    def map_jdbc_to_iceberg_types(self, jdbc_type: str, precision: int, scale: int) -> str:
+        """Map JDBC data types to Iceberg data types"""
+        
+    def add_identifier_field_ids(self, schema: Dict[str, Any], bookmark_column: str) -> Dict[str, Any]:
+        """Add identifier-field-ids to schema for bookmark management"""
+        
+    def validate_iceberg_schema(self, schema: Dict[str, Any]) -> bool:
+        """Validate Iceberg schema structure"""
+        
+    def get_table_schema(self, spark: SparkSession, database: str, table: str) -> Optional[StructType]:
+        """Retrieve existing Iceberg table schema from Glue Data Catalog"""
+```
+
+### IcebergModels
+
+Data models and configuration classes for Iceberg operations.
+
+```python
+from glue_job.config.iceberg_models import IcebergConfig, IcebergTableMetadata
+```
+
+#### IcebergConfig Class
+
+```python
+@dataclass
+class IcebergConfig:
+    database_name: str
+    table_name: str
+    warehouse_location: str
+    catalog_id: Optional[str] = None
+    format_version: str = "2"
+    enable_update_catalog: bool = True
+    update_behavior: str = "UPDATE_IN_DATABASE"
+    
+    def validate(self) -> bool:
+        """Validate Iceberg configuration parameters"""
+        
+    def to_spark_options(self) -> Dict[str, str]:
+        """Convert to Spark job options for Iceberg operations"""
+```
+
+#### IcebergTableMetadata Class
+
+```python
+@dataclass
+class IcebergTableMetadata:
+    database: str
+    table: str
+    location: str
+    schema: Dict[str, Any]
+    identifier_field_ids: Optional[List[int]] = None
+    bookmark_column: Optional[str] = None
+    partition_spec: Optional[Dict[str, Any]] = None
+    
+    def get_bookmark_field_id(self) -> Optional[int]:
+        """Get field ID for bookmark column"""
+        
+    def has_identifier_field_ids(self) -> bool:
+        """Check if table has identifier-field-ids configured"""
 ```
 
 ### JobConfigurationParser
@@ -357,6 +478,15 @@ class JobBookmarkManager:
         
     def list_bookmarks(self) -> List[str]:
         """List all available bookmarks"""
+        
+    def get_iceberg_bookmark_column(self, database: str, table: str) -> Optional[str]:
+        """Get bookmark column from Iceberg table identifier-field-ids"""
+        
+    def extract_identifier_field_ids(self, table_metadata: Dict[str, Any]) -> Optional[str]:
+        """Extract identifier-field-ids from Iceberg table metadata"""
+        
+    def fallback_to_traditional_bookmark(self, dataframe: DataFrame) -> Optional[str]:
+        """Fallback to traditional bookmark detection for Iceberg tables"""
 ```
 
 ### S3BookmarkStorage
@@ -670,6 +800,57 @@ s3_config = S3BookmarkConfig(
 bookmark_manager = JobBookmarkManager(s3_config)
 current_state = bookmark_manager.get_bookmark_state("users")
 bookmark_manager.update_bookmark_state("users", updated_state)
+```
+
+### Iceberg Operations
+
+```python
+from glue_job.config.iceberg_connection_handler import IcebergConnectionHandler
+from glue_job.config.iceberg_models import IcebergConfig
+from glue_job.config.iceberg_schema_manager import IcebergSchemaManager
+
+# Configure Iceberg connection
+iceberg_config = IcebergConfig(
+    database_name="analytics_db",
+    table_name="customer_data",
+    warehouse_location="s3://my-datalake/warehouse/",
+    catalog_id="123456789012"
+)
+
+# Initialize Iceberg handler
+iceberg_handler = IcebergConnectionHandler(spark_session, glue_context)
+iceberg_handler.configure_iceberg_catalog(
+    warehouse_location=iceberg_config.warehouse_location,
+    catalog_id=iceberg_config.catalog_id
+)
+
+# Create table if it doesn't exist
+if not iceberg_handler.table_exists(iceberg_config.database_name, iceberg_config.table_name):
+    schema_manager = IcebergSchemaManager()
+    iceberg_schema = schema_manager.create_iceberg_schema_from_jdbc(
+        jdbc_metadata, bookmark_column="created_timestamp"
+    )
+    iceberg_handler.create_table_if_not_exists(
+        database=iceberg_config.database_name,
+        table=iceberg_config.table_name,
+        source_schema=source_df.schema,
+        bookmark_column="created_timestamp",
+        warehouse_location=iceberg_config.warehouse_location
+    )
+
+# Read from Iceberg table
+iceberg_df = iceberg_handler.read_table(
+    iceberg_config.database_name, 
+    iceberg_config.table_name
+)
+
+# Write to Iceberg table
+iceberg_handler.write_table(
+    dataframe=processed_df,
+    database=iceberg_config.database_name,
+    table=iceberg_config.table_name,
+    mode="append"
+)
 ```
 
 ### Monitoring and Logging

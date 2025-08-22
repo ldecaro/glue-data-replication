@@ -241,25 +241,29 @@ class S3PathUtilities:
         source_bucket = None
         target_bucket = None
         
-        # Try to extract source bucket
+        # Try to extract source bucket (skip warning for empty paths - common with Iceberg engines)
         try:
             source_bucket = S3PathUtilities.extract_s3_bucket_name(source_jdbc_path)
         except ValueError as e:
-            error_msg = f"Failed to extract bucket from source JDBC path '{source_jdbc_path}': {e}"
-            if structured_logger:
-                structured_logger.warning(error_msg, path_type="source", error=str(e))
-            else:
-                logger.warning(error_msg)
+            # Only log warning if the path is not empty (avoid noise for Iceberg engines)
+            if source_jdbc_path and source_jdbc_path.strip():
+                error_msg = f"Failed to extract bucket from source JDBC path '{source_jdbc_path}': {e}"
+                if structured_logger:
+                    structured_logger.warning(error_msg, path_type="source", error=str(e))
+                else:
+                    logger.warning(error_msg)
         
-        # Try to extract target bucket
+        # Try to extract target bucket (skip warning for empty paths - common with Iceberg engines)
         try:
             target_bucket = S3PathUtilities.extract_s3_bucket_name(target_jdbc_path)
         except ValueError as e:
-            error_msg = f"Failed to extract bucket from target JDBC path '{target_jdbc_path}': {e}"
-            if structured_logger:
-                structured_logger.warning(error_msg, path_type="target", error=str(e))
-            else:
-                logger.warning(error_msg)
+            # Only log warning if the path is not empty (avoid noise for Iceberg engines)
+            if target_jdbc_path and target_jdbc_path.strip():
+                error_msg = f"Failed to extract bucket from target JDBC path '{target_jdbc_path}': {e}"
+                if structured_logger:
+                    structured_logger.warning(error_msg, path_type="target", error=str(e))
+                else:
+                    logger.warning(error_msg)
         
         # Determine which bucket to use
         selected_bucket = None

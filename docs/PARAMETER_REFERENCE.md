@@ -16,8 +16,8 @@ These parameters must be provided for every deployment:
 
 | Parameter | Type | Description | Allowed Values | Example |
 |-----------|------|-------------|----------------|---------|
-| `SourceEngineType` | String | Source database engine type | `oracle`, `sqlserver`, `postgresql`, `db2` | `oracle` |
-| `TargetEngineType` | String | Target database engine type | `oracle`, `sqlserver`, `postgresql`, `db2` | `postgresql` |
+| `SourceEngineType` | String | Source database engine type | `oracle`, `sqlserver`, `postgresql`, `db2`, `iceberg` | `oracle` |
+| `TargetEngineType` | String | Target database engine type | `oracle`, `sqlserver`, `postgresql`, `db2`, `iceberg` | `postgresql` |
 
 ### Database Connection Configuration
 
@@ -49,9 +49,29 @@ These parameters must be provided for every deployment:
 
 | Parameter | Type | Description | Format | Example |
 |-----------|------|-------------|--------|---------|
-| `SourceJdbcDriverS3Path` | String | S3 path to source database JDBC driver JAR file | `s3://bucket/path/driver.jar` | `s3://bucket/drivers/ojdbc11.jar` |
-| `TargetJdbcDriverS3Path` | String | S3 path to target database JDBC driver JAR file | `s3://bucket/path/driver.jar` | `s3://bucket/drivers/postgresql.jar` |
+| `SourceJdbcDriverS3Path` | String | S3 path to source database JDBC driver JAR file (not required for Iceberg) | `s3://bucket/path/driver.jar` | `s3://bucket/drivers/ojdbc11.jar` |
+| `TargetJdbcDriverS3Path` | String | S3 path to target database JDBC driver JAR file (not required for Iceberg) | `s3://bucket/path/driver.jar` | `s3://bucket/drivers/postgresql.jar` |
 | `GlueJobScriptS3Path` | String | S3 path to the PySpark Glue job script | `s3://bucket/path/script.py` | `s3://bucket/src/glue_job/main.py` |
+
+### Iceberg Configuration (Required when using Iceberg engine)
+
+| Parameter | Type | Description | Constraints | Example |
+|-----------|------|-------------|-------------|---------|
+| `SourceDatabaseName` | String | Glue Data Catalog database name for Iceberg source | 1-255 characters, alphanumeric, hyphens, underscores only | `analytics_db` |
+| `SourceTableName` | String | Iceberg table name for source | 1-255 characters, alphanumeric, hyphens, underscores only | `customer_events` |
+| `SourceWarehouseLocation` | String | S3 warehouse location for Iceberg source tables | Valid S3 URI | `s3://my-datalake/warehouse/` |
+| `TargetDatabaseName` | String | Glue Data Catalog database name for Iceberg target | 1-255 characters, alphanumeric, hyphens, underscores only | `processed_data` |
+| `TargetTableName` | String | Iceberg table name for target | 1-255 characters, alphanumeric, hyphens, underscores only | `aggregated_metrics` |
+| `TargetWarehouseLocation` | String | S3 warehouse location for Iceberg target tables | Valid S3 URI | `s3://analytics-lake/warehouse/` |
+
+### Iceberg Configuration (Optional)
+
+| Parameter | Type | Description | Default | Format | Example |
+|-----------|------|-------------|---------|--------|---------|
+| `SourceCatalogId` | String | AWS account ID for cross-account Glue Data Catalog access (source) | Current account | 12-digit AWS account ID or empty | `123456789012` |
+| `TargetCatalogId` | String | AWS account ID for cross-account Glue Data Catalog access (target) | Current account | 12-digit AWS account ID or empty | `987654321098` |
+| `SourceFormatVersion` | String | Iceberg table format version for source | `2` | `1`, `2` | `2` |
+| `TargetFormatVersion` | String | Iceberg table format version for target | `2` | `1`, `2` | `2` |
 
 ## Optional Parameters
 
@@ -105,6 +125,15 @@ When configuring cross-VPC access, the following dependencies apply:
 1. **Source Network Configuration**: If `SourceVpcId` is specified, then `SourceSubnetIds` and `SourceSecurityGroupIds` are required.
 2. **Target Network Configuration**: If `TargetVpcId` is specified, then `TargetSubnetIds` and `TargetSecurityGroupIds` are required.
 3. **S3 VPC Endpoints**: `CreateSourceS3VpcEndpoint` and `CreateTargetS3VpcEndpoint` are only effective when the corresponding VPC configuration is provided.
+
+### Iceberg Configuration Dependencies
+
+When using Iceberg as source or target engine, the following dependencies apply:
+
+1. **Iceberg Source Configuration**: If `SourceEngineType` is `iceberg`, then `SourceDatabaseName`, `SourceTableName`, and `SourceWarehouseLocation` are required. `SourceJdbcDriverS3Path` is not required.
+2. **Iceberg Target Configuration**: If `TargetEngineType` is `iceberg`, then `TargetDatabaseName`, `TargetTableName`, and `TargetWarehouseLocation` are required. `TargetJdbcDriverS3Path` is not required.
+3. **Cross-Account Access**: `SourceCatalogId` and `TargetCatalogId` are only needed when accessing Glue Data Catalog in a different AWS account within the same region.
+4. **JDBC Parameters**: Traditional JDBC parameters (`Host`, `Port`, `Database`, `Username`, `Password`, `JdbcDriverS3Path`) are not applicable when using Iceberg engine type.
 
 ### Worker Type Dependencies
 
@@ -178,6 +207,73 @@ The CloudFormation template includes built-in validation for all parameters:
   "NumberOfWorkers": "2",
   "MaxRetries": "0",
   "Timeout": "60"
+}
+```
+
+### Iceberg as Target (Traditional Database to Data Lake)
+```json
+{
+  "JobName": "oracle-to-iceberg-job",
+  "SourceEngineType": "oracle",
+  "SourceHost": "oracle-db.company.com",
+  "SourcePort": "1521",
+  "SourceDatabase": "PROD",
+  "SourceUsername": "etl_user",
+  "SourcePassword": "oracle_password",
+  "SourceJdbcDriverS3Path": "s3://my-bucket/drivers/ojdbc8.jar",
+  
+  "TargetEngineType": "iceberg",
+  "TargetDatabaseName": "analytics_db",
+  "TargetTableName": "customer_orders",
+  "TargetWarehouseLocation": "s3://my-datalake/warehouse/",
+  
+  "WorkerType": "G.2X",
+  "NumberOfWorkers": "5"
+}
+```
+
+### Iceberg as Source (Data Lake to Traditional Database)
+```json
+{
+  "JobName": "iceberg-to-postgres-job",
+  "SourceEngineType": "iceberg",
+  "SourceDatabaseName": "processed_analytics",
+  "SourceTableName": "daily_metrics",
+  "SourceWarehouseLocation": "s3://analytics-lake/warehouse/",
+  
+  "TargetEngineType": "postgresql",
+  "TargetHost": "reporting-db.company.com",
+  "TargetPort": "5432",
+  "TargetDatabase": "reporting",
+  "TargetUsername": "reporting_user",
+  "TargetPassword": "postgres_password",
+  "TargetJdbcDriverS3Path": "s3://my-bucket/drivers/postgresql.jar",
+  
+  "WorkerType": "G.1X",
+  "NumberOfWorkers": "2"
+}
+```
+
+### Cross-Account Iceberg Access
+```json
+{
+  "JobName": "cross-account-iceberg-job",
+  "SourceEngineType": "sqlserver",
+  "SourceHost": "source-db.company.com",
+  "SourcePort": "1433",
+  "SourceDatabase": "Operations",
+  "SourceUsername": "etl_user",
+  "SourcePassword": "source_password",
+  "SourceJdbcDriverS3Path": "s3://my-bucket/drivers/mssql-jdbc.jar",
+  
+  "TargetEngineType": "iceberg",
+  "TargetDatabaseName": "shared_analytics",
+  "TargetTableName": "operational_data",
+  "TargetWarehouseLocation": "s3://shared-datalake/warehouse/",
+  "TargetCatalogId": "987654321098",
+  
+  "WorkerType": "G.2X",
+  "NumberOfWorkers": "3"
 }
 ```
 

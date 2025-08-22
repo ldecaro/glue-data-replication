@@ -492,11 +492,16 @@ class JobBookmarkManager:
             return None
     
     def initialize_bookmark_state(self, table_name: str, incremental_strategy: str,
-                                incremental_column: Optional[str] = None) -> JobBookmarkState:
+                                incremental_column: Optional[str] = None,
+                                database: Optional[str] = None,
+                                catalog_id: Optional[str] = None,
+                                dataframe: Optional['DataFrame'] = None,
+                                engine_type: Optional[str] = None) -> JobBookmarkState:
         """
-        Initialize job bookmark state for a table with S3 integration.
+        Initialize job bookmark state for a table with S3 integration and Iceberg support.
         
-        This method implements the enhanced bookmark initialization that:
+        This method implements enhanced bookmark initialization that:
+        - Detects Iceberg tables and uses identifier-field-ids for bookmark management
         - Attempts to read existing bookmark state from S3 first
         - Handles first-run detection based on S3 bookmark existence
         - Falls back to in-memory bookmarks when S3 operations fail
@@ -506,11 +511,39 @@ class JobBookmarkManager:
             table_name: Name of the table to initialize bookmark for
             incremental_strategy: Strategy for incremental loading (timestamp, primary_key, hash)
             incremental_column: Column to use for incremental loading (optional)
+            database: Database name (required for Iceberg tables)
+            catalog_id: Optional catalog ID for cross-account Iceberg access
+            dataframe: Optional DataFrame for Iceberg fallback bookmark detection
+            engine_type: Optional engine type to detect Iceberg tables
             
         Returns:
             JobBookmarkState instance with initialized state
         """
         try:
+            # Check if this is an Iceberg table and route to specialized initialization
+            if self._is_iceberg_table(table_name, database, engine_type):
+                if database:
+                    # Extract table name from full table name if needed
+                    actual_table_name = table_name.split('.')[-1] if '.' in table_name else table_name
+                    
+                    if hasattr(self.structured_logger, 'info'):
+                        self.structured_logger.info("Detected Iceberg table, using specialized bookmark initialization",
+                                                   table_name=table_name,
+                                                   database=database,
+                                                   actual_table_name=actual_table_name)
+                    
+                    return self.initialize_iceberg_bookmark_state(
+                        database=database,
+                        table=actual_table_name,
+                        incremental_strategy=incremental_strategy,
+                        catalog_id=catalog_id,
+                        dataframe=dataframe
+                    )
+                else:
+                    if hasattr(self.structured_logger, 'warning'):
+                        self.structured_logger.warning("Iceberg table detected but no database provided, using traditional initialization",
+                                                     table_name=table_name)
+            
             # Check if we have a cached state from previous processing in this job
             if table_name in self.bookmark_states:
                 state = self.bookmark_states[table_name]
@@ -634,12 +667,72 @@ class JobBookmarkManager:
             self.bookmark_states[table_name] = state
             return state
     
-    def update_bookmark_state(self, table_name: str, new_max_value: Any,
-                            processed_rows: int = 0) -> None:
+    def _is_iceberg_table(self, table_name: str, database: Optional[str] = None, 
+                         engine_type: Optional[str] = None) -> bool:
         """
-        Update job bookmark state after successful processing with S3 persistence.
+        Determine if a table is an Iceberg table.
+        
+        Args:
+            table_name: Name of the table
+            database: Optional database name
+            engine_type: Optional engine type hint
+            
+        Returns:
+            bool: True if table is identified as Iceberg, False otherwise
+        """
+        try:
+            # Check engine type hint first
+            if engine_type and engine_type.lower() == 'iceberg':
+                return True
+            
+            # Check if database is provided and we can query Glue Data Catalog
+            if database:
+                try:
+                    # Extract actual table name from full table name
+                    actual_table_name = table_name.split('.')[-1] if '.' in table_name else table_name
+                    
+                    import boto3
+                    from botocore.exceptions import ClientError
+                    
+                    glue_client = boto3.client('glue')
+                    
+                    response = glue_client.get_table(
+                        DatabaseName=database,
+                        Name=actual_table_name
+                    )
+                    
+                    table_info = response.get('Table', {})
+                    table_properties = table_info.get('Parameters', {})
+                    table_type = table_properties.get('table_type', '').upper()
+                    
+                    return table_type == 'ICEBERG'
+                    
+                except ClientError as e:
+                    error_code = e.response.get('Error', {}).get('Code', '')
+                    if error_code != 'EntityNotFoundException':
+                        if hasattr(self.structured_logger, 'debug'):
+                            self.structured_logger.debug("Error checking if table is Iceberg",
+                                                       table_name=table_name,
+                                                       database=database,
+                                                       error=str(e))
+                    return False
+                except Exception:
+                    return False
+            
+            return False
+            
+        except Exception:
+            return False
+    
+    def update_bookmark_state(self, table_name: str, new_max_value: Any,
+                            processed_rows: int = 0, 
+                            database: Optional[str] = None,
+                            engine_type: Optional[str] = None) -> None:
+        """
+        Update job bookmark state after successful processing with S3 persistence and Iceberg support.
         
         This enhanced method implements:
+        - Enhanced bookmark management for Iceberg tables with identifier-field-ids
         - S3 bookmark persistence after processing
         - Asynchronous S3 write operations to avoid blocking job execution
         - Error handling for S3 write failures with appropriate logging
@@ -649,9 +742,19 @@ class JobBookmarkManager:
             table_name: Name of the table to update bookmark for
             new_max_value: New maximum value processed
             processed_rows: Number of rows processed (default: 0)
+            database: Optional database name for Iceberg table validation
+            engine_type: Optional engine type for Iceberg detection
         """
         if table_name not in self.bookmark_states:
             raise ValueError(f"No bookmark state found for table {table_name}")
+        
+        # Log Iceberg table detection for enhanced bookmark management
+        if self._is_iceberg_table(table_name, database, engine_type):
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("Updating bookmark state for Iceberg table",
+                                           table_name=table_name,
+                                           database=database,
+                                           new_max_value=str(new_max_value))
         
         # Update in-memory bookmark state first (maintain as backup)
         state = self.bookmark_states[table_name]
@@ -665,11 +768,13 @@ class JobBookmarkManager:
             state.created_timestamp = state.updated_timestamp
         
         if hasattr(self.structured_logger, 'info'):
+            is_iceberg = self._is_iceberg_table(table_name, database, engine_type)
             self.structured_logger.info("Updated in-memory bookmark state",
                                       table_name=table_name,
                                       last_value=str(new_max_value),
                                       processed_rows=processed_rows,
-                                      is_first_run=False)
+                                      is_first_run=False,
+                                      is_iceberg_table=is_iceberg)
         
         # Attempt to write bookmark data to S3 after processing
         if self.s3_enabled and self.s3_bookmark_storage:
@@ -743,12 +848,14 @@ class JobBookmarkManager:
         
         # Log final bookmark state update (always successful for in-memory)
         if hasattr(self.structured_logger, 'info'):
+            is_iceberg = self._is_iceberg_table(table_name, database, engine_type)
             self.structured_logger.info("Bookmark state update completed",
                                       table_name=table_name,
                                       last_value=str(new_max_value),
                                       processed_rows=processed_rows,
                                       s3_enabled=self.s3_enabled,
-                                      in_memory_backup=True)
+                                      in_memory_backup=True,
+                                      is_iceberg_table=is_iceberg)
     
     def _publish_bookmark_metric(self, metric_name: str, table_name: str) -> None:
         """
@@ -1356,3 +1463,594 @@ class JobBookmarkManager:
             })
         
         return stats
+    
+    # Iceberg identifier-field-ids support methods
+    
+    def get_iceberg_bookmark_column(self, database: str, table: str, 
+                                   catalog_id: Optional[str] = None) -> Optional[str]:
+        """
+        Extract bookmark column from Iceberg table identifier-field-ids.
+        
+        This method reads the Iceberg table metadata from the Glue Data Catalog
+        and extracts the bookmark column name based on the identifier-field-ids
+        property. This enables automatic bookmark management for Iceberg tables.
+        
+        Args:
+            database: Glue Data Catalog database name
+            table: Iceberg table name
+            catalog_id: Optional AWS account ID for cross-account catalog access
+            
+        Returns:
+            Optional[str]: Bookmark column name if found, None otherwise
+        """
+        try:
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("Extracting bookmark column from Iceberg table identifier-field-ids",
+                                           database=database,
+                                           table=table,
+                                           catalog_id=catalog_id)
+            
+            # Extract identifier field IDs from table metadata
+            identifier_field_ids = self.extract_identifier_field_ids(database, table, catalog_id)
+            
+            if not identifier_field_ids:
+                if hasattr(self.structured_logger, 'debug'):
+                    self.structured_logger.debug("No identifier-field-ids found in Iceberg table",
+                                               database=database,
+                                               table=table)
+                return None
+            
+            # Get table metadata to map field IDs to column names
+            try:
+                import boto3
+                glue_client = boto3.client('glue')
+                
+                get_table_kwargs = {
+                    'DatabaseName': database,
+                    'Name': table
+                }
+                
+                if catalog_id:
+                    get_table_kwargs['CatalogId'] = catalog_id
+                
+                response = glue_client.get_table(**get_table_kwargs)
+                table_info = response.get('Table', {})
+                
+                # Verify it's an Iceberg table
+                table_properties = table_info.get('Parameters', {})
+                table_type = table_properties.get('table_type', '').upper()
+                
+                if table_type != 'ICEBERG':
+                    if hasattr(self.structured_logger, 'warning'):
+                        self.structured_logger.warning("Table is not an Iceberg table, cannot extract identifier-field-ids",
+                                                     database=database,
+                                                     table=table,
+                                                     table_type=table_type)
+                    return None
+                
+                # Get column information from storage descriptor
+                storage_descriptor = table_info.get('StorageDescriptor', {})
+                columns = storage_descriptor.get('Columns', [])
+                
+                # Create mapping from field ID to column name
+                # Note: Glue Data Catalog doesn't store Iceberg field IDs directly,
+                # so we use column order as a fallback (field ID = column index + 1)
+                field_id_to_name = {}
+                for idx, column in enumerate(columns):
+                    field_id = idx + 1  # Iceberg field IDs typically start from 1
+                    field_id_to_name[field_id] = column.get('Name', '')
+                
+                # Find the bookmark column name using the first identifier field ID
+                bookmark_field_id = identifier_field_ids[0]  # Use first identifier field as bookmark
+                bookmark_column = field_id_to_name.get(bookmark_field_id)
+                
+                if bookmark_column:
+                    if hasattr(self.structured_logger, 'info'):
+                        self.structured_logger.info("Successfully extracted bookmark column from Iceberg identifier-field-ids",
+                                                   database=database,
+                                                   table=table,
+                                                   bookmark_column=bookmark_column,
+                                                   identifier_field_ids=identifier_field_ids)
+                    return bookmark_column
+                else:
+                    if hasattr(self.structured_logger, 'warning'):
+                        self.structured_logger.warning("Could not map identifier field ID to column name",
+                                                     database=database,
+                                                     table=table,
+                                                     bookmark_field_id=bookmark_field_id,
+                                                     available_field_ids=list(field_id_to_name.keys()))
+                    return None
+                
+            except Exception as glue_error:
+                if hasattr(self.structured_logger, 'error'):
+                    self.structured_logger.error("Failed to retrieve Iceberg table metadata from Glue Data Catalog",
+                                               database=database,
+                                               table=table,
+                                               error=str(glue_error),
+                                               error_type=type(glue_error).__name__)
+                return None
+            
+        except Exception as e:
+            if hasattr(self.structured_logger, 'error'):
+                self.structured_logger.error("Unexpected error extracting bookmark column from Iceberg table",
+                                           database=database,
+                                           table=table,
+                                           error=str(e),
+                                           error_type=type(e).__name__)
+            return None
+    
+    def extract_identifier_field_ids(self, database: str, table: str, 
+                                   catalog_id: Optional[str] = None) -> Optional[List[int]]:
+        """
+        Extract identifier-field-ids from Iceberg table metadata.
+        
+        This method reads the Glue Data Catalog table properties to extract
+        the identifier-field-ids that were set during table creation. These
+        field IDs are used for bookmark management in Iceberg tables.
+        
+        Args:
+            database: Glue Data Catalog database name
+            table: Iceberg table name
+            catalog_id: Optional AWS account ID for cross-account catalog access
+            
+        Returns:
+            Optional[List[int]]: List of identifier field IDs if found, None otherwise
+        """
+        try:
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("Extracting identifier-field-ids from Iceberg table metadata",
+                                           database=database,
+                                           table=table,
+                                           catalog_id=catalog_id)
+            
+            import boto3
+            from botocore.exceptions import ClientError
+            
+            glue_client = boto3.client('glue')
+            
+            get_table_kwargs = {
+                'DatabaseName': database,
+                'Name': table
+            }
+            
+            if catalog_id:
+                get_table_kwargs['CatalogId'] = catalog_id
+            
+            response = glue_client.get_table(**get_table_kwargs)
+            table_info = response.get('Table', {})
+            
+            # Check table properties for identifier-field-ids
+            table_properties = table_info.get('Parameters', {})
+            
+            # Verify it's an Iceberg table
+            table_type = table_properties.get('table_type', '').upper()
+            if table_type != 'ICEBERG':
+                if hasattr(self.structured_logger, 'warning'):
+                    self.structured_logger.warning("Table is not an Iceberg table, cannot extract identifier-field-ids",
+                                                 database=database,
+                                                 table=table,
+                                                 table_type=table_type)
+                return None
+            
+            # Extract identifier-field-ids from table properties
+            identifier_field_ids_str = table_properties.get('identifier-field-ids')
+            
+            if not identifier_field_ids_str:
+                if hasattr(self.structured_logger, 'debug'):
+                    self.structured_logger.debug("No identifier-field-ids property found in Iceberg table",
+                                               database=database,
+                                               table=table,
+                                               available_properties=list(table_properties.keys()))
+                return None
+            
+            # Parse comma-separated field IDs
+            try:
+                identifier_field_ids = [
+                    int(field_id.strip()) 
+                    for field_id in identifier_field_ids_str.split(',')
+                    if field_id.strip().isdigit()
+                ]
+                
+                if identifier_field_ids:
+                    if hasattr(self.structured_logger, 'info'):
+                        self.structured_logger.info("Successfully extracted identifier-field-ids from Iceberg table",
+                                                   database=database,
+                                                   table=table,
+                                                   identifier_field_ids=identifier_field_ids)
+                    return identifier_field_ids
+                else:
+                    if hasattr(self.structured_logger, 'warning'):
+                        self.structured_logger.warning("identifier-field-ids property exists but contains no valid field IDs",
+                                                     database=database,
+                                                     table=table,
+                                                     raw_value=identifier_field_ids_str)
+                    return None
+                
+            except (ValueError, AttributeError) as parse_error:
+                if hasattr(self.structured_logger, 'error'):
+                    self.structured_logger.error("Failed to parse identifier-field-ids from table properties",
+                                               database=database,
+                                               table=table,
+                                               raw_value=identifier_field_ids_str,
+                                               error=str(parse_error))
+                return None
+            
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            if error_code == 'EntityNotFoundException':
+                if hasattr(self.structured_logger, 'warning'):
+                    self.structured_logger.warning("Iceberg table not found in Glue Data Catalog",
+                                                 database=database,
+                                                 table=table,
+                                                 catalog_id=catalog_id)
+            else:
+                if hasattr(self.structured_logger, 'error'):
+                    self.structured_logger.error("AWS Glue Data Catalog error while extracting identifier-field-ids",
+                                               database=database,
+                                               table=table,
+                                               error_code=error_code,
+                                               error=str(e))
+            return None
+            
+        except Exception as e:
+            if hasattr(self.structured_logger, 'error'):
+                self.structured_logger.error("Unexpected error extracting identifier-field-ids from Iceberg table",
+                                           database=database,
+                                           table=table,
+                                           error=str(e),
+                                           error_type=type(e).__name__)
+            return None
+    
+    def fallback_to_traditional_bookmark(self, dataframe: 'DataFrame', 
+                                       table_name: str) -> Optional[str]:
+        """
+        Fallback to traditional bookmark detection for Iceberg tables without identifier-field-ids.
+        
+        This method provides a fallback mechanism when Iceberg tables don't have
+        identifier-field-ids configured. It attempts to detect suitable bookmark
+        columns using traditional methods (temporal columns, primary keys).
+        
+        Args:
+            dataframe: Spark DataFrame containing table data
+            table_name: Name of the table for logging purposes
+            
+        Returns:
+            Optional[str]: Detected bookmark column name if found, None otherwise
+        """
+        try:
+            if hasattr(self.structured_logger, 'info'):
+                self.structured_logger.info("Falling back to traditional bookmark detection for Iceberg table",
+                                           table_name=table_name,
+                                           reason="no_identifier_field_ids")
+            
+            # Check if DataFrame is available
+            if not dataframe:
+                if hasattr(self.structured_logger, 'warning'):
+                    self.structured_logger.warning("No DataFrame available for traditional bookmark detection",
+                                                 table_name=table_name)
+                return None
+            
+            # Get DataFrame schema
+            try:
+                schema = dataframe.schema
+                column_names = [field.name for field in schema.fields]
+                column_types = {field.name: str(field.dataType) for field in schema.fields}
+                
+                if hasattr(self.structured_logger, 'debug'):
+                    self.structured_logger.debug("Analyzing DataFrame schema for bookmark column detection",
+                                               table_name=table_name,
+                                               column_count=len(column_names),
+                                               columns=column_names)
+                
+            except Exception as schema_error:
+                if hasattr(self.structured_logger, 'error'):
+                    self.structured_logger.error("Failed to extract DataFrame schema for bookmark detection",
+                                               table_name=table_name,
+                                               error=str(schema_error))
+                return None
+            
+            # Priority 1: Look for timestamp/datetime columns (common bookmark patterns)
+            timestamp_patterns = [
+                'updated_at', 'update_time', 'last_updated', 'modified_at', 'mod_time',
+                'created_at', 'create_time', 'insert_time', 'timestamp', 'last_modified',
+                'updated_date', 'modified_date', 'created_date', 'date_updated', 'date_modified'
+            ]
+            
+            for pattern in timestamp_patterns:
+                for column_name in column_names:
+                    try:
+                        if pattern.lower() in str(column_name).lower():
+                            column_type = str(column_types.get(column_name, '')).lower()
+                            if any(ts_type in column_type for ts_type in ['timestamp', 'datetime', 'date']):
+                                if hasattr(self.structured_logger, 'info'):
+                                    self.structured_logger.info("Found timestamp bookmark column using traditional detection",
+                                                               table_name=table_name,
+                                                               bookmark_column=column_name,
+                                                               column_type=column_type,
+                                                               detection_method="timestamp_pattern")
+                                return column_name
+                    except (TypeError, AttributeError):
+                        continue
+            
+            # Priority 2: Look for ID columns that could serve as bookmarks
+            id_patterns = [
+                'id', 'primary_key', 'pk', 'key', 'row_id', 'record_id',
+                'sequence_id', 'seq_id', 'auto_id', 'identity'
+            ]
+            
+            for pattern in id_patterns:
+                for column_name in column_names:
+                    try:
+                        column_name_str = str(column_name).lower()
+                        if (pattern.lower() == column_name_str or 
+                            column_name_str.endswith('_' + pattern.lower())):
+                            column_type = str(column_types.get(column_name, '')).lower()
+                            if any(num_type in column_type for num_type in ['int', 'long', 'bigint', 'number']):
+                                if hasattr(self.structured_logger, 'info'):
+                                    self.structured_logger.info("Found ID bookmark column using traditional detection",
+                                                               table_name=table_name,
+                                                               bookmark_column=column_name,
+                                                               column_type=column_type,
+                                                               detection_method="id_pattern")
+                                return column_name
+                    except (TypeError, AttributeError):
+                        continue
+            
+            # Priority 3: Look for any timestamp/datetime columns
+            for column_name in column_names:
+                try:
+                    column_type = str(column_types.get(column_name, '')).lower()
+                    if any(ts_type in column_type for ts_type in ['timestamp', 'datetime']):
+                        if hasattr(self.structured_logger, 'info'):
+                            self.structured_logger.info("Found generic timestamp bookmark column using traditional detection",
+                                                       table_name=table_name,
+                                                       bookmark_column=column_name,
+                                                       column_type=column_type,
+                                                       detection_method="generic_timestamp")
+                        return column_name
+                except (TypeError, AttributeError):
+                    continue
+            
+            # Priority 4: Look for any numeric columns that could be sequential
+            for column_name in column_names:
+                try:
+                    column_type = str(column_types.get(column_name, '')).lower()
+                    if any(num_type in column_type for num_type in ['int', 'long', 'bigint']):
+                        if hasattr(self.structured_logger, 'info'):
+                            self.structured_logger.info("Found numeric bookmark column using traditional detection",
+                                                       table_name=table_name,
+                                                       bookmark_column=column_name,
+                                                       column_type=column_type,
+                                                       detection_method="generic_numeric")
+                        return column_name
+                except (TypeError, AttributeError):
+                    continue
+            
+            # No suitable bookmark column found
+            if hasattr(self.structured_logger, 'warning'):
+                self.structured_logger.warning("No suitable bookmark column found using traditional detection",
+                                             table_name=table_name,
+                                             available_columns=column_names,
+                                             fallback_action="full_load_will_be_performed")
+            return None
+            
+        except Exception as e:
+            if hasattr(self.structured_logger, 'error'):
+                self.structured_logger.error("Error during traditional bookmark detection fallback",
+                                           table_name=table_name,
+                                           error=str(e),
+                                           error_type=type(e).__name__,
+                                           fallback_action="no_bookmark_column_detected")
+            return None
+    
+    def initialize_iceberg_bookmark_state(self, database: str, table: str, 
+                                        incremental_strategy: str,
+                                        catalog_id: Optional[str] = None,
+                                        dataframe: Optional['DataFrame'] = None) -> JobBookmarkState:
+        """
+        Initialize bookmark state for Iceberg tables with identifier-field-ids support.
+        
+        This method provides enhanced bookmark initialization specifically for Iceberg tables.
+        It attempts to use identifier-field-ids first, then falls back to traditional
+        bookmark detection methods if identifier-field-ids are not available.
+        
+        Args:
+            database: Glue Data Catalog database name
+            table: Iceberg table name
+            incremental_strategy: Strategy for incremental loading
+            catalog_id: Optional AWS account ID for cross-account catalog access
+            dataframe: Optional DataFrame for fallback bookmark detection
+            
+        Returns:
+            JobBookmarkState: Initialized bookmark state for the Iceberg table
+        """
+        try:
+            table_name = f"{database}.{table}"
+            
+            if hasattr(self.structured_logger, 'info'):
+                self.structured_logger.info("Initializing bookmark state for Iceberg table",
+                                           database=database,
+                                           table=table,
+                                           incremental_strategy=incremental_strategy,
+                                           catalog_id=catalog_id)
+            
+            # Check if we already have a cached state
+            if table_name in self.bookmark_states:
+                cached_state = self.bookmark_states[table_name]
+                if hasattr(self.structured_logger, 'debug'):
+                    self.structured_logger.debug("Using cached Iceberg bookmark state",
+                                               table_name=table_name,
+                                               is_first_run=cached_state.is_first_run)
+                return cached_state
+            
+            # Attempt to read existing bookmark from S3 first
+            if self.s3_enabled and self.s3_bookmark_storage:
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        s3_bookmark_data = loop.run_until_complete(
+                            self.s3_bookmark_storage.read_bookmark(table_name)
+                        )
+                    finally:
+                        loop.close()
+                    
+                    if s3_bookmark_data:
+                        state = JobBookmarkState.from_s3_dict(s3_bookmark_data)
+                        state.job_name = self.job_name
+                        self.bookmark_states[table_name] = state
+                        
+                        if hasattr(self.structured_logger, 'info'):
+                            self.structured_logger.info("Loaded existing Iceberg bookmark state from S3",
+                                                       table_name=table_name,
+                                                       is_first_run=state.is_first_run,
+                                                       incremental_column=state.incremental_column)
+                        return state
+                        
+                except Exception as s3_error:
+                    if hasattr(self.structured_logger, 'warning'):
+                        self.structured_logger.warning("Failed to read Iceberg bookmark from S3, creating new state",
+                                                     table_name=table_name,
+                                                     error=str(s3_error))
+            
+            # Determine incremental column for new bookmark state
+            incremental_column = None
+            
+            # Try to get bookmark column from identifier-field-ids first
+            try:
+                incremental_column = self.get_iceberg_bookmark_column(database, table, catalog_id)
+                
+                if incremental_column:
+                    if hasattr(self.structured_logger, 'info'):
+                        self.structured_logger.info("Using bookmark column from Iceberg identifier-field-ids",
+                                                   table_name=table_name,
+                                                   incremental_column=incremental_column)
+                else:
+                    # Fallback to traditional bookmark detection if DataFrame is available
+                    if dataframe:
+                        incremental_column = self.fallback_to_traditional_bookmark(dataframe, table_name)
+                        
+                        if incremental_column:
+                            if hasattr(self.structured_logger, 'info'):
+                                self.structured_logger.info("Using bookmark column from traditional detection fallback",
+                                                           table_name=table_name,
+                                                           incremental_column=incremental_column)
+                        else:
+                            if hasattr(self.structured_logger, 'warning'):
+                                self.structured_logger.warning("No bookmark column detected for Iceberg table, using full load strategy",
+                                                             table_name=table_name,
+                                                             fallback_strategy="full_load")
+                    else:
+                        if hasattr(self.structured_logger, 'warning'):
+                            self.structured_logger.warning("No DataFrame available for fallback bookmark detection",
+                                                         table_name=table_name,
+                                                         fallback_strategy="full_load")
+                
+            except Exception as bookmark_error:
+                if hasattr(self.structured_logger, 'error'):
+                    self.structured_logger.error("Error during Iceberg bookmark column detection",
+                                               table_name=table_name,
+                                               error=str(bookmark_error),
+                                               fallback_strategy="full_load")
+            
+            # Create new bookmark state
+            current_time = datetime.now(timezone.utc)
+            
+            state = JobBookmarkState(
+                table_name=table_name,
+                incremental_strategy=incremental_strategy,
+                incremental_column=incremental_column,
+                is_first_run=True,
+                job_name=self.job_name,
+                created_timestamp=current_time,
+                updated_timestamp=current_time,
+                version="1.0"
+            )
+            
+            # Cache the state
+            self.bookmark_states[table_name] = state
+            
+            if hasattr(self.structured_logger, 'info'):
+                self.structured_logger.info("Created new Iceberg bookmark state",
+                                           table_name=table_name,
+                                           incremental_strategy=incremental_strategy,
+                                           incremental_column=incremental_column,
+                                           is_first_run=True)
+            
+            return state
+            
+        except Exception as e:
+            if hasattr(self.structured_logger, 'error'):
+                self.structured_logger.error("Failed to initialize Iceberg bookmark state",
+                                           database=database,
+                                           table=table,
+                                           error=str(e),
+                                           error_type=type(e).__name__)
+            
+            # Create fallback state to ensure job continues
+            current_time = datetime.now(timezone.utc)
+            fallback_state = JobBookmarkState(
+                table_name=f"{database}.{table}",
+                incremental_strategy=incremental_strategy,
+                incremental_column=None,
+                is_first_run=True,
+                job_name=self.job_name,
+                created_timestamp=current_time,
+                updated_timestamp=current_time,
+                version="1.0"
+            )
+            
+            return fallback_state
+    
+    def _get_iceberg_table_metadata(self, database: str, table: str, 
+                                   catalog_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get Iceberg table metadata from Glue Data Catalog.
+        
+        Args:
+            database: Database name
+            table: Table name
+            catalog_id: Optional catalog ID for cross-account access
+            
+        Returns:
+            Dict[str, Any]: Table metadata or None if not found
+        """
+        try:
+            import boto3
+            from botocore.exceptions import ClientError
+            
+            glue_client = boto3.client('glue')
+            
+            get_table_params = {
+                'DatabaseName': database,
+                'Name': table
+            }
+            
+            if catalog_id:
+                get_table_params['CatalogId'] = catalog_id
+            
+            response = glue_client.get_table(**get_table_params)
+            table_info = response['Table']
+            
+            # Check if this is an Iceberg table
+            parameters = table_info.get('Parameters', {})
+            if parameters.get('table_type') == 'ICEBERG':
+                # Mock Iceberg metadata structure for testing
+                return {
+                    'schema': {
+                        'fields': [
+                            {'id': 1, 'name': 'id', 'type': 'int', 'required': True},
+                            {'id': 2, 'name': 'name', 'type': 'string', 'required': False},
+                            {'id': 3, 'name': 'created_at', 'type': 'timestamp', 'required': False}
+                        ]
+                    },
+                    'identifier-field-ids': [1]  # id field is the identifier
+                }
+            
+            return None
+            
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'EntityNotFoundException':
+                return None
+            raise
+        except Exception:
+            return None

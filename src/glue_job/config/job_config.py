@@ -38,6 +38,7 @@ class ConnectionConfig:
     password: str
     jdbc_driver_path: str
     network_config: Optional[NetworkConfig] = None
+    iceberg_config: Optional[Dict[str, Any]] = None
     
     def __post_init__(self):
         """Validate connection configuration after initialization."""
@@ -47,6 +48,32 @@ class ConnectionConfig:
         """Validate connection configuration parameters."""
         if not self.engine_type:
             raise ValueError("Engine type cannot be empty")
+        
+        # Import here to avoid circular imports
+        from .database_engines import DatabaseEngineManager
+        
+        # Skip JDBC validation for Iceberg engines
+        if DatabaseEngineManager.is_iceberg_engine(self.engine_type):
+            self._validate_iceberg_config()
+        else:
+            self._validate_jdbc_config()
+    
+    def _validate_iceberg_config(self) -> None:
+        """Validate Iceberg-specific configuration."""
+        if not self.database:
+            raise ValueError("Database name cannot be empty for Iceberg engine")
+        if not self.schema:  # schema field contains table_name for Iceberg
+            raise ValueError("Table name cannot be empty for Iceberg engine")
+        if not self.iceberg_config:
+            raise ValueError("Iceberg configuration is required for Iceberg engine")
+        
+        # Validate Iceberg configuration using DatabaseEngineManager
+        from .database_engines import DatabaseEngineManager
+        if not DatabaseEngineManager.validate_iceberg_config(self.iceberg_config):
+            raise ValueError("Invalid Iceberg configuration parameters")
+    
+    def _validate_jdbc_config(self) -> None:
+        """Validate JDBC-specific configuration."""
         if not self.connection_string:
             raise ValueError("Connection string cannot be empty")
         if not self.database:
@@ -59,6 +86,15 @@ class ConnectionConfig:
             raise ValueError("Password cannot be empty")
         if not self.jdbc_driver_path:
             raise ValueError("JDBC driver path cannot be empty")
+    
+    def is_iceberg_engine(self) -> bool:
+        """Check if this connection uses Iceberg engine."""
+        from .database_engines import DatabaseEngineManager
+        return DatabaseEngineManager.is_iceberg_engine(self.engine_type)
+    
+    def get_iceberg_config(self) -> Optional[Dict[str, Any]]:
+        """Get Iceberg configuration if available."""
+        return self.iceberg_config if self.is_iceberg_engine() else None
     
     def requires_cross_vpc_connection(self) -> bool:
         """Check if this connection requires cross-VPC connectivity."""

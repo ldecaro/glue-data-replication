@@ -18,7 +18,8 @@ Parameters:
       - sqlserver
       - postgresql
       - db2
-    ConstraintDescription: 'Must be one of: oracle, sqlserver, postgresql, db2'
+      - iceberg
+    ConstraintDescription: 'Must be one of: oracle, sqlserver, postgresql, db2, iceberg'
   
   TargetEngineType:
     Type: String
@@ -28,7 +29,8 @@ Parameters:
       - sqlserver
       - postgresql
       - db2
-    ConstraintDescription: 'Must be one of: oracle, sqlserver, postgresql, db2'
+      - iceberg
+    ConstraintDescription: 'Must be one of: oracle, sqlserver, postgresql, db2, iceberg'
   
   SourceDatabase:
     Type: String
@@ -48,18 +50,18 @@ Parameters:
   
   SourceSchema:
     Type: String
-    Description: 'Source database schema name'
-    MinLength: 1
+    Description: 'Source database schema name (for Iceberg engines, this represents the table name; not required for Iceberg engines)'
+    Default: ''
     MaxLength: 128
-    AllowedPattern: '^[a-zA-Z0-9_.-]+$'
+    AllowedPattern: '^[a-zA-Z0-9_.-]*$'
     ConstraintDescription: 'Schema name must contain only alphanumeric characters, hyphens, underscores, and periods'
   
   TargetSchema:
     Type: String
-    Description: 'Target database schema name'
-    MinLength: 1
+    Description: 'Target database schema name (for Iceberg engines, this represents the table name; not required for Iceberg engines)'
+    Default: ''
     MaxLength: 128
-    AllowedPattern: '^[a-zA-Z0-9_.-]+$'
+    AllowedPattern: '^[a-zA-Z0-9_.-]*$'
     ConstraintDescription: 'Schema name must contain only alphanumeric characters, hyphens, underscores, and periods'
   
   TableNames:
@@ -69,67 +71,118 @@ Parameters:
   
   SourceDbUser:
     Type: String
-    Description: 'Source database username'
-    MinLength: 1
+    Description: 'Source database username (not required for Iceberg engines)'
+    Default: ''
     MaxLength: 128
     NoEcho: false
-    ConstraintDescription: 'Username must be between 1 and 128 characters'
+    ConstraintDescription: 'Username must be between 0 and 128 characters'
   
   SourceDbPassword:
     Type: String
-    Description: 'Source database password'
-    MinLength: 1
+    Description: 'Source database password (not required for Iceberg engines)'
+    Default: ''
     MaxLength: 128
     NoEcho: true
-    ConstraintDescription: 'Password must be between 1 and 128 characters'
+    ConstraintDescription: 'Password must be between 0 and 128 characters'
   
   TargetDbUser:
     Type: String
-    Description: 'Target database username'
-    MinLength: 1
+    Description: 'Target database username (not required for Iceberg engines)'
+    Default: ''
     MaxLength: 128
     NoEcho: false
-    ConstraintDescription: 'Username must be between 1 and 128 characters'
+    ConstraintDescription: 'Username must be between 0 and 128 characters'
   
   TargetDbPassword:
     Type: String
-    Description: 'Target database password'
-    MinLength: 1
+    Description: 'Target database password (not required for Iceberg engines)'
+    Default: ''
     MaxLength: 128
     NoEcho: true
-    ConstraintDescription: 'Password must be between 1 and 128 characters'
+    ConstraintDescription: 'Password must be between 0 and 128 characters'
   
   SourceConnectionString:
     Type: String
-    Description: 'JDBC connection string for source database (format: jdbc:engine://host:port/database or jdbc:engine://host:port;databaseName=database or jdbc:oracle:thin:@//host:port/database)'
-    MinLength: 10
+    Description: 'JDBC connection string for source database (not required for Iceberg engines)'
+    Default: ''
     MaxLength: 512
-    AllowedPattern: '^jdbc:[a-zA-Z0-9]+:(thin:@//|//)[a-zA-Z0-9.-]+:[0-9]+[/;].*$'
-    ConstraintDescription: 'Must be a valid JDBC connection string starting with jdbc:engine://host:port or jdbc:oracle:thin:@//host:port'
+    AllowedPattern: '^(jdbc:[a-zA-Z0-9]+:(thin:@//|//)[a-zA-Z0-9.-]+:[0-9]+[/;].*)?$'
+    ConstraintDescription: 'Must be empty or a valid JDBC connection string starting with jdbc:engine://host:port or jdbc:oracle:thin:@//host:port'
   
   TargetConnectionString:
     Type: String
-    Description: 'JDBC connection string for target database (format: jdbc:engine://host:port/database or jdbc:engine://host:port;databaseName=database or jdbc:oracle:thin:@//host:port/database)'
-    MinLength: 10
+    Description: 'JDBC connection string for target database (not required for Iceberg engines)'
+    Default: ''
     MaxLength: 512
-    AllowedPattern: '^jdbc:[a-zA-Z0-9]+:(thin:@//|//)[a-zA-Z0-9.-]+:[0-9]+[/;].*$'
-    ConstraintDescription: 'Must be a valid JDBC connection string starting with jdbc:engine://host:port or jdbc:oracle:thin:@//host:port'
+    AllowedPattern: '^(jdbc:[a-zA-Z0-9]+:(thin:@//|//)[a-zA-Z0-9.-]+:[0-9]+[/;].*)?$'
+    ConstraintDescription: 'Must be empty or a valid JDBC connection string starting with jdbc:engine://host:port or jdbc:oracle:thin:@//host:port'
   
   SourceJdbcDriverS3Path:
     Type: String
-    Description: 'S3 path to source database JDBC driver JAR file (s3://bucket/path/driver.jar)'
-    MinLength: 10
+    Description: 'S3 path to source database JDBC driver JAR file (not required for Iceberg engines)'
+    Default: ''
     MaxLength: 512
-    AllowedPattern: '^s3://[a-zA-Z0-9.-]+/.*\.jar$'
-    ConstraintDescription: 'Must be a valid S3 path ending with .jar (s3://bucket/path/driver.jar)'
+    AllowedPattern: '^(s3://[a-zA-Z0-9.-]+/.*\.jar)?$'
+    ConstraintDescription: 'Must be empty or a valid S3 path ending with .jar (s3://bucket/path/driver.jar)'
   
   TargetJdbcDriverS3Path:
     Type: String
-    Description: 'S3 path to target database JDBC driver JAR file (s3://bucket/path/driver.jar)'
-    MinLength: 10
+    Description: 'S3 path to target database JDBC driver JAR file (not required for Iceberg engines)'
+    Default: ''
     MaxLength: 512
-    AllowedPattern: '^s3://[a-zA-Z0-9.-]+/.*\.jar$'
-    ConstraintDescription: 'Must be a valid S3 path ending with .jar (s3://bucket/path/driver.jar)'
+    AllowedPattern: '^(s3://[a-zA-Z0-9.-]+/.*\.jar)?$'
+    ConstraintDescription: 'Must be empty or a valid S3 path ending with .jar (s3://bucket/path/driver.jar)'
+  
+  # Iceberg-specific parameters (required when using Iceberg engines)
+  SourceWarehouseLocation:
+    Type: String
+    Description: 'S3 warehouse location for source Iceberg tables (required when SourceEngineType is iceberg)'
+    Default: ''
+    MaxLength: 512
+    AllowedPattern: '^(s3://[a-zA-Z0-9.-]+/.*/?)?$'
+    ConstraintDescription: 'Must be empty or a valid S3 path (s3://bucket/path/)'
+  
+  TargetWarehouseLocation:
+    Type: String
+    Description: 'S3 warehouse location for target Iceberg tables (required when TargetEngineType is iceberg)'
+    Default: ''
+    MaxLength: 512
+    AllowedPattern: '^(s3://[a-zA-Z0-9.-]+/.*/?)?$'
+    ConstraintDescription: 'Must be empty or a valid S3 path (s3://bucket/path/)'
+  
+  SourceCatalogId:
+    Type: String
+    Description: 'AWS Glue Data Catalog ID for source Iceberg tables (optional, defaults to current account)'
+    Default: ''
+    MaxLength: 12
+    AllowedPattern: '^([0-9]{12})?$'
+    ConstraintDescription: 'Must be empty or a 12-digit AWS account ID'
+  
+  TargetCatalogId:
+    Type: String
+    Description: 'AWS Glue Data Catalog ID for target Iceberg tables (optional, defaults to current account)'
+    Default: ''
+    MaxLength: 12
+    AllowedPattern: '^([0-9]{12})?$'
+    ConstraintDescription: 'Must be empty or a 12-digit AWS account ID'
+  
+  SourceFormatVersion:
+    Type: String
+    Description: 'Iceberg format version for source tables (optional, defaults to 2)'
+    Default: '2'
+    AllowedValues:
+      - '1'
+      - '2'
+    ConstraintDescription: 'Must be 1 or 2'
+  
+  TargetFormatVersion:
+    Type: String
+    Description: 'Iceberg format version for target tables (optional, defaults to 2)'
+    Default: '2'
+    AllowedValues:
+      - '1'
+      - '2'
+    ConstraintDescription: 'Must be 1 or 2'
   
   GlueJobScriptS3Path:
     Type: String
@@ -332,6 +385,17 @@ Conditions:
   IsStandardWorker: !Equals [!Ref WorkerType, 'Standard']
   HasGlueJobModules: !Not [!Equals [!Ref GlueJobModulesS3Path, '']]
   
+  # Engine Type Conditions
+  IsSourceIceberg: !Equals [!Ref SourceEngineType, 'iceberg']
+  IsTargetIceberg: !Equals [!Ref TargetEngineType, 'iceberg']
+  IsIcebergJob: !Or [!Condition IsSourceIceberg, !Condition IsTargetIceberg]
+  HasSourceJdbcDriver: !And
+    - !Not [!Condition IsSourceIceberg]
+    - !Not [!Equals [!Ref SourceJdbcDriverS3Path, '']]
+  HasTargetJdbcDriver: !And
+    - !Not [!Condition IsTargetIceberg]
+    - !Not [!Equals [!Ref TargetJdbcDriverS3Path, '']]
+  
   # Network Configuration Conditions
   HasSourceNetworkConfig: !Not [!Equals [!Ref SourceVpcId, '']]
   HasTargetNetworkConfig: !Not [!Equals [!Ref TargetVpcId, '']]
@@ -395,7 +459,7 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # S3 permissions for JDBC drivers and job scripts
+              # S3 permissions for job scripts (always needed)
               - Effect: Allow
                 Action:
                   - s3:GetObject
@@ -403,13 +467,78 @@ Resources:
                 Resource:
                   - !Sub
                     - 'arn:aws:s3:::${S3Path}'
-                    - S3Path: !Select [1, !Split ['s3://', !Ref SourceJdbcDriverS3Path]]
-                  - !Sub
-                    - 'arn:aws:s3:::${S3Path}'
-                    - S3Path: !Select [1, !Split ['s3://', !Ref TargetJdbcDriverS3Path]]
-                  - !Sub
-                    - 'arn:aws:s3:::${S3Path}'
                     - S3Path: !Select [1, !Split ['s3://', !Ref GlueJobScriptS3Path]]
+              # S3 permissions for job script bucket (for bookmarks and other job data)
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}'
+                    - BucketName: !Select [2, !Split ['/', !Ref GlueJobScriptS3Path]]
+                  - !Sub
+                    - 'arn:aws:s3:::${BucketName}/*'
+                    - BucketName: !Select [2, !Split ['/', !Ref GlueJobScriptS3Path]]
+              # S3 permissions for source JDBC driver (only when not Iceberg)
+              - !If
+                - HasSourceJdbcDriver
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                  Resource:
+                    - !Sub
+                      - 'arn:aws:s3:::${S3Path}'
+                      - S3Path: !Select [1, !Split ['s3://', !Ref SourceJdbcDriverS3Path]]
+                - !Ref AWS::NoValue
+              # S3 permissions for target JDBC driver (only when not Iceberg)
+              - !If
+                - HasTargetJdbcDriver
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                  Resource:
+                    - !Sub
+                      - 'arn:aws:s3:::${S3Path}'
+                      - S3Path: !Select [1, !Split ['s3://', !Ref TargetJdbcDriverS3Path]]
+                - !Ref AWS::NoValue
+              # S3 permissions for Glue job modules (when provided)
+              - !If
+                - HasGlueJobModules
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                  Resource:
+                    - !Sub
+                      - 'arn:aws:s3:::${S3Path}'
+                      - S3Path: !Select [1, !Split ['s3://', !Ref GlueJobModulesS3Path]]
+                - !Ref AWS::NoValue
+              # S3 permissions for Glue job modules bucket (for bookmarks when modules bucket is used)
+              - !If
+                - HasGlueJobModules
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:PutObject
+                    - s3:DeleteObject
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}'
+                      - BucketName: !Select [2, !Split ['/', !Ref GlueJobModulesS3Path]]
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}/*'
+                      - BucketName: !Select [2, !Split ['/', !Ref GlueJobModulesS3Path]]
+                - !Ref AWS::NoValue
               # - Effect: Allow
               #   Action:
               #     - s3:ListBucket
@@ -543,22 +672,121 @@ Resources:
                   - !Sub 'arn:aws:s3:::aws-glue-assets-${AWS::AccountId}-${AWS::Region}/*'
                   - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}'
                   - !Sub 'arn:aws:s3:::aws-glue-temporary-${AWS::AccountId}-${AWS::Region}/*'
-                  # Additional S3 access for JDBC drivers through VPC endpoints
-                  - !Sub
-                    - 'arn:aws:s3:::${BucketName}'
-                    - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
-                  - !Sub
-                    - 'arn:aws:s3:::${BucketName}/*'
-                    - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
-                  - !Sub
-                    - 'arn:aws:s3:::${BucketName}'
-                    - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
-                  - !Sub
-                    - 'arn:aws:s3:::${BucketName}/*'
-                    - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
-
-
-
+              # Additional S3 access for source JDBC drivers through VPC endpoints (only when not Iceberg)
+              - !If
+                - HasSourceJdbcDriver
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}'
+                      - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}/*'
+                      - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
+                - !Ref AWS::NoValue
+              # Additional S3 access for target JDBC drivers through VPC endpoints (only when not Iceberg)
+              - !If
+                - HasTargetJdbcDriver
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}'
+                      - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}/*'
+                      - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
+                - !Ref AWS::NoValue
+              # S3 permissions for Iceberg warehouse locations
+              - !If
+                - IsSourceIceberg
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:PutObject
+                    - s3:DeleteObject
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}'
+                      - BucketName: !Select [2, !Split ['/', !Ref SourceWarehouseLocation]]
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}/*'
+                      - BucketName: !Select [2, !Split ['/', !Ref SourceWarehouseLocation]]
+                - !Ref AWS::NoValue
+              - !If
+                - IsTargetIceberg
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                    - s3:PutObject
+                    - s3:DeleteObject
+                    - s3:ListBucket
+                    - s3:GetBucketLocation
+                  Resource:
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}'
+                      - BucketName: !Select [2, !Split ['/', !Ref TargetWarehouseLocation]]
+                    - !Sub
+                      - 'arn:aws:s3:::${BucketName}/*'
+                      - BucketName: !Select [2, !Split ['/', !Ref TargetWarehouseLocation]]
+                - !Ref AWS::NoValue
+              # Glue Data Catalog permissions for Iceberg tables
+              - !If
+                - IsSourceIceberg
+                - Effect: Allow
+                  Action:
+                    - glue:GetDatabase
+                    - glue:GetDatabases
+                    - glue:GetTable
+                    - glue:GetTables
+                    - glue:GetPartition
+                    - glue:GetPartitions
+                    - glue:BatchGetPartition
+                  Resource:
+                    - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                    - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${SourceDatabase}'
+                    - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${SourceDatabase}/*'
+                - !Ref AWS::NoValue
+              - !If
+                - IsTargetIceberg
+                - Effect: Allow
+                  Action:
+                    - glue:GetDatabase
+                    - glue:GetDatabases
+                    - glue:CreateDatabase
+                    - glue:UpdateDatabase
+                    - glue:GetTable
+                    - glue:GetTables
+                    - glue:CreateTable
+                    - glue:UpdateTable
+                    - glue:DeleteTable
+                    - glue:GetPartition
+                    - glue:GetPartitions
+                    - glue:CreatePartition
+                    - glue:UpdatePartition
+                    - glue:DeletePartition
+                    - glue:BatchCreatePartition
+                    - glue:BatchUpdatePartition
+                    - glue:BatchDeletePartition
+                    - glue:BatchGetPartition
+                  Resource:
+                    - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog'
+                    - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${TargetDatabase}'
+                    - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${TargetDatabase}/*'
+                - !Ref AWS::NoValue
 
   # Source Network Connection for VPC Access
   SourceNetworkConnection:
@@ -1205,7 +1433,24 @@ Resources:
         '--enable-auto-scaling': 'true'
         '--enable-glue-datacatalog': 'true'
         '--job-language': 'python'
-        '--extra-jars': !Sub '${SourceJdbcDriverS3Path},${TargetJdbcDriverS3Path}'
+        '--datalake-formats': !If
+          - IsIcebergJob
+          - 'iceberg'
+          - !Ref 'AWS::NoValue'
+        '--conf': !If
+          - IsIcebergJob
+          - 'spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true'
+          - 'spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true'
+        '--extra-jars': !If
+          - HasSourceJdbcDriver
+          - !If
+            - HasTargetJdbcDriver
+            - !Sub '${SourceJdbcDriverS3Path},${TargetJdbcDriverS3Path}'
+            - !Ref SourceJdbcDriverS3Path
+          - !If
+            - HasTargetJdbcDriver
+            - !Ref TargetJdbcDriverS3Path
+            - !Ref 'AWS::NoValue'
         '--extra-py-files': !If [HasGlueJobModules, !Ref GlueJobModulesS3Path, !Ref 'AWS::NoValue']
         '--JOB_NAME': !Ref JobName
         '--SOURCE_ENGINE_TYPE': !Ref SourceEngineType
@@ -1223,6 +1468,12 @@ Resources:
         '--TARGET_CONNECTION_STRING': !Ref TargetConnectionString
         '--SOURCE_JDBC_DRIVER_S3_PATH': !Ref SourceJdbcDriverS3Path
         '--TARGET_JDBC_DRIVER_S3_PATH': !Ref TargetJdbcDriverS3Path
+        '--SOURCE_WAREHOUSE_LOCATION': !Ref SourceWarehouseLocation
+        '--TARGET_WAREHOUSE_LOCATION': !Ref TargetWarehouseLocation
+        '--SOURCE_CATALOG_ID': !Ref SourceCatalogId
+        '--TARGET_CATALOG_ID': !Ref TargetCatalogId
+        '--SOURCE_FORMAT_VERSION': !Ref SourceFormatVersion
+        '--TARGET_FORMAT_VERSION': !Ref TargetFormatVersion
         '--SOURCE_VPC_ID': !Ref SourceVpcId
         '--SOURCE_SUBNET_IDS': !Join [',', !Ref SourceSubnetIds]
         '--SOURCE_SECURITY_GROUP_IDS': !Join [',', !Ref SourceSecurityGroupIds]

@@ -8,7 +8,7 @@ set -e
 # Default values
 OUTPUT_DIR="dist"
 PACKAGE_NAME="glue-job-modules"
-CLEAN=false
+CLEAN=true  # Default to cleaning to ensure fresh builds
 
 # Colors for output
 RED='\033[0;31m'
@@ -42,7 +42,8 @@ Usage: $0 [OPTIONS]
 Options:
     -o, --output-dir DIR        Output directory for packages (default: dist)
     -n, --package-name NAME     Package name (default: glue-job-modules)
-    -c, --clean                 Clean output directory before packaging
+    -c, --clean                 Clean output directory before packaging (default)
+    --no-clean                  Skip cleaning output directory
     -h, --help                  Show this help message
 
 This script creates:
@@ -65,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -c|--clean)
             CLEAN=true
+            shift
+            ;;
+        --no-clean)
+            CLEAN=false
             shift
             ;;
         -h|--help)

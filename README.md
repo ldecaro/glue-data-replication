@@ -4,7 +4,7 @@ A comprehensive AWS Glue-based data replication solution that supports full-load
 
 ## Features
 
-- **Multi-Database Support**: Oracle, SQL Server, PostgreSQL, DB2
+- **Multi-Database Support**: Oracle, SQL Server, PostgreSQL, DB2, Apache Iceberg
 - **Cross-VPC Connectivity**: Secure database access across different VPCs
 - **Incremental Processing**: Uses Glue job bookmarks for efficient data synchronization with automatic incremental column detection ([details](docs/BOOKMARK_DETAILS.md))
 - **Comprehensive Monitoring**: CloudWatch metrics, dashboards, and alarms
@@ -122,6 +122,7 @@ aws glue start-job-run --job-name my-job-name
 ### Configuration and Setup
 - **[Parameter Reference](docs/PARAMETER_REFERENCE.md)**: Complete parameter documentation
 - **[Database Configuration Guide](docs/DATABASE_CONFIGURATION_GUIDE.md)**: Database-specific setup
+- **[Iceberg Usage Guide](docs/ICEBERG_USAGE_GUIDE.md)**: Apache Iceberg configuration and best practices
 - **[Network Configuration Guide](docs/NETWORK_CONFIGURATION_GUIDE.md)**: VPC and networking setup
 - **[Bookmark Details](docs/BOOKMARK_DETAILS.md)**: Job bookmark system and incremental loading strategies
 
@@ -269,12 +270,13 @@ result = s3_ops.parallel_upload(files, bucket)
 
 ## Supported Databases
 
-| Database | Engine Type | JDBC Driver Required |
-|----------|-------------|---------------------|
-| Oracle | `oracle` | Oracle JDBC Driver |
-| SQL Server | `sqlserver` | Microsoft JDBC Driver |
-| PostgreSQL | `postgresql` | PostgreSQL JDBC Driver |
-| IBM DB2 | `db2` | IBM DB2 JDBC Driver |
+| Database | Engine Type | JDBC Driver Required | Notes |
+|----------|-------------|---------------------|-------|
+| Oracle | `oracle` | Oracle JDBC Driver | Traditional JDBC connection |
+| SQL Server | `sqlserver` | Microsoft JDBC Driver | Traditional JDBC connection |
+| PostgreSQL | `postgresql` | PostgreSQL JDBC Driver | Traditional JDBC connection |
+| IBM DB2 | `db2` | IBM DB2 JDBC Driver | Traditional JDBC connection |
+| Apache Iceberg | `iceberg` | No | Uses Glue Data Catalog and Spark |
 
 ## Configuration Options
 
@@ -350,6 +352,17 @@ See the [Deployment Guide](DEPLOYMENT_GUIDE.md) for detailed troubleshooting ste
 ```bash
 # Configure SourceVpcId and TargetVpcId parameters
 # Enable appropriate VPC endpoints
+```
+
+### Iceberg Table Replication
+```bash
+# Iceberg as target (traditional database to Iceberg)
+# Configure target engine as "iceberg" with warehouse location
+# See examples/oracle-to-iceberg-parameters.json
+
+# Iceberg as source (Iceberg to traditional database)  
+# Configure source engine as "iceberg" with Glue Data Catalog settings
+# See examples/iceberg-to-postgresql-parameters.json
 ```
 
 ## Contributing

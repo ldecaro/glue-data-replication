@@ -25,7 +25,7 @@ except ImportError:
 
 # Import from other modules
 from ..config.job_config import ConnectionConfig
-from .connection_manager import JdbcConnectionManager
+from .connection_manager import UnifiedConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class IncrementalColumnDetector:
         return strategy_info
     
     @classmethod
-    def validate_incremental_column(cls, connection_manager: JdbcConnectionManager,
+    def validate_incremental_column(cls, connection_manager: UnifiedConnectionManager,
                                   connection_config: ConnectionConfig, table_name: str,
                                   column_name: str, strategy: str) -> bool:
         """Validate that the incremental column is suitable for the strategy."""
