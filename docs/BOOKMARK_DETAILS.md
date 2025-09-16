@@ -24,6 +24,12 @@ Automatically analyzes table schemas to determine the best incremental loading s
 ### 4. S3BookmarkStorage
 Provides persistent storage of bookmark states in S3, ensuring bookmarks survive job failures and are available across multiple job executions.
 
+### 5. BookmarkStrategyResolver
+Resolves bookmark strategies using manual configuration or automatic detection, with JDBC metadata integration for validation.
+
+### 6. ManualBookmarkConfig
+Dataclass representing manual bookmark configuration for a specific table, with built-in validation and parsing capabilities.
+
 ## Automatic Incremental Column Detection
 
 The system automatically detects the best incremental loading approach for each table without requiring manual configuration. This process happens during job initialization.
@@ -262,46 +268,265 @@ if progress.status == 'completed':
 
 ## Configuration and Customization
 
-### Current Configuration Method
-The system currently uses **automatic detection only**. No manual configuration is required or supported through CloudFormation parameters.
+### Configuration Methods
+
+The system supports both **automatic detection** and **manual configuration** for maximum flexibility and control.
+
+#### 1. Automatic Detection (Default)
+The system automatically detects the best incremental loading approach for each table without requiring manual configuration.
+
+#### 2. Manual Bookmark Configuration
+For tables requiring specific incremental columns or strategies, manual configuration can be provided through CloudFormation parameters.
 
 **CloudFormation Parameters:**
 - `TableNames`: Comma-separated list of tables to replicate
-- No parameters for specifying incremental columns per table
+- `ManualBookmarkConfig`: JSON string with per-table manual configurations (optional)
 
-### Adding Manual Configuration (Future Enhancement)
+### Manual Configuration Format
 
-To support manual per-table incremental column configuration, the following changes would be needed:
-
-#### 1. CloudFormation Template Extension
+#### CloudFormation Parameter
 ```yaml
 Parameters:
-  TableConfigurations:
+  ManualBookmarkConfig:
     Type: String
-    Description: JSON string with per-table configurations
-    Default: '[]'
-    # Example: '[{"table":"employees","strategy":"timestamp","column":"updated_at"}]'
+    Description: JSON string with manual bookmark configurations per table
+    Default: '{}'
+    # Example: '{"employees":"updated_at","orders":"order_id"}'
 ```
 
-#### 2. Configuration Parser Updates
+#### JSON Configuration Structure
+```json
+{
+  "employees": {
+    "table_name": "employees",
+    "column_name": "updated_at"
+  },
+  "orders": {
+    "table_name": "orders", 
+    "column_name": "order_id"
+  },
+  "products": {
+    "table_name": "products",
+    "column_name": "last_modified_date"
+  }
+}
+```
+
+#### Configuration Validation
+The system validates manual configurations with strict rules:
+
+**Table Name Validation:**
+- Must contain only alphanumeric characters and underscores
+- Cannot start with a number
+- Cannot be empty or whitespace-only
+
+**Column Name Validation:**
+- Must contain only alphanumeric characters and underscores
+- Cannot start with a number
+- Cannot be empty or whitespace-only
+
+**JDBC Metadata Validation:**
+- Column must exist in the target table
+- Column data type must be compatible with incremental loading
+- Validation occurs during job initialization with fallback to automatic detection
+
+### Manual Configuration Processing
+
+#### 1. Configuration Parsing
 ```python
-# Parse table-specific configurations
-table_configs = json.loads(args.get('TABLE_CONFIGURATIONS', '[]'))
-table_config_map = {config['table']: config for config in table_configs}
+# Parse manual bookmark configuration from job parameters
+manual_config_json = args.get('MANUAL_BOOKMARK_CONFIG', '{}')
+manual_configs = JobBookmarkManager._parse_manual_bookmark_config(manual_config_json)
 
-# Use manual config if available, otherwise auto-detect
-if table_name in table_config_map:
-    manual_config = table_config_map[table_name]
-    strategy_info = {
-        'strategy': manual_config['strategy'],
-        'column': manual_config.get('column'),
-        'confidence': 1.0,
-        'reason': 'Manual configuration'
-    }
-else:
-    # Fall back to auto-detection
-    strategy_info = IncrementalColumnDetector.detect_incremental_strategy(schema, table_name)
+# Create BookmarkStrategyResolver with manual configurations
+resolver = BookmarkStrategyResolver(manual_configs, structured_logger)
 ```
+
+#### 2. Strategy Resolution Process
+```python
+# For each table, resolve strategy using manual config or auto-detection
+strategy, column_name, is_manual = resolver.resolve_strategy(table_name, jdbc_connection)
+
+if is_manual:
+    logger.info(f"Using manual configuration for {table_name}: {column_name}")
+else:
+    logger.info(f"Using automatic detection for {table_name}: {strategy}")
+```
+
+#### 3. JDBC Metadata Integration
+The system queries JDBC metadata to validate manual configurations:
+
+```python
+# Query column metadata from database
+column_metadata = resolver._get_column_metadata(connection, table_name, column_name)
+
+if column_metadata:
+    # Map JDBC data type to bookmark strategy
+    data_type = column_metadata['data_type']
+    strategy = resolver._map_jdbc_type_to_strategy(data_type)
+else:
+    # Column not found - fall back to automatic detection
+    logger.warning(f"Manual config column '{column_name}' not found, using automatic detection")
+```
+
+#### 4. Data Type to Strategy Mapping
+The system maps JDBC data types to appropriate bookmark strategies:
+
+**Timestamp Types → Timestamp Strategy:**
+- `TIMESTAMP`, `TIMESTAMP_WITH_TIMEZONE`, `DATE`, `DATETIME`, `TIME`
+- `DATETIME2` (SQL Server), `TIMESTAMPTZ` (PostgreSQL)
+
+**Integer Types → Primary Key Strategy:**
+- `INTEGER`, `BIGINT`, `SMALLINT`, `TINYINT`
+- `SERIAL`, `BIGSERIAL` (PostgreSQL)
+- `NUMBER` (Oracle, when used for IDs)
+
+**Other Types → Hash Strategy:**
+- `VARCHAR`, `CHAR`, `TEXT`, `CLOB`
+- `DECIMAL`, `NUMERIC`, `FLOAT`, `DOUBLE`
+- `BOOLEAN`, `BINARY`, `BLOB`
+
+### Database Engine Compatibility
+
+#### PostgreSQL
+```json
+{
+  "users": {
+    "table_name": "users",
+    "column_name": "updated_at"  // TIMESTAMP or TIMESTAMPTZ
+  },
+  "sessions": {
+    "table_name": "sessions", 
+    "column_name": "session_id"  // SERIAL or BIGSERIAL
+  }
+}
+```
+
+#### Oracle
+```json
+{
+  "employees": {
+    "table_name": "employees",
+    "column_name": "last_modified"  // DATE or TIMESTAMP
+  },
+  "departments": {
+    "table_name": "departments",
+    "column_name": "dept_id"  // NUMBER (integer)
+  }
+}
+```
+
+#### SQL Server
+```json
+{
+  "customers": {
+    "table_name": "customers", 
+    "column_name": "modified_date"  // DATETIME2 or DATETIME
+  },
+  "orders": {
+    "table_name": "orders",
+    "column_name": "order_id"  // INT or BIGINT
+  }
+}
+```
+
+### Hybrid Configuration Approach
+
+The system supports mixing manual and automatic configuration:
+
+```json
+{
+  "critical_table": {
+    "table_name": "critical_table",
+    "column_name": "audit_timestamp"
+  }
+  // Other tables will use automatic detection
+}
+```
+
+**Processing Logic:**
+1. Check if table has manual configuration
+2. If yes, validate manual configuration against JDBC metadata
+3. If validation fails, fall back to automatic detection
+4. If no manual config, use automatic detection
+5. Log the chosen strategy and reasoning
+
+### Performance Optimization
+
+#### JDBC Metadata Caching
+The system implements intelligent caching for JDBC metadata queries to minimize database overhead:
+
+```python
+# Metadata queries are cached by table.column key
+cache_key = f"{table_name}.{column_name}"
+if cache_key in jdbc_metadata_cache:
+    return cached_result  # Cache hit - no database query needed
+else:
+    result = query_jdbc_metadata(connection, table_name, column_name)
+    jdbc_metadata_cache[cache_key] = result  # Cache for future use
+    return result
+```
+
+**Cache Benefits:**
+- Eliminates redundant JDBC metadata queries
+- Reduces database load during job initialization
+- Improves job startup performance for large numbers of tables
+- Handles both successful and failed queries (negative caching)
+
+#### Parallel Processing Support
+Manual configuration validation supports concurrent processing:
+
+```python
+# Multiple tables can be validated concurrently
+with ThreadPoolExecutor(max_workers=5) as executor:
+    futures = {
+        executor.submit(resolver.resolve_strategy, table, connection): table 
+        for table in table_names
+    }
+    
+    for future in as_completed(futures):
+        table_name = futures[future]
+        strategy, column, is_manual = future.result()
+```
+
+#### Performance Metrics
+The system tracks performance metrics for manual configuration:
+- Manual configuration validation time
+- JDBC metadata query duration
+- Cache hit/miss ratios
+- Strategy resolution time per table
+
+### Error Handling and Fallback
+
+#### Graceful Degradation
+The system provides robust error handling with automatic fallback:
+
+```python
+try:
+    # Attempt manual configuration validation
+    column_metadata = get_column_metadata(connection, table_name, column_name)
+    if column_metadata:
+        return resolve_manual_strategy(column_metadata)
+    else:
+        logger.warning(f"Column '{column_name}' not found in table '{table_name}'")
+        return fallback_to_automatic_detection(table_name, connection)
+except Exception as e:
+    logger.error(f"Manual configuration validation failed: {e}")
+    return fallback_to_automatic_detection(table_name, connection)
+```
+
+#### Error Scenarios and Responses
+1. **Column Not Found**: Falls back to automatic detection
+2. **JDBC Connection Error**: Caches failure and falls back to automatic detection
+3. **Invalid Configuration Format**: Logs error and uses automatic detection
+4. **Data Type Incompatibility**: Falls back to automatic detection with warning
+
+#### Monitoring and Alerting
+CloudWatch metrics for manual configuration:
+- `ManualConfigValidationFailures`: Number of failed manual validations
+- `ManualConfigFallbackEvents`: Number of fallbacks to automatic detection
+- `JDBCMetadataCacheHitRate`: Percentage of cache hits vs. misses
+- `ManualConfigValidationDuration`: Time spent validating manual configurations
 
 ## Monitoring and Troubleshooting
 
@@ -430,6 +655,149 @@ Required S3 permissions for bookmark functionality:
 - S3 server-side encryption enabled by default
 - Access logging available through S3 access logs
 - Supports S3 bucket policies for additional access control
+
+## Iceberg Source Bookmark Management
+
+When using Apache Iceberg as a source engine, the bookmark system leverages Iceberg's advanced metadata capabilities for automatic and robust incremental loading.
+
+### Identifier Field IDs
+
+**Identifier Field IDs** are a core feature of Apache Iceberg that provide stable column identification for bookmark management:
+
+#### What are Identifier Field IDs?
+- **Unique Column Identifiers**: Each column in an Iceberg table gets a unique integer ID that never changes
+- **Schema Evolution Support**: Column references remain valid even when columns are renamed, reordered, or when schema evolves
+- **Automatic Assignment**: Field IDs are automatically assigned during table creation and stored in table metadata
+
+#### How They Enable Bookmarks
+```python
+# Iceberg table metadata example
+table_properties = {
+    "table_type": "ICEBERG",
+    "identifier-field-ids": "1,2,3"  # Field IDs for bookmark columns
+}
+
+# The system automatically:
+# 1. Reads identifier-field-ids from Glue Data Catalog
+# 2. Maps field IDs to actual column names
+# 3. Uses those columns for bookmark management
+```
+
+### Automatic Bookmark Detection for Iceberg
+
+The bookmark system automatically handles Iceberg sources without any special configuration:
+
+#### Runtime Detection Process
+1. **Engine Detection**: System detects `SourceEngineType: "iceberg"`
+2. **Metadata Extraction**: Reads table metadata from Glue Data Catalog
+3. **Field ID Parsing**: Extracts `identifier-field-ids` from table properties
+4. **Column Mapping**: Maps field IDs to actual column names using table schema
+5. **Bookmark Strategy**: Automatically determines appropriate incremental strategy
+
+#### Fallback Mechanism
+```python
+# Automatic fallback hierarchy for Iceberg sources:
+if identifier_field_ids_available:
+    use_identifier_field_ids_for_bookmarks()
+elif traditional_bookmark_columns_detected:
+    use_traditional_bookmark_detection()
+else:
+    fallback_to_hash_strategy()
+```
+
+### Configuration Requirements
+
+#### No Special Parameters Needed
+Unlike traditional databases, Iceberg sources require **no special bookmark configuration**:
+
+```json
+{
+  "SourceEngineType": "iceberg",
+  "SourceWarehouseLocation": "s3://my-datalake/warehouse/",
+  "SourceFormatVersion": "2"
+  // No bookmark-specific parameters required
+}
+```
+
+#### Automatic vs Manual Configuration
+- **Automatic (Recommended)**: System automatically uses identifier-field-ids when available
+- **Manual Override**: Manual bookmark configuration can override automatic detection if needed
+- **Hybrid Approach**: Can mix automatic Iceberg detection with manual configuration for other tables
+
+### Manual Bookmark Configuration with Iceberg
+
+While automatic detection is recommended, manual bookmark configuration is supported for Iceberg sources:
+
+#### When to Use Manual Configuration
+- Override automatic field ID detection
+- Specify different bookmark column than what identifier-field-ids suggest
+- Handle edge cases where automatic detection fails
+- Maintain consistency with existing bookmark configurations
+
+#### Configuration Format
+```json
+{
+  "ManualBookmarkConfig": {
+    "iceberg_table_name": "custom_timestamp_column"
+  }
+}
+```
+
+**Note**: Manual configuration for Iceberg tables works the same as traditional databases. See the [Manual Bookmark Configuration Guide](MANUAL_BOOKMARK_CONFIGURATION.md) for detailed instructions.
+
+### Advantages of Iceberg Bookmarks
+
+#### Schema Evolution Safety
+- **Column Renames**: Bookmarks continue working even if bookmark column is renamed
+- **Schema Changes**: Field IDs remain stable across schema modifications
+- **Backward Compatibility**: Existing bookmarks remain valid after table evolution
+
+#### Performance Benefits
+- **Metadata Efficiency**: Leverages Iceberg's efficient metadata operations
+- **Partition Pruning**: Can leverage Iceberg's partition pruning for faster queries
+- **File-Level Metadata**: Uses Iceberg's file-level statistics for optimization
+
+#### Reliability Features
+- **Consistent Metadata**: Iceberg's ACID properties ensure consistent bookmark metadata
+- **Time Travel**: Can leverage Iceberg's time travel features for bookmark recovery
+- **Snapshot Isolation**: Bookmark operations are isolated from concurrent writes
+
+### Best Practices for Iceberg Sources
+
+#### Table Design
+- Ensure identifier-field-ids are properly set during table creation
+- Use appropriate data types for bookmark columns (timestamps, sequential IDs)
+- Consider partition strategy for optimal incremental query performance
+
+#### Monitoring
+- Monitor bookmark column distribution for skewed data
+- Track incremental query performance using Iceberg metrics
+- Verify identifier-field-ids are present in table metadata
+
+#### Troubleshooting
+```bash
+# Check if table has identifier-field-ids
+aws glue get-table --database-name mydb --name mytable \
+  --query 'Table.Parameters."identifier-field-ids"'
+
+# Verify table is properly configured as Iceberg
+aws glue get-table --database-name mydb --name mytable \
+  --query 'Table.Parameters.table_type'
+```
+
+### Limitations and Considerations
+
+#### Current Limitations
+- Requires Iceberg format version 2 for optimal performance
+- Identifier-field-ids must be present in table metadata
+- Cross-account access requires proper IAM permissions for Glue Data Catalog
+
+#### Performance Considerations
+- Large tables may require partition pruning for efficient incremental queries
+- Monitor file count and size for optimal query performance
+- Consider compaction strategies for tables with frequent updates
+
+For detailed manual bookmark configuration options, including Iceberg-specific scenarios, see the [Manual Bookmark Configuration Guide](MANUAL_BOOKMARK_CONFIGURATION.md).
 
 ## Conclusion
 

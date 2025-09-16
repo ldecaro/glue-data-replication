@@ -332,16 +332,15 @@ class IncrementalDataMigrator:
         )
         
         try:
-            # Auto-detect incremental strategy with engine-specific handling
-            schema = self._get_table_schema_with_engine_support(
-                source_config, table_name, source_is_iceberg
-            )
-            strategy_info = IncrementalColumnDetector.detect_incremental_strategy(schema, table_name)
+            # Get existing bookmark state (which should already be initialized in the main workflow)
+            bookmark_state = self.bookmark_manager.get_bookmark_state(table_name)
             
-            # Initialize bookmark state with detected strategy
-            bookmark_state = self.bookmark_manager.initialize_bookmark_state(
-                table_name, strategy_info['strategy'], strategy_info['column']
-            )
+            if bookmark_state is None:
+                # This should not happen if the main workflow is working correctly
+                raise RuntimeError(f"No bookmark state found for table {table_name}. The bookmark state should have been initialized in the main workflow before calling the incremental migrator.")
+            
+            # Log the bookmark state being used
+            self.structured_logger.info(f"Using existing bookmark state for incremental migration: table={table_name}, strategy={bookmark_state.incremental_strategy}, column={bookmark_state.incremental_column}, is_manually_configured={getattr(bookmark_state, 'is_manually_configured', False)}")
             
             progress = IncrementalLoadProgress(
                 table_name=table_name,

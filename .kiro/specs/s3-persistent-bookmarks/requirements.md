@@ -89,3 +89,18 @@ This feature enhances the existing AWS Glue data replication system by implement
 3. WHEN bookmark files are small THEN the system SHALL use S3 standard storage class for cost efficiency
 4. WHEN S3 operations are performed THEN they SHALL not block data processing operations
 5. WHEN multiple tables are processed THEN bookmark operations SHALL be performed asynchronously where possible
+
+### Requirement 8: Manual Bookmark Configuration
+
+**User Story:** As a data engineer, I want to manually configure bookmark strategies for specific tables, so that I can override the automatic detection mechanism and ensure optimal incremental loading for tables with known characteristics.
+
+#### Acceptance Criteria
+
+1. WHEN manual bookmark configuration is provided for a table THEN the system SHALL use the specified column instead of automatic detection
+2. WHEN manual bookmark configuration contains a table name and column THEN the system SHALL query JDBC metadata to determine the column's data type
+3. WHEN the manually configured column data type is determined THEN the system SHALL select the appropriate bookmark strategy (timestamp, primary_key, or hash) based on the data type
+4. WHEN manual bookmark configuration is not provided for a table THEN the system SHALL fall back to the existing automatic detection mechanism
+5. WHEN manual bookmark configuration is provided as a job parameter THEN the system SHALL support configuring multiple tables and their bookmark columns in a single parameter structure
+6. WHEN manual bookmark configuration contains invalid table names or columns THEN the system SHALL log warnings and fall back to automatic detection for those tables
+7. WHEN manual bookmark configuration specifies a column that doesn't exist in the table THEN the system SHALL log an error and fall back to automatic detection
+8. WHEN manual bookmark configuration is used THEN the system SHALL log which tables are using manual vs automatic bookmark detection for observability

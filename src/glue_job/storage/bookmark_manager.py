@@ -11,13 +11,15 @@ This module provides bookmark management functionality including:
 import time
 import asyncio
 import threading
+import json
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone, timedelta
 
 from botocore.exceptions import ClientError, NoCredentialsError, BotoCoreError
 
 from .s3_bookmark import S3BookmarkConfig, S3BookmarkStorage
+from .manual_bookmark_config import ManualBookmarkConfig, BookmarkStrategyResolver
 from ..utils.s3_utils import S3PathUtilities
 
 
@@ -114,6 +116,10 @@ class JobBookmarkState:
     version: str = "1.0"
     s3_key: Optional[str] = None
     
+    # Manual configuration tracking fields
+    is_manually_configured: bool = False
+    manual_column_data_type: Optional[str] = None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert bookmark state to dictionary for storage (legacy method)."""
         return {
@@ -149,7 +155,9 @@ class JobBookmarkState:
             'created_timestamp': self.created_timestamp.isoformat() if self.created_timestamp else None,
             'updated_timestamp': self.updated_timestamp.isoformat() if self.updated_timestamp else None,
             'version': self.version,
-            's3_key': self.s3_key
+            's3_key': self.s3_key,
+            'is_manually_configured': self.is_manually_configured,
+            'manual_column_data_type': self.manual_column_data_type
         }
     
     @classmethod
@@ -237,7 +245,9 @@ class JobBookmarkState:
             created_timestamp=created_timestamp,
             updated_timestamp=updated_timestamp,
             version=data.get('version', '1.0'),
-            s3_key=data.get('s3_key')
+            s3_key=data.get('s3_key'),
+            is_manually_configured=data.get('is_manually_configured', False),
+            manual_column_data_type=data.get('manual_column_data_type')
         )
     
     @staticmethod
@@ -273,7 +283,7 @@ class JobBookmarkState:
                 return False
         
         # Validate boolean fields
-        boolean_fields = ['is_first_run']
+        boolean_fields = ['is_first_run', 'is_manually_configured']
         for field in boolean_fields:
             if field in data and data[field] is not None:
                 if not isinstance(data[field], bool):
@@ -292,6 +302,15 @@ class JobBookmarkState:
                     logger.error(f"Timestamp field '{field}' appears to be too short")
                     return False
         
+        # Validate manual configuration fields
+        if 'manual_column_data_type' in data and data['manual_column_data_type'] is not None:
+            if not isinstance(data['manual_column_data_type'], str):
+                logger.error("Field 'manual_column_data_type' must be a string")
+                return False
+            if not data['manual_column_data_type'].strip():
+                logger.error("Field 'manual_column_data_type' cannot be empty string")
+                return False
+        
         return True
 
 
@@ -305,8 +324,141 @@ class JobBookmarkManager:
     for persistent state management across job executions.
     """
     
+    # JDBC data type to bookmark strategy mapping
+    # This comprehensive mapping supports timestamp, integer, and string/other data types
+    # and handles database-specific type variations and edge cases
+    JDBC_TYPE_TO_STRATEGY = {
+        # Timestamp types -> timestamp strategy
+        'TIMESTAMP': 'timestamp',
+        'TIMESTAMP_WITH_TIMEZONE': 'timestamp',
+        'TIMESTAMP_WITH_LOCAL_TIMEZONE': 'timestamp',  # Oracle
+        'TIMESTAMPTZ': 'timestamp',  # PostgreSQL
+        'TIMESTAMPLTZ': 'timestamp',  # Oracle
+        'DATE': 'timestamp',
+        'DATETIME': 'timestamp',
+        'DATETIME2': 'timestamp',  # SQL Server
+        'SMALLDATETIME': 'timestamp',  # SQL Server
+        'TIME': 'timestamp',
+        'TIME_WITH_TIMEZONE': 'timestamp',  # PostgreSQL
+        'TIMETZ': 'timestamp',  # PostgreSQL
+        'YEAR': 'timestamp',  # MySQL
+        
+        # Integer types -> primary_key strategy  
+        'INTEGER': 'primary_key',
+        'BIGINT': 'primary_key',
+        'SMALLINT': 'primary_key',
+        'TINYINT': 'primary_key',
+        'MEDIUMINT': 'primary_key',  # MySQL
+        'INT': 'primary_key',
+        'INT2': 'primary_key',  # PostgreSQL
+        'INT4': 'primary_key',  # PostgreSQL
+        'INT8': 'primary_key',  # PostgreSQL
+        'SERIAL': 'primary_key',  # PostgreSQL
+        'SERIAL2': 'primary_key',  # PostgreSQL
+        'SERIAL4': 'primary_key',  # PostgreSQL
+        'SERIAL8': 'primary_key',  # PostgreSQL
+        'BIGSERIAL': 'primary_key',  # PostgreSQL
+        'SMALLSERIAL': 'primary_key',  # PostgreSQL
+        'IDENTITY': 'primary_key',  # SQL Server
+        'COUNTER': 'primary_key',  # Access
+        
+        # String and other types -> hash strategy
+        'VARCHAR': 'hash',
+        'VARCHAR2': 'hash',  # Oracle
+        'NVARCHAR': 'hash',  # SQL Server
+        'NVARCHAR2': 'hash',  # Oracle
+        'CHAR': 'hash',
+        'NCHAR': 'hash',
+        'CHARACTER': 'hash',  # PostgreSQL
+        'CHARACTER_VARYING': 'hash',  # PostgreSQL
+        'TEXT': 'hash',
+        'NTEXT': 'hash',  # SQL Server
+        'LONGTEXT': 'hash',  # MySQL
+        'MEDIUMTEXT': 'hash',  # MySQL
+        'TINYTEXT': 'hash',  # MySQL
+        'CLOB': 'hash',
+        'NCLOB': 'hash',  # Oracle
+        'LONG': 'hash',  # Oracle (deprecated)
+        
+        # Numeric types -> hash strategy (not suitable for primary keys due to precision)
+        'DECIMAL': 'hash',
+        'NUMERIC': 'hash',
+        'NUMBER': 'hash',  # Oracle (could be integer or decimal)
+        'MONEY': 'hash',  # SQL Server
+        'SMALLMONEY': 'hash',  # SQL Server
+        'FLOAT': 'hash',
+        'FLOAT4': 'hash',  # PostgreSQL
+        'FLOAT8': 'hash',  # PostgreSQL
+        'REAL': 'hash',
+        'DOUBLE': 'hash',
+        'DOUBLE_PRECISION': 'hash',  # PostgreSQL
+        'PRECISION': 'hash',
+        
+        # Boolean and bit types -> hash strategy
+        'BOOLEAN': 'hash',
+        'BOOL': 'hash',  # PostgreSQL/MySQL
+        'BIT': 'hash',
+        'TINYINT(1)': 'hash',  # MySQL boolean
+        
+        # Binary types -> hash strategy
+        'BINARY': 'hash',
+        'VARBINARY': 'hash',
+        'LONGVARBINARY': 'hash',
+        'BLOB': 'hash',
+        'LONGBLOB': 'hash',  # MySQL
+        'MEDIUMBLOB': 'hash',  # MySQL
+        'TINYBLOB': 'hash',  # MySQL
+        'BYTEA': 'hash',  # PostgreSQL
+        'RAW': 'hash',  # Oracle
+        'LONG_RAW': 'hash',  # Oracle (deprecated)
+        'BFILE': 'hash',  # Oracle
+        'IMAGE': 'hash',  # SQL Server (deprecated)
+        
+        # Special types -> hash strategy
+        'UUID': 'hash',  # PostgreSQL
+        'UNIQUEIDENTIFIER': 'hash',  # SQL Server
+        'GUID': 'hash',  # Access
+        'XML': 'hash',  # SQL Server
+        'JSON': 'hash',  # PostgreSQL/MySQL
+        'JSONB': 'hash',  # PostgreSQL
+        'ARRAY': 'hash',  # PostgreSQL
+        'HSTORE': 'hash',  # PostgreSQL
+        'POINT': 'hash',  # PostgreSQL geometry
+        'LINE': 'hash',  # PostgreSQL geometry
+        'LSEG': 'hash',  # PostgreSQL geometry
+        'BOX': 'hash',  # PostgreSQL geometry
+        'PATH': 'hash',  # PostgreSQL geometry
+        'POLYGON': 'hash',  # PostgreSQL geometry
+        'CIRCLE': 'hash',  # PostgreSQL geometry
+        'INET': 'hash',  # PostgreSQL network
+        'CIDR': 'hash',  # PostgreSQL network
+        'MACADDR': 'hash',  # PostgreSQL network
+        'MACADDR8': 'hash',  # PostgreSQL network
+        'TSQUERY': 'hash',  # PostgreSQL text search
+        'TSVECTOR': 'hash',  # PostgreSQL text search
+        'INTERVAL': 'hash',  # PostgreSQL/Oracle
+        'ENUM': 'hash',  # MySQL/PostgreSQL
+        'SET': 'hash',  # MySQL
+        'GEOMETRY': 'hash',  # MySQL/PostgreSQL spatial
+        'GEOGRAPHY': 'hash',  # SQL Server spatial
+        'HIERARCHYID': 'hash',  # SQL Server
+        'SQL_VARIANT': 'hash',  # SQL Server
+        'CURSOR': 'hash',  # SQL Server
+        'TABLE': 'hash',  # SQL Server
+        'ROWID': 'hash',  # Oracle
+        'UROWID': 'hash',  # Oracle
+        'REF': 'hash',  # Oracle
+        'XMLTYPE': 'hash',  # Oracle
+        'ANYDATA': 'hash',  # Oracle
+        'ANYTYPE': 'hash',  # Oracle
+        'ANYDATASET': 'hash',  # Oracle
+        'SDO_GEOMETRY': 'hash',  # Oracle spatial
+        'MDSYS.SDO_GEOMETRY': 'hash',  # Oracle spatial (fully qualified)
+    }
+    
     def __init__(self, glue_context, job_name: str, job=None, 
-                 source_jdbc_path: Optional[str] = None, target_jdbc_path: Optional[str] = None):
+                 source_jdbc_path: Optional[str] = None, target_jdbc_path: Optional[str] = None,
+                 manual_bookmark_config: Optional[str] = None):
         """
         Initialize JobBookmarkManager with S3 persistent storage support.
         
@@ -316,6 +468,7 @@ class JobBookmarkManager:
             job: Glue job instance (optional)
             source_jdbc_path: S3 path to source JDBC driver (optional)
             target_jdbc_path: S3 path to target JDBC driver (optional)
+            manual_bookmark_config: JSON string containing manual bookmark configuration (optional)
         """
         self.glue_context = glue_context
         self.job_name = job_name
@@ -330,6 +483,33 @@ class JobBookmarkManager:
             # Fallback for when monitoring modules are not available
             import logging
             self.structured_logger = logging.getLogger(__name__)
+        
+        # Parse manual bookmark configuration if provided
+        self.manual_bookmark_configs = {}
+        if manual_bookmark_config:
+            try:
+                self.manual_bookmark_configs = self._parse_manual_bookmark_config(manual_bookmark_config)
+                # Success logging is handled within _parse_manual_bookmark_config method
+            except Exception as e:
+                # Error logging is handled within _parse_manual_bookmark_config method
+                # Fallback to empty configuration to proceed without manual config
+                if hasattr(self.structured_logger, 'error'):
+                    self.structured_logger.error("Failed to parse manual bookmark configuration, proceeding without manual config",
+                                               error=str(e),
+                                               config_json=manual_bookmark_config[:200] + "..." if len(manual_bookmark_config) > 200 else manual_bookmark_config)
+                self.manual_bookmark_configs = {}
+        
+        # Initialize BookmarkStrategyResolver with manual configurations and structured logger
+        self.bookmark_strategy_resolver = BookmarkStrategyResolver(self.manual_bookmark_configs, self.structured_logger)
+        
+        # Initialize tracking for bookmark detection summary (Task 23)
+        self.bookmark_detection_stats = {
+            'total_tables': 0,
+            'manual_count': 0,
+            'automatic_count': 0,
+            'failed_count': 0,
+            'strategy_distribution': {'timestamp': 0, 'primary_key': 0, 'hash': 0}
+        }
         
         # Initialize S3 bookmark storage if JDBC paths are provided
         self.s3_bookmark_storage = None
@@ -491,12 +671,640 @@ class JobBookmarkManager:
             
             return None
     
+    def _parse_manual_bookmark_config(self, config_json: str) -> Dict[str, ManualBookmarkConfig]:
+        """
+        Parse and validate manual bookmark configuration JSON.
+        
+        This method implements JSON parsing and validation for manual configuration parameter,
+        creating a dictionary mapping table names to ManualBookmarkConfig instances.
+        
+        Args:
+            config_json: JSON string containing manual bookmark configuration
+            
+        Returns:
+            Dictionary mapping table names to ManualBookmarkConfig instances
+            
+        Raises:
+            ValueError: If JSON is malformed or configuration structure is invalid
+            TypeError: If configuration data types are incorrect
+        """
+        import time
+        parsing_start_time = time.time()
+        
+        # Log start of manual configuration parsing
+        if hasattr(self.structured_logger, 'log_manual_config_parsing_start'):
+            self.structured_logger.log_manual_config_parsing_start(config_json)
+        
+        if not config_json or not isinstance(config_json, str):
+            parsing_duration_ms = (time.time() - parsing_start_time) * 1000
+            error_msg = "Manual bookmark configuration must be a non-empty JSON string"
+            
+            if hasattr(self.structured_logger, 'log_manual_config_parsing_failure'):
+                self.structured_logger.log_manual_config_parsing_failure(
+                    error_msg, config_json or "", parsing_duration_ms, "proceed_without_manual_config"
+                )
+            
+            raise ValueError(error_msg)
+        
+        # Strip whitespace from JSON string
+        config_json = config_json.strip()
+        if not config_json:
+            parsing_duration_ms = (time.time() - parsing_start_time) * 1000
+            error_msg = "Manual bookmark configuration cannot be empty or whitespace only"
+            
+            if hasattr(self.structured_logger, 'log_manual_config_parsing_failure'):
+                self.structured_logger.log_manual_config_parsing_failure(
+                    error_msg, config_json, parsing_duration_ms, "proceed_without_manual_config"
+                )
+            
+            raise ValueError(error_msg)
+        
+        try:
+            # Parse JSON with error handling for malformed JSON
+            config_data = json.loads(config_json)
+        except json.JSONDecodeError as e:
+            parsing_duration_ms = (time.time() - parsing_start_time) * 1000
+            error_msg = f"Invalid JSON format in manual bookmark configuration: {e}"
+            
+            if hasattr(self.structured_logger, 'log_manual_config_parsing_failure'):
+                self.structured_logger.log_manual_config_parsing_failure(
+                    error_msg, config_json, parsing_duration_ms, "proceed_without_manual_config"
+                )
+            
+            raise ValueError(error_msg)
+        
+        # Validate that parsed data is a dictionary
+        if config_data is None:
+            parsing_duration_ms = (time.time() - parsing_start_time) * 1000
+            error_msg = "Manual bookmark configuration cannot be null"
+            
+            if hasattr(self.structured_logger, 'log_manual_config_parsing_failure'):
+                self.structured_logger.log_manual_config_parsing_failure(
+                    error_msg, config_json, parsing_duration_ms, "proceed_without_manual_config"
+                )
+            
+            raise ValueError(error_msg)
+        
+        if not isinstance(config_data, dict):
+            parsing_duration_ms = (time.time() - parsing_start_time) * 1000
+            error_msg = "Manual bookmark configuration must be a JSON object (dictionary)"
+            
+            if hasattr(self.structured_logger, 'log_manual_config_parsing_failure'):
+                self.structured_logger.log_manual_config_parsing_failure(
+                    error_msg, config_json, parsing_duration_ms, "proceed_without_manual_config"
+                )
+            
+            raise ValueError(error_msg)
+        
+        if not config_data:
+            parsing_duration_ms = (time.time() - parsing_start_time) * 1000
+            error_msg = "Manual bookmark configuration cannot be an empty object"
+            
+            if hasattr(self.structured_logger, 'log_manual_config_parsing_failure'):
+                self.structured_logger.log_manual_config_parsing_failure(
+                    error_msg, config_json, parsing_duration_ms, "proceed_without_manual_config"
+                )
+            
+            raise ValueError(error_msg)
+        
+        # Parse and validate each table configuration
+        manual_configs = {}
+        
+        for table_key, table_config in config_data.items():
+            try:
+                # Validate table key format
+                if not isinstance(table_key, str) or not table_key.strip():
+                    error_msg = f"Table key '{table_key}' must be a non-empty string"
+                    
+                    if hasattr(self.structured_logger, 'log_invalid_manual_config_entry'):
+                        self.structured_logger.log_invalid_manual_config_entry(
+                            table_key, error_msg, {"key": table_key, "config": table_config}, 
+                            "skip_table_and_continue"
+                        )
+                    
+                    raise ValueError(error_msg)
+                
+                # Handle both simplified and full configuration formats
+                if isinstance(table_config, str):
+                    # Simplified format: "table_name": "column_name"
+                    table_config_dict = {
+                        'table_name': table_key,
+                        'column_name': table_config
+                    }
+                elif isinstance(table_config, dict):
+                    # Full format: "table_name": {"table_name": "...", "column_name": "..."}
+                    table_config_dict = table_config
+                else:
+                    error_msg = f"Configuration for table '{table_key}' must be a string (column name) or object (dictionary)"
+                    
+                    if hasattr(self.structured_logger, 'log_invalid_manual_config_entry'):
+                        self.structured_logger.log_invalid_manual_config_entry(
+                            table_key, error_msg, {"key": table_key, "config": table_config}, 
+                            "skip_table_and_continue"
+                        )
+                    
+                    raise TypeError(error_msg)
+                
+                # Create ManualBookmarkConfig instance (validation happens in __post_init__)
+                manual_config = ManualBookmarkConfig.from_dict(table_config_dict)
+                
+                # Use the table_name from the config, not the key (for validation consistency)
+                table_name = manual_config.table_name
+                
+                # Check for duplicate table names
+                if table_name in manual_configs:
+                    error_msg = f"Duplicate table configuration found for table '{table_name}'"
+                    
+                    if hasattr(self.structured_logger, 'log_invalid_manual_config_entry'):
+                        self.structured_logger.log_invalid_manual_config_entry(
+                            table_name, error_msg, {"key": table_key, "config": table_config}, 
+                            "skip_duplicate_and_continue"
+                        )
+                    
+                    raise ValueError(error_msg)
+                
+                manual_configs[table_name] = manual_config
+                
+                # Log successful parsing for each table
+                if hasattr(self.structured_logger, 'debug'):
+                    self.structured_logger.debug("Parsed manual bookmark configuration for table",
+                                               table_name=table_name,
+                                               column_name=manual_config.column_name,
+                                               table_key=table_key)
+                
+            except (ValueError, TypeError) as e:
+                # Log invalid configuration entry and re-raise with additional context
+                error_msg = f"Invalid configuration for table '{table_key}': {e}"
+                
+                if hasattr(self.structured_logger, 'log_invalid_manual_config_entry'):
+                    self.structured_logger.log_invalid_manual_config_entry(
+                        table_key, str(e), {"key": table_key, "config": table_config}, 
+                        "skip_table_and_continue"
+                    )
+                
+                raise ValueError(error_msg)
+            except Exception as e:
+                # Handle unexpected errors during configuration parsing
+                error_msg = f"Unexpected error parsing configuration for table '{table_key}': {e}"
+                
+                if hasattr(self.structured_logger, 'log_invalid_manual_config_entry'):
+                    self.structured_logger.log_invalid_manual_config_entry(
+                        table_key, str(e), {"key": table_key, "config": table_config}, 
+                        "skip_table_and_continue"
+                    )
+                
+                raise ValueError(error_msg)
+        
+        # Validate that at least one valid configuration was parsed
+        if not manual_configs:
+            parsing_duration_ms = (time.time() - parsing_start_time) * 1000
+            error_msg = "No valid table configurations found in manual bookmark configuration"
+            
+            if hasattr(self.structured_logger, 'log_manual_config_parsing_failure'):
+                self.structured_logger.log_manual_config_parsing_failure(
+                    error_msg, config_json, parsing_duration_ms, "proceed_without_manual_config"
+                )
+            
+            raise ValueError(error_msg)
+        
+        parsing_duration_ms = (time.time() - parsing_start_time) * 1000
+        
+        # Log successful parsing completion
+        if hasattr(self.structured_logger, 'log_manual_config_parsing_success'):
+            self.structured_logger.log_manual_config_parsing_success(
+                len(manual_configs), list(manual_configs.keys()), parsing_duration_ms
+            )
+        else:
+            # Fallback logging
+            if hasattr(self.structured_logger, 'info'):
+                self.structured_logger.info("Manual bookmark configuration parsing completed",
+                                          total_tables=len(manual_configs),
+                                          table_names=list(manual_configs.keys()))
+        
+        return manual_configs
+    
+    def log_bookmark_detection_summary(self):
+        """
+        Log comprehensive summary of bookmark detection across all processed tables.
+        
+        This method provides observability into which tables used manual vs automatic
+        bookmark detection and the distribution of strategies used. Should be called
+        at the end of job processing to provide complete statistics.
+        """
+        stats = self.bookmark_detection_stats
+        
+        if hasattr(self.structured_logger, 'log_bookmark_detection_summary'):
+            self.structured_logger.log_bookmark_detection_summary(
+                stats['total_tables'],
+                stats['manual_count'],
+                stats['automatic_count'],
+                stats['failed_count'],
+                stats['strategy_distribution']
+            )
+        else:
+            # Fallback logging
+            if hasattr(self.structured_logger, 'info'):
+                self.structured_logger.info(
+                    "Bookmark detection summary",
+                    total_tables=stats['total_tables'],
+                    manual_configurations=stats['manual_count'],
+                    automatic_detections=stats['automatic_count'],
+                    failed_detections=stats['failed_count'],
+                    strategy_distribution=stats['strategy_distribution']
+                )
+    
+    def _get_column_data_type(self, table_name: str, column_name: str, connection) -> Optional[str]:
+        """
+        Query JDBC metadata for specific columns to determine data type.
+        
+        This method implements database connection metadata access using getMetaData() and getColumns()
+        to retrieve column data type information. It includes error handling for metadata query failures
+        and missing columns, plus a caching mechanism to improve performance.
+        
+        Args:
+            table_name: Name of the table containing the column
+            column_name: Name of the column to query
+            connection: JDBC database connection object
+            
+        Returns:
+            String representation of the column data type, or None if column not found or query fails
+            
+        Raises:
+            None - All exceptions are caught and logged, returning None for failures
+        """
+        if not table_name or not column_name or not connection:
+            if hasattr(self.structured_logger, 'error'):
+                self.structured_logger.error("Invalid parameters for JDBC metadata query",
+                                           table_name=table_name,
+                                           column_name=column_name,
+                                           connection_available=connection is not None)
+            return None
+        
+        # Create cache key for performance optimization
+        cache_key = f"{table_name}.{column_name}"
+        
+        # Initialize metadata cache if not exists
+        if not hasattr(self, '_jdbc_metadata_cache'):
+            self._jdbc_metadata_cache = {}
+        
+        # Check cache first to improve performance
+        if cache_key in self._jdbc_metadata_cache:
+            cached_result = self._jdbc_metadata_cache[cache_key]
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("Retrieved column data type from cache",
+                                           table_name=table_name,
+                                           column_name=column_name,
+                                           data_type=cached_result)
+            return cached_result
+        
+        start_time = time.time()
+        
+        try:
+            # Get database metadata using JDBC connection
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("Querying JDBC metadata for column data type",
+                                           table_name=table_name,
+                                           column_name=column_name)
+            
+            # Access database metadata
+            metadata = connection.getMetaData()
+            
+            # Query column information using getColumns()
+            # Parameters: catalog, schemaPattern, tableNamePattern, columnNamePattern
+            result_set = metadata.getColumns(None, None, table_name, column_name)
+            
+            column_data_type = None
+            
+            # Process result set
+            if result_set.next():
+                # Extract column data type information
+                type_name = result_set.getString('TYPE_NAME')
+                jdbc_type = result_set.getInt('DATA_TYPE')
+                column_size = result_set.getInt('COLUMN_SIZE')
+                nullable = result_set.getInt('NULLABLE')
+                
+                # Use TYPE_NAME as the primary data type identifier
+                column_data_type = type_name
+                
+                # Calculate query duration for performance logging
+                duration_ms = (time.time() - start_time) * 1000
+                
+                if hasattr(self.structured_logger, 'info'):
+                    self.structured_logger.info("Successfully retrieved column data type from JDBC metadata",
+                                              table_name=table_name,
+                                              column_name=column_name,
+                                              data_type=column_data_type,
+                                              jdbc_type=jdbc_type,
+                                              column_size=column_size,
+                                              nullable=nullable,
+                                              duration_ms=duration_ms)
+            else:
+                # Column not found in metadata
+                duration_ms = (time.time() - start_time) * 1000
+                
+                if hasattr(self.structured_logger, 'warning'):
+                    self.structured_logger.warning("Column not found in JDBC metadata",
+                                                 table_name=table_name,
+                                                 column_name=column_name,
+                                                 duration_ms=duration_ms)
+            
+            # Close result set to free resources
+            try:
+                result_set.close()
+            except Exception:
+                pass  # Ignore close errors
+            
+            # Cache the result (even if None) to improve performance
+            self._jdbc_metadata_cache[cache_key] = column_data_type
+            
+            return column_data_type
+            
+        except Exception as e:
+            # Calculate query duration for error logging
+            duration_ms = (time.time() - start_time) * 1000
+            
+            # Handle metadata query failures with comprehensive error logging
+            if hasattr(self.structured_logger, 'error'):
+                self.structured_logger.error("Failed to query JDBC metadata for column data type",
+                                           table_name=table_name,
+                                           column_name=column_name,
+                                           error=str(e),
+                                           error_type=type(e).__name__,
+                                           duration_ms=duration_ms)
+            
+            # Cache the failure to avoid repeated failed queries
+            self._jdbc_metadata_cache[cache_key] = None
+            
+            return None
+    
+    def _determine_strategy_from_data_type(self, data_type: str) -> str:
+        """
+        Map JDBC data type to appropriate bookmark strategy.
+        
+        This method implements comprehensive type mapping from JDBC data types to bookmark strategies
+        based on the data type characteristics. It supports timestamp, primary_key, and hash
+        strategies and handles database-specific type variations and edge cases.
+        
+        The method uses the class-level JDBC_TYPE_TO_STRATEGY dictionary for efficient lookups
+        and includes fallback logic for partial matches and unknown types.
+        
+        Args:
+            data_type: JDBC data type string (e.g., 'TIMESTAMP', 'INTEGER', 'VARCHAR')
+            
+        Returns:
+            Bookmark strategy string ('timestamp', 'primary_key', or 'hash')
+        """
+        if not data_type or not isinstance(data_type, str):
+            if hasattr(self.structured_logger, 'warning'):
+                self.structured_logger.warning("Invalid data type provided for strategy determination",
+                                             data_type=data_type)
+            return 'hash'  # Default fallback strategy
+        
+        # Normalize data type (uppercase, remove extra spaces)
+        normalized_type = data_type.upper().strip()
+        
+        # Direct mapping lookup using class-level dictionary
+        strategy = self.JDBC_TYPE_TO_STRATEGY.get(normalized_type)
+        
+        if strategy:
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("Mapped JDBC data type to bookmark strategy",
+                                           data_type=data_type,
+                                           normalized_type=normalized_type,
+                                           strategy=strategy)
+            return strategy
+        
+        # Fallback logic for partial matches or database-specific variations
+        if any(ts_type in normalized_type for ts_type in ['TIMESTAMP', 'DATE', 'TIME']):
+            strategy = 'timestamp'
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("Mapped data type to timestamp strategy using partial match",
+                                           data_type=data_type,
+                                           normalized_type=normalized_type,
+                                           strategy=strategy)
+            return strategy
+        elif any(int_type in normalized_type for int_type in ['INT', 'SERIAL', 'NUMBER']):
+            # Additional check for Oracle NUMBER type - could be decimal
+            if 'NUMBER' in normalized_type:
+                # For Oracle NUMBER, default to hash unless we know it's an integer
+                strategy = 'hash'
+            else:
+                strategy = 'primary_key'
+            
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("Mapped data type to integer-based strategy using partial match",
+                                           data_type=data_type,
+                                           normalized_type=normalized_type,
+                                           strategy=strategy)
+            return strategy
+        else:
+            # Default to hash strategy for unknown types
+            strategy = 'hash'
+            if hasattr(self.structured_logger, 'warning'):
+                self.structured_logger.warning("Unknown JDBC data type, defaulting to hash strategy",
+                                             data_type=data_type,
+                                             normalized_type=normalized_type,
+                                             strategy=strategy)
+            return strategy
+    
+    def _clear_jdbc_metadata_cache(self):
+        """
+        Clear the JDBC metadata cache to free memory.
+        
+        This method provides cache management functionality to clear cached
+        JDBC metadata queries when needed for memory optimization.
+        """
+        if hasattr(self, '_jdbc_metadata_cache'):
+            cache_size = len(self._jdbc_metadata_cache)
+            self._jdbc_metadata_cache.clear()
+            
+            if hasattr(self.structured_logger, 'info'):
+                self.structured_logger.info("JDBC metadata cache cleared",
+                                          cleared_entries=cache_size)
+        else:
+            if hasattr(self.structured_logger, 'debug'):
+                self.structured_logger.debug("JDBC metadata cache was not initialized, nothing to clear")
+    
+    def _get_jdbc_metadata_cache_stats(self) -> Dict[str, int]:
+        """
+        Get JDBC metadata cache statistics for monitoring and performance analysis.
+        
+        Returns:
+            Dictionary containing cache statistics including entry count and memory usage info
+        """
+        if not hasattr(self, '_jdbc_metadata_cache'):
+            return {
+                'cached_entries': 0,
+                'cache_initialized': False
+            }
+        
+        stats = {
+            'cached_entries': len(self._jdbc_metadata_cache),
+            'cache_initialized': True
+        }
+        
+        # Count successful vs failed cache entries
+        successful_entries = sum(1 for value in self._jdbc_metadata_cache.values() if value is not None)
+        failed_entries = len(self._jdbc_metadata_cache) - successful_entries
+        
+        stats.update({
+            'successful_entries': successful_entries,
+            'failed_entries': failed_entries
+        })
+        
+        if hasattr(self.structured_logger, 'debug'):
+            self.structured_logger.debug("JDBC metadata cache statistics retrieved", **stats)
+        
+        return stats
+    
+    def _get_bookmark_strategy_for_table(self, table_name: str, connection) -> Tuple[str, Optional[str]]:
+        """
+        Get bookmark strategy for a table using manual configuration or automatic detection.
+        
+        This method integrates BookmarkStrategyResolver into the bookmark initialization process,
+        ensuring that manual configuration takes precedence over automatic detection when available.
+        
+        Args:
+            table_name: Name of the table to get strategy for
+            connection: JDBC database connection for metadata queries
+            
+        Returns:
+            Tuple of (strategy, column_name) where:
+            - strategy: 'timestamp', 'primary_key', or 'hash'
+            - column_name: Name of the column to use for incremental loading (None for hash strategy)
+        """
+        try:
+            # Use BookmarkStrategyResolver to resolve strategy with manual config priority
+            strategy, column_name, is_manually_configured = self.bookmark_strategy_resolver.resolve_strategy(
+                table_name, connection
+            )
+            
+            # Update bookmark detection statistics (Task 23)
+            self.bookmark_detection_stats['total_tables'] += 1
+            if is_manually_configured:
+                self.bookmark_detection_stats['manual_count'] += 1
+            else:
+                self.bookmark_detection_stats['automatic_count'] += 1
+            
+            # Update strategy distribution
+            if strategy in self.bookmark_detection_stats['strategy_distribution']:
+                self.bookmark_detection_stats['strategy_distribution'][strategy] += 1
+            
+            # Log the strategy resolution result with configuration source
+            config_source = "manual" if is_manually_configured else "automatic"
+            
+            if hasattr(self.structured_logger, 'info'):
+                self.structured_logger.info("Bookmark strategy resolved for table",
+                                          table_name=table_name,
+                                          strategy=strategy,
+                                          column_name=column_name,
+                                          configuration_source=config_source,
+                                          is_manually_configured=is_manually_configured)
+            
+            # Log manual configuration override if applicable
+            if is_manually_configured and hasattr(self.structured_logger, 'log_manual_config_table_override'):
+                # Get what automatic detection would have chosen for comparison
+                try:
+                    auto_strategy, auto_column = self.bookmark_strategy_resolver._get_automatic_strategy(table_name, connection)
+                    self.structured_logger.log_manual_config_table_override(
+                        table_name, column_name, auto_column, strategy, auto_strategy
+                    )
+                except Exception:
+                    # If automatic detection fails, just log the manual override without comparison
+                    self.structured_logger.log_manual_config_table_override(
+                        table_name, column_name, None, strategy, None
+                    )
+            
+            return strategy, column_name
+            
+        except Exception as e:
+            # Update failed detection statistics
+            self.bookmark_detection_stats['total_tables'] += 1
+            self.bookmark_detection_stats['failed_count'] += 1
+            
+            # Handle any errors in strategy resolution with fallback
+            if hasattr(self.structured_logger, 'error'):
+                self.structured_logger.error("Error resolving bookmark strategy, falling back to hash strategy",
+                                           table_name=table_name,
+                                           error=str(e),
+                                           error_type=type(e).__name__,
+                                           fallback_strategy="hash")
+            
+            # Fallback to hash strategy to ensure job continues
+            return 'hash', None
+    
+    def initialize_bookmark_state_with_auto_detection(self, table_name: str, connection,
+                                                    database: Optional[str] = None,
+                                                    catalog_id: Optional[str] = None,
+                                                    dataframe: Optional['DataFrame'] = None,
+                                                    engine_type: Optional[str] = None) -> JobBookmarkState:
+        """
+        Initialize job bookmark state with automatic strategy detection using manual configuration.
+        
+        This method provides an alternative to initialize_bookmark_state that automatically
+        detects the bookmark strategy using the BookmarkStrategyResolver, which prioritizes
+        manual configuration over automatic detection.
+        
+        Args:
+            table_name: Name of the table to initialize bookmark for
+            connection: JDBC database connection for strategy detection
+            database: Database name (required for Iceberg tables)
+            catalog_id: Optional catalog ID for cross-account Iceberg access
+            dataframe: Optional DataFrame for Iceberg fallback bookmark detection
+            engine_type: Optional engine type to detect Iceberg tables
+            
+        Returns:
+            JobBookmarkState instance with initialized state using detected strategy
+        """
+        try:
+            # Detect strategy using manual configuration or automatic detection
+            strategy, column_name = self._get_bookmark_strategy_for_table(table_name, connection)
+            
+            if hasattr(self.structured_logger, 'info'):
+                self.structured_logger.info("Auto-detected bookmark strategy for table initialization",
+                                          table_name=table_name,
+                                          detected_strategy=strategy,
+                                          detected_column=column_name)
+            
+            # Use the existing initialize_bookmark_state method with detected strategy
+            return self.initialize_bookmark_state(
+                table_name=table_name,
+                incremental_strategy=strategy,
+                incremental_column=column_name,
+                database=database,
+                catalog_id=catalog_id,
+                dataframe=dataframe,
+                engine_type=engine_type
+            )
+            
+        except Exception as e:
+            # Handle any errors in auto-detection with fallback
+            if hasattr(self.structured_logger, 'error'):
+                self.structured_logger.error("Error in auto-detection, falling back to hash strategy",
+                                           table_name=table_name,
+                                           error=str(e),
+                                           error_type=type(e).__name__,
+                                           fallback_strategy="hash")
+            
+            # Fallback to hash strategy initialization
+            return self.initialize_bookmark_state(
+                table_name=table_name,
+                incremental_strategy='hash',
+                incremental_column=None,
+                database=database,
+                catalog_id=catalog_id,
+                dataframe=dataframe,
+                engine_type=engine_type
+            )
+    
     def initialize_bookmark_state(self, table_name: str, incremental_strategy: str,
                                 incremental_column: Optional[str] = None,
                                 database: Optional[str] = None,
                                 catalog_id: Optional[str] = None,
                                 dataframe: Optional['DataFrame'] = None,
-                                engine_type: Optional[str] = None) -> JobBookmarkState:
+                                engine_type: Optional[str] = None,
+                                connection=None,
+                                use_manual_config: bool = True) -> JobBookmarkState:
         """
         Initialize job bookmark state for a table with S3 integration and Iceberg support.
         
@@ -506,6 +1314,7 @@ class JobBookmarkManager:
         - Handles first-run detection based on S3 bookmark existence
         - Falls back to in-memory bookmarks when S3 operations fail
         - Ensures backward compatibility with existing job configurations
+        - Supports manual configuration override when connection is provided
         
         Args:
             table_name: Name of the table to initialize bookmark for
@@ -515,11 +1324,39 @@ class JobBookmarkManager:
             catalog_id: Optional catalog ID for cross-account Iceberg access
             dataframe: Optional DataFrame for Iceberg fallback bookmark detection
             engine_type: Optional engine type to detect Iceberg tables
+            connection: Optional JDBC connection for manual configuration detection
+            use_manual_config: Whether to use manual configuration when available (default: True)
             
         Returns:
             JobBookmarkState instance with initialized state
         """
         try:
+            # Check for manual configuration override when connection is available and enabled
+            if use_manual_config and connection is not None and hasattr(self, 'manual_bookmark_configs') and table_name in self.manual_bookmark_configs:
+                try:
+                    # Override strategy and column with manual configuration
+                    manual_strategy, manual_column = self._get_bookmark_strategy_for_table(table_name, connection)
+                    
+                    if hasattr(self.structured_logger, 'info'):
+                        self.structured_logger.info("Overriding provided strategy with manual configuration",
+                                                  table_name=table_name,
+                                                  provided_strategy=incremental_strategy,
+                                                  provided_column=incremental_column,
+                                                  manual_strategy=manual_strategy,
+                                                  manual_column=manual_column)
+                    
+                    # Use manual configuration values
+                    incremental_strategy = manual_strategy
+                    incremental_column = manual_column
+                    
+                except Exception as e:
+                    if hasattr(self.structured_logger, 'warning'):
+                        self.structured_logger.warning("Failed to apply manual configuration, using provided strategy",
+                                                     table_name=table_name,
+                                                     error=str(e),
+                                                     provided_strategy=incremental_strategy,
+                                                     provided_column=incremental_column)
+            
             # Check if this is an Iceberg table and route to specialized initialization
             if self._is_iceberg_table(table_name, database, engine_type):
                 if database:
@@ -545,7 +1382,9 @@ class JobBookmarkManager:
                                                      table_name=table_name)
             
             # Check if we have a cached state from previous processing in this job
-            if table_name in self.bookmark_states:
+            # Only use cache if manual config override is not being applied differently
+            cache_key = f"{table_name}_{incremental_strategy}_{incremental_column}_{use_manual_config}"
+            if table_name in self.bookmark_states and not (use_manual_config and connection is not None and hasattr(self, 'manual_bookmark_configs') and table_name in self.manual_bookmark_configs):
                 state = self.bookmark_states[table_name]
                 if hasattr(self.structured_logger, 'info'):
                     self.structured_logger.info("Using cached bookmark state from current job execution",
@@ -620,6 +1459,22 @@ class JobBookmarkManager:
             # Set created_timestamp for S3 compatibility
             current_time = datetime.now(timezone.utc)
             
+            # Check if manual configuration was used for this table
+            is_manually_configured = (hasattr(self, 'manual_bookmark_configs') and 
+                                    table_name in self.manual_bookmark_configs)
+            manual_column_data_type = None
+            
+            # If manual configuration was used, try to get the data type
+            if is_manually_configured and connection is not None:
+                try:
+                    manual_column_data_type = self._get_column_data_type(table_name, incremental_column, connection)
+                except Exception as e:
+                    if hasattr(self.structured_logger, 'debug'):
+                        self.structured_logger.debug("Could not determine manual column data type",
+                                                   table_name=table_name,
+                                                   column_name=incremental_column,
+                                                   error=str(e))
+            
             state = JobBookmarkState(
                 table_name=table_name,
                 incremental_strategy=incremental_strategy,
@@ -628,7 +1483,9 @@ class JobBookmarkManager:
                 job_name=self.job_name,
                 created_timestamp=current_time,
                 updated_timestamp=current_time,
-                version="1.0"
+                version="1.0",
+                is_manually_configured=is_manually_configured,
+                manual_column_data_type=manual_column_data_type
             )
             
             if hasattr(self.structured_logger, 'info'):
@@ -652,6 +1509,11 @@ class JobBookmarkManager:
             
             # Create fallback state to ensure job continues
             current_time = datetime.now(timezone.utc)
+            
+            # Check if manual configuration was used for this table (for fallback state)
+            is_manually_configured = (hasattr(self, 'manual_bookmark_configs') and 
+                                    table_name in self.manual_bookmark_configs)
+            
             state = JobBookmarkState(
                 table_name=table_name,
                 incremental_strategy=incremental_strategy,
@@ -659,6 +1521,8 @@ class JobBookmarkManager:
                 is_first_run=True,
                 job_name=self.job_name,
                 created_timestamp=current_time,
+                is_manually_configured=is_manually_configured,
+                manual_column_data_type=None,
                 updated_timestamp=current_time,
                 version="1.0"
             )

@@ -594,6 +594,73 @@ python tests/run_end_to_end_tests.py
 python tests/run_end_to_end_tests.py --source postgresql --target sqlserver
 ```
 
+### Manual Bookmark Configuration Integration Tests
+
+**File**: `test_manual_bookmark_config_integration.py`
+
+#### Test Coverage
+The manual bookmark configuration integration tests provide comprehensive validation of:
+
+- **Real Database Connections**: Mock JDBC connections simulating PostgreSQL, Oracle, and SQL Server
+- **JDBC Metadata Querying**: Real-time metadata validation and caching
+- **Database Engine Compatibility**: Engine-specific type mapping and validation
+- **Performance Testing**: Large-scale configuration performance and concurrent processing
+- **Error Handling**: Invalid configuration handling and fallback mechanisms
+
+#### Running Manual Bookmark Configuration Tests
+```bash
+# Run all manual bookmark configuration integration tests
+python -m pytest tests/test_manual_bookmark_config_integration.py -v
+
+# Run specific test categories
+python -m pytest tests/test_manual_bookmark_config_integration.py::TestManualBookmarkConfigIntegration -v
+python -m pytest tests/test_manual_bookmark_config_integration.py::TestManualBookmarkConfigPerformance -v
+
+# Run with performance metrics
+python -m pytest tests/test_manual_bookmark_config_integration.py -v --tb=short
+```
+
+#### Test Scenarios
+
+**Database Engine Testing:**
+- PostgreSQL metadata integration with BOOL, INTEGER, TIMESTAMP types
+- Oracle metadata integration with NUMBER, DATE, CLOB types  
+- SQL Server metadata integration with DATETIME2, BIT, DECIMAL types
+- Database-specific type mapping validation
+
+**Performance Testing:**
+- JDBC metadata query performance impact (20+ tables)
+- Concurrent metadata queries (10+ tables with ThreadPoolExecutor)
+- Large-scale configuration performance (100+ tables)
+- Memory usage with large cache (500+ entries)
+
+**End-to-End Testing:**
+- Complete manual configuration parsing workflow
+- Bookmark state creation with manual configuration
+- Integration with JobBookmarkManager
+- Mixed manual and automatic detection scenarios
+
+**Error Handling:**
+- Invalid manual configuration handling
+- Column not found scenarios
+- JDBC connection error recovery
+- Fallback to automatic detection
+
+#### Performance Benchmarks
+The integration tests validate performance within acceptable limits:
+- Individual metadata queries: < 1ms each
+- Sequential processing (20 tables): < 5 seconds
+- Concurrent processing (10 tables): < 3 seconds
+- Large-scale processing (100 tables): < 5 seconds
+- Cache operations: < 100ms for cache clearing
+
+#### Mock Infrastructure
+The tests use sophisticated mock infrastructure:
+- `MockJDBCConnection`: Simulates real database connections
+- `MockJDBCMetadata`: Provides realistic metadata responses
+- `MockJDBCResultSet`: Handles JDBC result set operations
+- Database-specific type adjustments for different engines
+
 ### CloudFormation Integration Tests
 
 **File**: `test_cloudformation_integration.py`

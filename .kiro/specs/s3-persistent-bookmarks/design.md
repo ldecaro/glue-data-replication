@@ -90,20 +90,23 @@ graph TB
 
 ### Enhanced JobBookmarkManager Class
 
-**Purpose**: Manages persistent bookmark state using S3 storage
+**Purpose**: Manages persistent bookmark state using S3 storage with manual configuration support
 
 **Key Enhancements**:
 - S3 bucket detection from JDBC driver paths
 - Asynchronous bookmark read/write operations
 - Error handling and fallback to in-memory bookmarks
 - JSON serialization/deserialization with validation
+- Manual bookmark configuration parsing and validation
+- JDBC metadata integration for column type detection
 
 **New Methods**:
 ```python
 class JobBookmarkManager:
     def __init__(self, glue_context: GlueContext, job_name: str, 
-                 source_jdbc_path: str, target_jdbc_path: str, job: Job = None):
-        # Enhanced constructor with S3 path parameters
+                 source_jdbc_path: str, target_jdbc_path: str, 
+                 manual_bookmark_config: Optional[str] = None, job: Job = None):
+        # Enhanced constructor with manual config parameter
         
     def _extract_s3_bucket(self, s3_path: str) -> str:
         # Extract bucket name from S3 path
@@ -122,6 +125,18 @@ class JobBookmarkManager:
         
     def _handle_s3_error(self, operation: str, table_name: str, error: Exception) -> None:
         # Handle S3 operation errors with appropriate fallback
+        
+    def _parse_manual_bookmark_config(self, config_json: str) -> Dict[str, ManualBookmarkConfig]:
+        # Parse and validate manual bookmark configuration JSON
+        
+    def _get_column_data_type(self, table_name: str, column_name: str, connection) -> Optional[str]:
+        # Query JDBC metadata to get column data type
+        
+    def _determine_strategy_from_data_type(self, data_type: str) -> str:
+        # Map JDBC data type to bookmark strategy
+        
+    def _get_bookmark_strategy_for_table(self, table_name: str, connection) -> Tuple[str, Optional[str]]:
+        # Get bookmark strategy using manual config or automatic detection
 ```
 
 ### S3BookmarkStorage Class
@@ -161,7 +176,7 @@ class S3BookmarkStorage:
 
 ### Enhanced JobBookmarkState Class
 
-**Purpose**: Extended bookmark state with S3 metadata
+**Purpose**: Extended bookmark state with S3 metadata and manual configuration tracking
 
 **Enhanced Structure**:
 ```python
@@ -182,6 +197,10 @@ class JobBookmarkState:
     version: str = "1.0"
     s3_key: Optional[str] = None
     
+    # Manual configuration tracking
+    is_manually_configured: bool = False
+    manual_column_data_type: Optional[str] = None
+    
     def to_s3_dict(self) -> Dict[str, Any]:
         # Convert to S3-compatible dictionary with ISO timestamps
         
@@ -191,6 +210,53 @@ class JobBookmarkState:
         
     def validate_s3_data(self) -> bool:
         # Validate S3 bookmark data integrity
+
+### ManualBookmarkConfig Class
+
+**Purpose**: Configuration structure for manual bookmark settings
+
+**Structure**:
+```python
+@dataclass
+class ManualBookmarkConfig:
+    table_name: str
+    column_name: str
+    
+    def __post_init__(self):
+        # Validate table and column names
+        if not self.table_name or not self.column_name:
+            raise ValueError("Table name and column name are required")
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, str]) -> 'ManualBookmarkConfig':
+        # Create from dictionary with validation
+        return cls(
+            table_name=data.get('table_name', '').strip(),
+            column_name=data.get('column_name', '').strip()
+        )
+
+### BookmarkStrategyResolver Class
+
+**Purpose**: Resolves bookmark strategies using manual config or automatic detection
+
+**Interface**:
+```python
+class BookmarkStrategyResolver:
+    def __init__(self, manual_configs: Dict[str, ManualBookmarkConfig]):
+        self.manual_configs = manual_configs
+        self.jdbc_metadata_cache = {}
+    
+    def resolve_strategy(self, table_name: str, connection) -> Tuple[str, Optional[str], bool]:
+        # Returns: (strategy, column, is_manual)
+        
+    def _get_manual_strategy(self, table_name: str, connection) -> Optional[Tuple[str, str]]:
+        # Get strategy from manual configuration
+        
+    def _get_automatic_strategy(self, table_name: str, connection) -> Tuple[str, Optional[str]]:
+        # Get strategy from automatic detection (existing logic)
+        
+    def _map_jdbc_type_to_strategy(self, jdbc_type: str) -> str:
+        # Map JDBC data type to bookmark strategy
 ```
 
 ## Data Models
@@ -199,7 +265,7 @@ class JobBookmarkState:
 
 **S3 Path Pattern**: `s3://{bucket}/bookmarks/{job_name}/{table_name}.json`
 
-**JSON Schema**:
+**Enhanced JSON Schema**:
 ```json
 {
   "type": "object",
@@ -214,8 +280,85 @@ class JobBookmarkState:
     "job_name": {"type": "string"},
     "created_timestamp": {"type": "string", "format": "date-time"},
     "updated_timestamp": {"type": "string", "format": "date-time"},
-    "version": {"type": "string"}
+    "version": {"type": "string"},
+    "is_manually_configured": {"type": "boolean"},
+    "manual_column_data_type": {"type": ["string", "null"]}
   }
+}
+```
+
+### Manual Bookmark Configuration Structure
+
+**Job Parameter Format**: `manual_bookmark_config` (JSON string)
+
+**Configuration Schema**:
+```json
+{
+  "type": "object",
+  "patternProperties": {
+    "^[a-zA-Z_][a-zA-Z0-9_]*$": {
+      "type": "object",
+      "required": ["table_name", "column_name"],
+      "properties": {
+        "table_name": {"type": "string"},
+        "column_name": {"type": "string"}
+      }
+    }
+  }
+}
+```
+
+**Example Configuration**:
+```json
+{
+  "customers": {
+    "table_name": "customers",
+    "column_name": "last_modified_date"
+  },
+  "orders": {
+    "table_name": "orders", 
+    "column_name": "order_timestamp"
+  },
+  "products": {
+    "table_name": "products",
+    "column_name": "product_id"
+  }
+}
+```
+
+### JDBC Data Type Mapping
+
+**Data Type to Strategy Mapping**:
+```python
+JDBC_TYPE_TO_STRATEGY = {
+    # Timestamp types -> timestamp strategy
+    'TIMESTAMP': 'timestamp',
+    'TIMESTAMP_WITH_TIMEZONE': 'timestamp',
+    'DATE': 'timestamp',
+    'DATETIME': 'timestamp',
+    'TIME': 'timestamp',
+    
+    # Integer types -> primary_key strategy  
+    'INTEGER': 'primary_key',
+    'BIGINT': 'primary_key',
+    'SMALLINT': 'primary_key',
+    'TINYINT': 'primary_key',
+    'SERIAL': 'primary_key',
+    'BIGSERIAL': 'primary_key',
+    
+    # String and other types -> hash strategy
+    'VARCHAR': 'hash',
+    'CHAR': 'hash',
+    'TEXT': 'hash',
+    'CLOB': 'hash',
+    'DECIMAL': 'hash',
+    'NUMERIC': 'hash',
+    'FLOAT': 'hash',
+    'DOUBLE': 'hash',
+    'BOOLEAN': 'hash',
+    'BINARY': 'hash',
+    'VARBINARY': 'hash',
+    'BLOB': 'hash'
 }
 ```
 
@@ -243,6 +386,99 @@ def extract_s3_bucket(s3_path: str) -> str:
         raise ValueError(f"Invalid S3 path format: {s3_path}")
     
     return path_parts[0]
+```
+
+### Manual Bookmark Configuration Workflow
+
+**Configuration Resolution Flow**:
+```mermaid
+graph TD
+    A[Start Table Processing] --> B{Manual Config Exists?}
+    B -->|Yes| C[Get Manual Column Name]
+    B -->|No| D[Use Automatic Detection]
+    
+    C --> E[Query JDBC Metadata]
+    E --> F{Column Exists?}
+    F -->|Yes| G[Get Column Data Type]
+    F -->|No| H[Log Error & Fall Back]
+    
+    G --> I[Map Type to Strategy]
+    I --> J[Create Bookmark State]
+    
+    H --> D
+    D --> K[Existing Auto Detection Logic]
+    K --> J
+    
+    J --> L[Log Strategy Decision]
+    L --> M[Continue Processing]
+    
+    style C fill:#e8f5e8
+    style G fill:#e8f5e8
+    style I fill:#e8f5e8
+```
+
+**JDBC Metadata Query Process**:
+```python
+def get_column_metadata(connection, table_name: str, column_name: str) -> Optional[Dict[str, Any]]:
+    """
+    Query JDBC metadata to get column information.
+    Returns column data type and other metadata.
+    """
+    try:
+        # Get database metadata
+        metadata = connection.getMetaData()
+        
+        # Query column information
+        result_set = metadata.getColumns(None, None, table_name, column_name)
+        
+        if result_set.next():
+            return {
+                'column_name': result_set.getString('COLUMN_NAME'),
+                'data_type': result_set.getString('TYPE_NAME'),
+                'jdbc_type': result_set.getInt('DATA_TYPE'),
+                'column_size': result_set.getInt('COLUMN_SIZE'),
+                'nullable': result_set.getInt('NULLABLE')
+            }
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Failed to query metadata for {table_name}.{column_name}: {e}")
+        return None
+```
+
+**Strategy Resolution Algorithm**:
+```python
+def resolve_bookmark_strategy(table_name: str, manual_configs: Dict, connection) -> Tuple[str, str, bool]:
+    """
+    Resolve bookmark strategy for a table.
+    Returns: (strategy, column, is_manual)
+    """
+    # Check for manual configuration
+    if table_name in manual_configs:
+        manual_config = manual_configs[table_name]
+        column_name = manual_config.column_name
+        
+        # Query JDBC metadata
+        metadata = get_column_metadata(connection, table_name, column_name)
+        
+        if metadata:
+            data_type = metadata['data_type'].upper()
+            strategy = JDBC_TYPE_TO_STRATEGY.get(data_type, 'hash')
+            
+            logger.info(f"Manual bookmark config for {table_name}: column={column_name}, "
+                       f"type={data_type}, strategy={strategy}")
+            
+            return strategy, column_name, True
+        else:
+            logger.error(f"Manual config column {column_name} not found in {table_name}, "
+                        f"falling back to automatic detection")
+    
+    # Fall back to automatic detection
+    strategy, column = detect_incremental_strategy_automatically(table_name, connection)
+    logger.info(f"Automatic bookmark detection for {table_name}: column={column}, strategy={strategy}")
+    
+    return strategy, column, False
 ```
 
 ## Error Handling
@@ -382,22 +618,28 @@ graph TD
 - Implement basic read/write operations
 - Add comprehensive error handling
 
-### Phase 2: Enhanced BookmarkManager
-- Integrate S3BookmarkStorage into existing JobBookmarkManager
-- Implement asynchronous operations
-- Add fallback mechanisms
-- Enhance logging and monitoring
+### Phase 2: Manual Configuration Framework
+- Implement ManualBookmarkConfig and BookmarkStrategyResolver classes
+- Add manual configuration parsing and validation
+- Implement JDBC metadata querying for column data types
+- Add data type to strategy mapping logic
 
-### Phase 3: Testing and Validation
-- Comprehensive unit and integration testing
+### Phase 3: Enhanced BookmarkManager Integration
+- Integrate S3BookmarkStorage and manual configuration into existing JobBookmarkManager
+- Implement asynchronous operations with manual config support
+- Add fallback mechanisms for manual config failures
+- Enhance logging and monitoring for manual vs automatic detection
+
+### Phase 4: Testing and Validation
+- Comprehensive unit and integration testing for manual configuration
+- Test JDBC metadata querying across different database engines
 - Performance testing and optimization
-- Documentation updates
-- Backward compatibility validation
+- Documentation updates and backward compatibility validation
 
-### Phase 4: Deployment and Monitoring
-- Deploy to test environments
-- Monitor S3 operation metrics
-- Validate cost implications
+### Phase 5: Deployment and Monitoring
+- Deploy to test environments with manual configuration examples
+- Monitor S3 operation metrics and manual config usage
+- Validate cost implications and performance impact
 - Production deployment preparation
 
 ## Monitoring and Observability

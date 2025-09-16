@@ -28,6 +28,7 @@ These parameters must be provided for every deployment:
 | `SourceSchema` | String | Source database schema name | 1-128 characters, alphanumeric, hyphens, underscores, periods | `HR` |
 | `TargetSchema` | String | Target database schema name | 1-128 characters, alphanumeric, hyphens, underscores, periods | `public` |
 | `TableNames` | CommaDelimitedList | Comma-separated list of table names to replicate | Valid table names | `employees,departments,locations` |
+| `ManualBookmarkConfig` | String | JSON string with manual bookmark configurations per table (optional) | Valid JSON object or empty | `{"employees":"updated_at","customers":"customer_id"}` |
 
 ### Database Credentials
 
@@ -104,6 +105,118 @@ These parameters have default values and can be omitted if the defaults are acce
 | `TargetSubnetIds` | CommaDelimitedList | Comma-separated list of subnet IDs for target database access | `''` (empty) | `subnet-xxxxxxxx,subnet-yyyyyyyy` | `subnet-789,subnet-012` |
 | `TargetSecurityGroupIds` | CommaDelimitedList | Comma-separated list of security group IDs for target database access | `''` (empty) | `sg-xxxxxxxx,sg-yyyyyyyy` | `sg-87654321` |
 | `CreateTargetS3VpcEndpoint` | String | Create S3 VPC endpoint in target VPC for private subnet access | `NO` | `YES`, `NO` | `YES` |
+
+### Manual Bookmark Configuration (Optional)
+
+| Parameter | Type | Description | Default | Format | Example |
+|-----------|------|-------------|---------|--------|---------|
+| `ManualBookmarkConfig` | String | JSON configuration for manual bookmark column specification per table | `'{}'` (empty object) | JSON object with table configurations | See detailed format below |
+
+#### Manual Bookmark Configuration Format
+
+The `ManualBookmarkConfig` parameter accepts a JSON string that specifies manual bookmark configurations for specific tables. This allows you to override the automatic incremental column detection for tables that require specific bookmark columns.
+
+**When to Use Manual Configuration:**
+- Tables with non-standard timestamp column names
+- Tables with multiple timestamp columns where automatic detection might choose incorrectly
+- Tables requiring specific primary key columns for optimal incremental performance
+- Business logic requirements for specific incremental columns
+
+**JSON Structure:**
+```json
+{
+  "table_name_1": "column_name_to_use",
+  "table_name_2": "column_name_to_use"
+}
+```
+
+**Validation Rules:**
+- Table names must contain only alphanumeric characters and underscores
+- Table names cannot start with a number
+- Column names must contain only alphanumeric characters and underscores
+- Column names cannot start with a number
+- Column must exist in the target table (validated via JDBC metadata)
+- If validation fails, the system falls back to automatic detection
+
+**JDBC Data Type to Strategy Mapping:**
+
+| JDBC Data Type | Bookmark Strategy | Use Case |
+|----------------|-------------------|----------|
+| `TIMESTAMP`, `TIMESTAMP_WITH_TIMEZONE`, `DATE`, `DATETIME`, `TIME` | `timestamp` | Change tracking with temporal data |
+| `INTEGER`, `BIGINT`, `SMALLINT`, `TINYINT`, `SERIAL`, `BIGSERIAL` | `primary_key` | Append-only tables with sequential IDs |
+| `VARCHAR`, `CHAR`, `TEXT`, `CLOB`, `DECIMAL`, `NUMERIC`, `FLOAT`, `DOUBLE`, `BOOLEAN`, `BINARY`, `VARBINARY`, `BLOB` | `hash` | Tables without suitable timestamp or ID columns |
+
+**Configuration Examples:**
+
+*Single Table Configuration:*
+```json
+{
+  "employees": "last_modified_date"
+}
+```
+
+*Multiple Tables Configuration:*
+```json
+{
+  "employees": "updated_at",
+  "orders": "order_id",
+  "products": "last_change_timestamp"
+}
+```
+
+*Common Use Cases by Database:*
+
+**PostgreSQL Examples:**
+```json
+{
+  "users": "updated_at",
+  "sessions": "session_id",
+  "audit_log": "event_timestamp"
+}
+```
+
+**Oracle Examples:**
+```json
+{
+  "employees": "last_modified",
+  "departments": "dept_id",
+  "audit_trail": "audit_date"
+}
+```
+
+**SQL Server Examples:**
+```json
+{
+  "customers": "modified_date",
+  "orders": "order_id",
+  "inventory": "last_updated"
+}
+```
+
+**Mixed Strategy Examples:**
+```json
+{
+  "transaction_log": "transaction_timestamp",
+  "user_accounts": "account_id",
+  "configuration": "config_key"
+}
+```
+
+**Troubleshooting Manual Configuration:**
+
+| Issue | Symptoms | Solution |
+|-------|----------|----------|
+| Configuration ignored | Automatic detection used instead | Check JSON syntax, verify column exists in database |
+| Performance degradation | Slow job initialization | Reduce number of manual configurations, check database connectivity |
+| Validation errors | Warnings in CloudWatch logs | Verify table/column names match database schema exactly |
+| Inconsistent behavior | Some tables work, others don't | Check case sensitivity, schema context, and naming conventions |
+
+**Best Practices:**
+- Start with critical tables only, use automatic detection for others
+- Test configurations in development environment first
+- Monitor CloudWatch logs for validation results
+- Document why specific columns were chosen for manual configuration
+- Use external JSON files for complex configurations and version control
 
 ### Observability Configuration (Optional)
 
@@ -213,7 +326,7 @@ The CloudFormation template includes built-in validation for all parameters:
 ### Iceberg as Target (Traditional Database to Data Lake)
 ```json
 {
-  "JobName": "oracle-to-iceberg-job",
+  "JobName": "sqlserver-to-iceberg-job",
   "SourceEngineType": "oracle",
   "SourceHost": "oracle-db.company.com",
   "SourcePort": "1521",

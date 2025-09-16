@@ -1,0 +1,150 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "oracle-to-iceberg-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "oracle"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "iceberg"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "PROD"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "sales"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "sales_analytics"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "customer_orders"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "customer_orders"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": "etl_user"
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": "oracle_password"
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": "jdbc:oracle:thin:@//oracle-prod.company.com:1521/PROD"
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": "s3://your-bucket/drivers/ojdbc8.jar"
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetWarehouseLocation",
+    "ParameterValue": "s3://your-datalake-bucket/warehouse/"
+  },
+  {
+    "ParameterKey": "TargetCatalogId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetFormatVersion",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://your-bucket/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "2880"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.2X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "5"
+  },
+  {
+    "ParameterKey": "SourceVpcId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceSubnetIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceSecurityGroupIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "CreateSourceGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "SourceAvailabilityZone",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "CreateSourceS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "CreateTargetS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "CreateTargetGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "ErrorLogRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  }
+]

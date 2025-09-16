@@ -200,6 +200,13 @@ Parameters:
     AllowedPattern: '^(s3://[a-zA-Z0-9.-]+/.*\.zip)?$'
     ConstraintDescription: 'Must be empty or a valid S3 path ending with .zip (s3://bucket/path/modules.zip)'
   
+  ManualBookmarkConfig:
+    Type: String
+    Description: 'JSON string with manual bookmark configurations per table (optional)'
+    Default: ''
+    MaxLength: 4096
+    ConstraintDescription: 'Must be empty or a valid JSON string with table-to-column mappings'
+  
   MaxRetries:
     Type: Number
     Description: 'Maximum number of retries for the Glue job'
@@ -1488,6 +1495,7 @@ Resources:
         '--TARGET_S3_VPC_ENDPOINT_ID': !If [CreateTargetS3Endpoint, !Ref TargetS3VpcEndpoint, '']
         '--VALIDATE_CONNECTIONS': 'true'
         '--CONNECTION_TIMEOUT_SECONDS': '30'
+        '--MANUAL_BOOKMARK_CONFIG': !Ref ManualBookmarkConfig
       ExecutionProperty:
         MaxConcurrentRuns: !Ref MaxConcurrentRuns
       MaxRetries: !Ref MaxRetries

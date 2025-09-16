@@ -14,7 +14,45 @@ Apache Iceberg is a modern, open table format designed for large-scale data stor
 - **Performance**: Optimized for analytical workloads with efficient file pruning
 - **Scalability**: Designed for petabyte-scale data lakes
 
+## Processing Mode Behavior
+
+### Automatic Full Load and Incremental Processing
+
+#### How It Works
+
+1. **First Run (Full Load)**: When no bookmark exists for a table, the system automatically performs a full load
+2. **Subsequent Runs (Incremental)**: After the first successful run, the system uses bookmarks to perform incremental loads
+3. **Bookmark Management**: Uses the same S3-based bookmark persistence as other database engines
+
+#### Key Behavior
+
+```python
+# The system automatically determines processing mode:
+if bookmark_state.is_first_run:
+    # Performs full load automatically
+    logger.info("First run detected - performing full load")
+else:
+    # Performs incremental load using bookmarks
+    logger.info("Incremental load using bookmark")
+```
+
+#### Iceberg-Specific Enhancements
+
+While the processing mode logic is identical to other engines, Iceberg provides enhanced bookmark management:
+
+- **Identifier Field IDs**: Uses Iceberg's built-in field identification system for more robust bookmarking
+- **Automatic Fallback**: Falls back to traditional bookmark columns if identifier-field-ids are not available
+- **Schema Evolution Support**: Handles schema changes gracefully during incremental processing
+
+#### Forcing a Full Reload
+
+To force a full reload (reset to first run behavior):
+1. Delete the bookmark state from S3 for the specific table
+2. The next job execution will automatically detect this as a first run and perform a full load
+
 ## Configuration Requirements
+
+**For complete, ready-to-use configuration examples, see the `examples/` directory and `examples/README.md` for detailed guidance on all available Iceberg configurations.**
 
 ### Required Parameters
 
@@ -33,55 +71,23 @@ When using Iceberg as either source or target, the following parameters are requ
 | `catalog_id` | AWS account ID for cross-account catalog access | Current account | `123456789012` |
 | `format_version` | Iceberg table format version | `2` | `2` |
 
-### Configuration Examples by Use Case
+### Configuration Examples
 
-#### Basic Iceberg Source Configuration
+For complete configuration examples with all required parameters, refer to the example files in the `examples/` directory:
 
-Use this configuration when reading from an Iceberg table in the same AWS account:
+#### Iceberg as Source Engine
+- **Basic Configuration**: `examples/iceberg-source-basic-parameters.json` - Iceberg source to PostgreSQL with automatic bookmark detection
+- **Cross-Account Access**: `examples/iceberg-cross-account-source-parameters.json` - Reading from Iceberg table in different AWS account
 
-```json
-{
-    "JobName": "iceberg-source-basic",
-    "SourceEngine": "iceberg",
-    "SourceDatabaseName": "analytics_db",
-    "SourceTableName": "customer_events",
-    "SourceWarehouseLocation": "s3://my-datalake-bucket/warehouse/",
-    "SourceCatalogId": "",
-    "SourceFormatVersion": "2"
-}
-```
+#### Iceberg as Target Engine  
+- **Basic Configuration**: `examples/sqlserver-to-iceberg-parameters.json` - SQL Server to Iceberg with automatic table creation
+- **Cross-Account Access**: `examples/iceberg-cross-account-target-parameters.json` - Writing to Iceberg table in different AWS account
 
-#### Basic Iceberg Target Configuration
+#### Advanced Scenarios
+- **Iceberg to Iceberg**: `examples/iceberg-to-iceberg-parameters.json` - Data processing between different warehouse locations
+- **Multi-Region**: `examples/iceberg-multi-region-parameters.json` - Global data consolidation across regions
 
-Use this configuration when writing to an Iceberg table with automatic table creation:
-
-```json
-{
-    "JobName": "mysql-to-iceberg-basic",
-    "TargetEngine": "iceberg",
-    "TargetDatabaseName": "ecommerce_analytics",
-    "TargetTableName": "product_catalog",
-    "TargetWarehouseLocation": "s3://ecommerce-datalake/warehouse/",
-    "TargetCatalogId": "",
-    "TargetFormatVersion": "2"
-}
-```
-
-#### Incremental Replication Configuration
-
-For incremental replication, the system uses identifier-field-ids for bookmark management:
-
-```json
-{
-    "JobName": "postgresql-to-iceberg-incremental",
-    "ProcessingMode": "incremental",
-    "TargetEngine": "iceberg",
-    "TargetDatabaseName": "financial_analytics",
-    "TargetTableName": "transaction_stream",
-    "TargetWarehouseLocation": "s3://financial-datalake/warehouse/",
-    "TargetFormatVersion": "2"
-}
-```
+**Note**: All examples use CloudFormation parameter format with `ParameterKey` and `ParameterValue` structure. The system automatically handles full load on first run and incremental load on subsequent runs - no special configuration is needed.
 
 ### IAM Permissions
 
@@ -125,23 +131,7 @@ When using Iceberg as a target database engine, data from traditional databases 
 
 ### Configuration Example
 
-```json
-{
-    "SourceEngine": "oracle",
-    "SourceHost": "oracle-db.example.com",
-    "SourcePort": "1521",
-    "SourceDatabase": "ORCL",
-    "SourceUsername": "source_user",
-    "SourcePassword": "source_password",
-    "SourceJdbcDriverS3Path": "s3://my-bucket/drivers/ojdbc8.jar",
-    
-    "TargetEngine": "iceberg",
-    "TargetDatabaseName": "analytics_db",
-    "TargetTableName": "customer_orders",
-    "TargetWarehouseLocation": "s3://my-datalake-bucket/warehouse/",
-    "TargetCatalogId": "123456789012"
-}
-```
+For complete configuration examples, see `examples/sqlserver-to-iceberg-parameters.json` which demonstrates SQL Server to Iceberg replication with all required CloudFormation parameters.
 
 ### Automatic Table Creation
 
@@ -173,23 +163,7 @@ When using Iceberg as a source database engine, data from Iceberg tables is repl
 
 ### Configuration Example
 
-```json
-{
-    "SourceEngine": "iceberg",
-    "SourceDatabaseName": "analytics_db",
-    "SourceTableName": "processed_events",
-    "SourceWarehouseLocation": "s3://my-datalake-bucket/warehouse/",
-    "SourceCatalogId": "123456789012",
-    
-    "TargetEngine": "postgresql",
-    "TargetHost": "postgres-db.example.com",
-    "TargetPort": "5432",
-    "TargetDatabase": "reporting",
-    "TargetUsername": "target_user",
-    "TargetPassword": "target_password",
-    "TargetJdbcDriverS3Path": "s3://my-bucket/drivers/postgresql.jar"
-}
-```
+For complete configuration examples, see `examples/iceberg-source-basic-parameters.json` which demonstrates Iceberg to PostgreSQL replication with all required CloudFormation parameters.
 
 ### Bookmark Management
 
@@ -239,82 +213,19 @@ Iceberg tables support advanced bookmark management through identifier-field-ids
 
 ## Configuration Examples
 
-### Example 1: Oracle to Iceberg (Full Load)
+For complete, ready-to-use configuration examples, refer to the files in the `examples/` directory. All examples use the proper CloudFormation parameter format and include all required parameters.
 
-```json
-{
-    "JobName": "oracle-to-iceberg-full",
-    "ProcessingMode": "full-load",
-    
-    "SourceEngine": "oracle",
-    "SourceHost": "prod-oracle.company.com",
-    "SourcePort": "1521",
-    "SourceDatabase": "PROD",
-    "SourceUsername": "etl_user",
-    "SourcePassword": "secure_password",
-    "SourceJdbcDriverS3Path": "s3://etl-assets/drivers/ojdbc8.jar",
-    "SourceQuery": "SELECT * FROM sales.customer_orders WHERE order_date >= TRUNC(SYSDATE-30)",
-    
-    "TargetEngine": "iceberg",
-    "TargetDatabaseName": "sales_analytics",
-    "TargetTableName": "customer_orders",
-    "TargetWarehouseLocation": "s3://company-datalake/warehouse/",
-    
-    "WorkerType": "G.2X",
-    "NumberOfWorkers": 5
-}
-```
+### Basic Examples
+- **SQL Server to Iceberg**: See `examples/sqlserver-to-iceberg-parameters.json`
+- **Iceberg to PostgreSQL**: See `examples/iceberg-source-basic-parameters.json`
 
-### Example 2: Iceberg to PostgreSQL (Incremental)
+### Advanced Examples  
+- **Cross-Account Iceberg Target**: See `examples/iceberg-cross-account-target-parameters.json`
+- **Cross-Account Iceberg Source**: See `examples/iceberg-cross-account-source-parameters.json`
+- **Iceberg to Iceberg**: See `examples/iceberg-to-iceberg-parameters.json`
+- **Multi-Region Setup**: See `examples/iceberg-multi-region-parameters.json`
 
-```json
-{
-    "JobName": "iceberg-to-postgres-incremental",
-    "ProcessingMode": "incremental",
-    
-    "SourceEngine": "iceberg",
-    "SourceDatabaseName": "processed_data",
-    "SourceTableName": "aggregated_metrics",
-    "SourceWarehouseLocation": "s3://analytics-lake/warehouse/",
-    
-    "TargetEngine": "postgresql",
-    "TargetHost": "reporting-db.company.com",
-    "TargetPort": "5432",
-    "TargetDatabase": "reporting",
-    "TargetUsername": "reporting_user",
-    "TargetPassword": "reporting_password",
-    "TargetJdbcDriverS3Path": "s3://etl-assets/drivers/postgresql.jar",
-    "TargetTableName": "daily_metrics",
-    
-    "BookmarkS3Bucket": "etl-bookmarks",
-    "BookmarkS3Prefix": "iceberg-jobs/",
-    
-    "WorkerType": "G.1X",
-    "NumberOfWorkers": 2
-}
-```
-
-### Example 3: Cross-Account Iceberg Access
-
-```json
-{
-    "JobName": "cross-account-iceberg",
-    
-    "SourceEngine": "sqlserver",
-    "SourceHost": "source-db.company.com",
-    "SourcePort": "1433",
-    "SourceDatabase": "Operations",
-    "SourceUsername": "etl_user",
-    "SourcePassword": "source_password",
-    "SourceJdbcDriverS3Path": "s3://etl-assets/drivers/mssql-jdbc.jar",
-    
-    "TargetEngine": "iceberg",
-    "TargetDatabaseName": "shared_analytics",
-    "TargetTableName": "operational_data",
-    "TargetWarehouseLocation": "s3://shared-datalake-bucket/warehouse/",
-    "TargetCatalogId": "987654321098"
-}
-```
+For detailed information about all available examples and their use cases, see `examples/README.md`.
 
 ## Cross-Account Access
 
@@ -322,18 +233,13 @@ Iceberg tables support advanced bookmark management through identifier-field-ids
 
 Cross-account access allows you to read from or write to Iceberg tables in a different AWS account's Glue Data Catalog within the same region. This is useful for shared data lakes and multi-account architectures.
 
-### Configuration
+### Configuration Examples
 
-Set the `CatalogId` parameter to the AWS account ID that owns the Glue Data Catalog:
+For complete cross-account configuration examples, see:
+- **Cross-Account Source**: `examples/iceberg-cross-account-source-parameters.json`
+- **Cross-Account Target**: `examples/iceberg-cross-account-target-parameters.json`
 
-```json
-{
-    "SourceEngine": "iceberg",
-    "SourceCatalogId": "123456789012",
-    "TargetEngine": "iceberg",
-    "TargetCatalogId": "987654321098"
-}
-```
+These examples show the proper CloudFormation parameter format for setting `SourceCatalogId` and `TargetCatalogId` parameters.
 
 ### Required IAM Permissions
 
@@ -396,7 +302,8 @@ s3://company-datalake/
 **Configuration:**
 ```json
 {
-    "TargetWarehouseLocation": "s3://company-datalake/warehouse/"
+    "ParameterKey": "TargetWarehouseLocation",
+    "ParameterValue": "s3://company-datalake/warehouse/"
 }
 ```
 
@@ -573,7 +480,8 @@ TIMESTAMP      -- For precise timestamps
 
 ### Data Management
 
-1. **Incremental Processing**
+1. **Automatic Processing Mode**
+   - System automatically performs full load on first run, incremental on subsequent runs
    - Use timestamp or sequence columns for bookmarks
    - Leverage Iceberg's identifier-field-ids when available
    - Monitor bookmark progression and reset when needed
@@ -601,6 +509,16 @@ TIMESTAMP      -- For precise timestamps
    - Track S3 access patterns and errors
 
 ## Troubleshooting Common Issues
+
+### Processing Mode Confusion
+
+**Issue**: Documentation examples show a `ProcessingMode` parameter that doesn't work
+
+**Solution**: The `ProcessingMode` parameter does not exist in the actual implementation. The system automatically:
+- Performs full load on first run (when no bookmark exists)
+- Performs incremental load on subsequent runs (using bookmark state)
+
+**Note**: This is consistent behavior across all database engines, including Iceberg.
 
 ### Table Creation Failures
 
@@ -887,11 +805,12 @@ def publish_iceberg_metrics(table_name, file_count, avg_file_size):
 
 ### Time Travel Queries
 
-When using Iceberg as source, you can query historical data:
+When using Iceberg as source, you can query historical data by setting the SourceQuery parameter:
 
 ```json
 {
-    "SourceQuery": "SELECT * FROM glue_catalog.analytics_db.customer_orders FOR SYSTEM_TIME AS OF '2024-01-01 00:00:00'"
+    "ParameterKey": "SourceQuery", 
+    "ParameterValue": "SELECT * FROM glue_catalog.analytics_db.customer_orders FOR SYSTEM_TIME AS OF '2024-01-01 00:00:00'"
 }
 ```
 
@@ -956,12 +875,12 @@ Use Glue Studio visual editor with Iceberg:
    - Plan schema evolution requirements
 
 2. **Initial Load**
-   - Use full-load mode for historical data migration
+   - First run automatically performs full load for historical data migration
    - Optimize for large data transfers
    - Validate data integrity after migration
 
-3. **Incremental Sync**
-   - Switch to incremental mode for ongoing synchronization
+3. **Ongoing Synchronization**
+   - Subsequent runs automatically perform incremental synchronization
    - Monitor bookmark progression
    - Handle schema changes gracefully
 

@@ -346,7 +346,7 @@ else:
 
 | Scenario | Bookmark State | Next Run Behavior |
 |----------|----------------|-------------------|
-| **Successful Full Load** | Updated to "full_load_completed" | Switches to incremental mode |
+| **Successful Full Load** | Updated to max incremental column value | Switches to incremental mode |
 | **Failed Full Load** | Remains at initial state | Retries full load from beginning |
 | **Successful Incremental** | Updated with new max value | Continues from new position |
 | **Failed Incremental** | Remains at previous value | Retries from last successful position |

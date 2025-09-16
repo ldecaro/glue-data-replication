@@ -394,3 +394,263 @@ class StructuredLogger:
             performance_status="improving" if performance_change < -5 else "degrading" if performance_change > 5 else "stable",
             timestamp=datetime.now(timezone.utc).isoformat()
         )
+    
+    # Manual Bookmark Configuration Logging Methods (Task 23 - Requirements 8.8, 8.6, 8.7)
+    def log_manual_config_parsing_start(self, config_json: str):
+        """Log start of manual bookmark configuration parsing."""
+        self.info(
+            "Starting manual bookmark configuration parsing",
+            config_length=len(config_json) if config_json else 0,
+            has_config=bool(config_json),
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_manual_config_parsing_success(self, config_count: int, table_names: list, 
+                                        parsing_duration_ms: float):
+        """Log successful manual bookmark configuration parsing."""
+        self.info(
+            "Manual bookmark configuration parsed successfully",
+            config_count=config_count,
+            table_names=table_names,
+            parsing_duration_ms=round(parsing_duration_ms, 2),
+            status="success",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_manual_config_parsing_failure(self, error: str, config_json: str, 
+                                        parsing_duration_ms: float, fallback_action: str):
+        """Log failed manual bookmark configuration parsing."""
+        self.error(
+            "Manual bookmark configuration parsing failed",
+            error=error,
+            config_length=len(config_json) if config_json else 0,
+            parsing_duration_ms=round(parsing_duration_ms, 2),
+            status="failure",
+            fallback_action=fallback_action,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_manual_config_validation_start(self, table_name: str, column_name: str):
+        """Log start of manual configuration validation for a specific table."""
+        self.info(
+            "Starting manual configuration validation",
+            table_name=table_name,
+            column_name=column_name,
+            validation_type="manual_config",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_manual_config_validation_success(self, table_name: str, column_name: str, 
+                                           validation_duration_ms: float):
+        """Log successful manual configuration validation."""
+        self.info(
+            "Manual configuration validation successful",
+            table_name=table_name,
+            column_name=column_name,
+            validation_duration_ms=round(validation_duration_ms, 2),
+            validation_status="valid",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_manual_config_validation_failure(self, table_name: str, column_name: str, 
+                                           error: str, validation_duration_ms: float, 
+                                           fallback_action: str):
+        """Log failed manual configuration validation."""
+        self.error(
+            "Manual configuration validation failed",
+            table_name=table_name,
+            column_name=column_name,
+            error=error,
+            validation_duration_ms=round(validation_duration_ms, 2),
+            validation_status="invalid",
+            fallback_action=fallback_action,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_bookmark_strategy_resolution_start(self, table_name: str, has_manual_config: bool):
+        """Log start of bookmark strategy resolution for a table."""
+        self.info(
+            "Starting bookmark strategy resolution",
+            table_name=table_name,
+            has_manual_config=has_manual_config,
+            resolution_method="manual" if has_manual_config else "automatic",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_bookmark_strategy_resolution_success(self, table_name: str, strategy: str, 
+                                               column_name: Optional[str], is_manual: bool, 
+                                               resolution_duration_ms: float, 
+                                               data_type: Optional[str] = None):
+        """Log successful bookmark strategy resolution."""
+        self.info(
+            "Bookmark strategy resolved successfully",
+            table_name=table_name,
+            strategy=strategy,
+            column_name=column_name,
+            is_manually_configured=is_manual,
+            resolution_method="manual" if is_manual else "automatic",
+            column_data_type=data_type,
+            resolution_duration_ms=round(resolution_duration_ms, 2),
+            status="success",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_bookmark_strategy_resolution_fallback(self, table_name: str, original_method: str, 
+                                                 fallback_method: str, reason: str, 
+                                                 fallback_strategy: str, fallback_column: Optional[str]):
+        """Log fallback from manual to automatic bookmark strategy resolution."""
+        self.warning(
+            "Bookmark strategy resolution fallback",
+            table_name=table_name,
+            original_method=original_method,
+            fallback_method=fallback_method,
+            fallback_reason=reason,
+            fallback_strategy=fallback_strategy,
+            fallback_column=fallback_column,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_jdbc_metadata_query_start(self, table_name: str, column_name: str, query_type: str):
+        """Log start of JDBC metadata query."""
+        self.info(
+            "Starting JDBC metadata query",
+            table_name=table_name,
+            column_name=column_name,
+            query_type=query_type,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_jdbc_metadata_query_success(self, table_name: str, column_name: str, 
+                                      data_type: str, jdbc_type: int, 
+                                      query_duration_ms: float, cached: bool = False):
+        """Log successful JDBC metadata query."""
+        self.info(
+            "JDBC metadata query completed successfully",
+            table_name=table_name,
+            column_name=column_name,
+            data_type=data_type,
+            jdbc_type=jdbc_type,
+            query_duration_ms=round(query_duration_ms, 2),
+            cached_result=cached,
+            status="success",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_jdbc_metadata_query_failure(self, table_name: str, column_name: str, 
+                                      error: str, query_duration_ms: float, 
+                                      fallback_action: str):
+        """Log failed JDBC metadata query."""
+        self.error(
+            "JDBC metadata query failed",
+            table_name=table_name,
+            column_name=column_name,
+            error=error,
+            query_duration_ms=round(query_duration_ms, 2),
+            status="failure",
+            fallback_action=fallback_action,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_jdbc_metadata_cache_hit(self, table_name: str, column_name: str, data_type: str):
+        """Log JDBC metadata cache hit."""
+        self.debug(
+            "JDBC metadata cache hit",
+            table_name=table_name,
+            column_name=column_name,
+            data_type=data_type,
+            cache_hit=True,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_data_type_mapping_start(self, jdbc_data_type: str, table_name: str, column_name: str):
+        """Log start of JDBC data type to strategy mapping."""
+        self.debug(
+            "Starting data type to strategy mapping",
+            jdbc_data_type=jdbc_data_type,
+            table_name=table_name,
+            column_name=column_name,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_data_type_mapping_success(self, jdbc_data_type: str, strategy: str, 
+                                    table_name: str, column_name: str, 
+                                    mapping_type: str = "direct"):
+        """Log successful data type to strategy mapping."""
+        self.info(
+            "Data type mapped to bookmark strategy",
+            jdbc_data_type=jdbc_data_type,
+            bookmark_strategy=strategy,
+            table_name=table_name,
+            column_name=column_name,
+            mapping_type=mapping_type,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_data_type_mapping_fallback(self, jdbc_data_type: str, fallback_strategy: str, 
+                                     table_name: str, column_name: str, reason: str):
+        """Log fallback data type to strategy mapping for unknown types."""
+        self.warning(
+            "Data type mapping fallback to default strategy",
+            jdbc_data_type=jdbc_data_type,
+            fallback_strategy=fallback_strategy,
+            table_name=table_name,
+            column_name=column_name,
+            fallback_reason=reason,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_bookmark_detection_summary(self, total_tables: int, manual_count: int, 
+                                     automatic_count: int, failed_count: int, 
+                                     strategy_distribution: dict):
+        """Log summary of bookmark detection across all tables."""
+        self.info(
+            "Bookmark detection summary",
+            total_tables=total_tables,
+            manual_configurations=manual_count,
+            automatic_detections=automatic_count,
+            failed_detections=failed_count,
+            manual_percentage=round((manual_count / total_tables * 100), 2) if total_tables > 0 else 0,
+            automatic_percentage=round((automatic_count / total_tables * 100), 2) if total_tables > 0 else 0,
+            strategy_distribution=strategy_distribution,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_manual_config_table_override(self, table_name: str, manual_column: str, 
+                                       auto_column: Optional[str], manual_strategy: str, 
+                                       auto_strategy: Optional[str]):
+        """Log when manual configuration overrides automatic detection."""
+        self.info(
+            "Manual configuration overriding automatic detection",
+            table_name=table_name,
+            manual_column=manual_column,
+            automatic_column=auto_column,
+            manual_strategy=manual_strategy,
+            automatic_strategy=auto_strategy,
+            override_reason="manual_configuration_provided",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_invalid_manual_config_entry(self, table_name: str, error: str, 
+                                      config_entry: dict, fallback_action: str):
+        """Log invalid manual configuration entry with fallback notification."""
+        self.error(
+            "Invalid manual configuration entry detected",
+            table_name=table_name,
+            error=error,
+            config_entry=str(config_entry),
+            fallback_action=fallback_action,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+    
+    def log_manual_config_column_not_found(self, table_name: str, column_name: str, 
+                                         available_columns: Optional[list] = None):
+        """Log when manually configured column is not found in table."""
+        self.error(
+            "Manually configured column not found in table",
+            table_name=table_name,
+            configured_column=column_name,
+            available_columns=available_columns[:10] if available_columns else None,  # Limit to first 10
+            total_available_columns=len(available_columns) if available_columns else 0,
+            fallback_action="automatic_detection",
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )

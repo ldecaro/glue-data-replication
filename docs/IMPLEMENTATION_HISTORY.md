@@ -377,3 +377,46 @@ src/glue_job/
 4. **API Gateway**: RESTful API for external system integration
 
 This implementation history demonstrates the successful transformation of a monolithic system into a modern, modular architecture while maintaining full functionality and significantly improving performance, testability, and maintainability.
+##
+ Recent Updates and Bug Fixes
+
+### Bookmark Management Enhancement (September 2025)
+
+**Issue**: SQL conversion error when performing incremental loads after full load completion.
+
+**Problem**: After a successful full load, the system was setting the bookmark `last_processed_value` to the string `"full_load_completed"`. On subsequent incremental runs, this caused SQL conversion errors when the system tried to use this string value in queries like `WHERE customer_id > 'full_load_completed'` where `customer_id` is an integer column.
+
+**Solution Implemented**:
+1. **Modified Full Load Completion Logic**: Updated `main.py` to query the target database for the actual maximum value of the incremental column after a successful full load
+2. **Added `_get_max_incremental_value_after_full_load()` Function**: New function that:
+   - Queries the target database (not source) to get the actual maximum incremental value
+   - Handles both Iceberg and traditional database targets
+   - Provides proper error handling and fallback behavior
+   - Avoids race conditions where new records might be inserted in source during transfer
+3. **Updated Documentation**: Modified error handling guide to reflect that successful full loads now set bookmarks to actual max incremental column values
+
+**Benefits**:
+- Eliminates SQL conversion errors during incremental loads
+- Ensures accurate incremental loading by capturing what was actually transferred to target
+- Prevents data loss or duplication due to race conditions
+- Maintains backward compatibility with existing bookmark system
+
+**Files Modified**:
+- `src/glue_job/main.py`: Added new function and updated full load completion logic
+- `docs/ERROR_HANDLING_GUIDE.md`: Updated recovery behavior documentation
+- `docs/API_REFERENCE.md`: Updated `update_bookmark_state` method signature and examples
+
+### Documentation Consolidation (September 2025)
+
+**Objective**: Streamline manual bookmark configuration documentation by consolidating multiple files into a single comprehensive guide.
+
+**Changes**:
+- **Consolidated Files**: Merged `MANUAL_BOOKMARK_CONFIGURATION_GUIDE.md`, `MANUAL_BOOKMARK_QUICK_REFERENCE.md`, and `MANUAL_BOOKMARK_TROUBLESHOOTING_GUIDE.md` into a single `MANUAL_BOOKMARK_CONFIGURATION.md` file
+- **Updated References**: Updated all cross-references in documentation files to point to the new consolidated guide
+- **Improved Organization**: Restructured content with better organization and comprehensive coverage of all manual bookmark configuration topics
+
+**Benefits**:
+- Single source of truth for manual bookmark configuration
+- Reduced maintenance overhead
+- Better user experience with all information in one place
+- Consistent formatting and structure throughout

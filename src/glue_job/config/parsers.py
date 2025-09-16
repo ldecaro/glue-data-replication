@@ -80,8 +80,13 @@ class JobConfigurationParser:
         'CONNECTION_TIMEOUT_SECONDS'
     ]
     
-    # All optional parameters (network + Iceberg)
-    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS
+    # Optional bookmark configuration parameters
+    OPTIONAL_BOOKMARK_PARAMS = [
+        'MANUAL_BOOKMARK_CONFIG'
+    ]
+    
+    # All optional parameters (network + Iceberg + bookmark)
+    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS
     
     @classmethod
     def get_required_params_for_engines(cls, source_engine: str, target_engine: str) -> List[str]:
@@ -510,6 +515,10 @@ class JobConfigurationParser:
             validate_connections = args.get('VALIDATE_CONNECTIONS', 'true').lower() == 'true'
             connection_timeout_seconds = int(args.get('CONNECTION_TIMEOUT_SECONDS', '30'))
             
+            # Parse manual bookmark configuration
+            manual_bookmark_config = args.get('MANUAL_BOOKMARK_CONFIG', '').strip()
+            manual_bookmark_config = manual_bookmark_config if manual_bookmark_config else None
+            
             # Create job config
             job_config = JobConfig(
                 job_name=args['JOB_NAME'],
@@ -517,7 +526,8 @@ class JobConfigurationParser:
                 target_connection=target_connection,
                 tables=table_names,
                 validate_connections=validate_connections,
-                connection_timeout_seconds=connection_timeout_seconds
+                connection_timeout_seconds=connection_timeout_seconds,
+                manual_bookmark_config=manual_bookmark_config
             )
             
             logger.info(f"Created job configuration for: {job_config.job_name}")

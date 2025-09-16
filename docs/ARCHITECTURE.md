@@ -711,13 +711,151 @@ s3://glue-job-bucket/
   "rows_processed": 15420,
   "last_update_timestamp": "2024-01-15T10:35:22Z",
   "job_run_id": "jr_2024011510302245",
+  "is_manually_configured": true,
+  "manual_column_data_type": "TIMESTAMP",
   "metadata": {
     "schema_version": "1.0",
     "data_types": {
       "updated_at": "timestamp"
-    }
+    },
+    "configuration_source": "manual",
+    "validation_timestamp": "2024-01-15T10:30:00Z"
   }
 }
+```
+
+#### Manual Bookmark Configuration Architecture
+
+The system supports both automatic detection and manual configuration of bookmark columns through a hybrid approach:
+
+```python
+class BookmarkConfigurationArchitecture:
+    """
+    Architecture pattern: Strategy Pattern with Fallback Chain
+    
+    Manual Configuration → JDBC Validation → Automatic Detection → Hash Fallback
+    """
+    
+    def __init__(self):
+        self.manual_configs = {}  # ManualBookmarkConfig instances
+        self.jdbc_metadata_cache = {}  # Performance optimization
+        self.strategy_resolver = BookmarkStrategyResolver()
+    
+    def resolve_bookmark_strategy(self, table_name: str, connection) -> BookmarkStrategy:
+        """
+        Resolution chain:
+        1. Check manual configuration
+        2. Validate against JDBC metadata
+        3. Fall back to automatic detection
+        4. Ultimate fallback to hash strategy
+        """
+        
+        # Step 1: Manual configuration check
+        if table_name in self.manual_configs:
+            manual_config = self.manual_configs[table_name]
+            
+            # Step 2: JDBC validation
+            if self._validate_manual_config(manual_config, connection):
+                return self._create_manual_strategy(manual_config)
+            else:
+                # Log fallback and continue to automatic detection
+                self._log_manual_config_fallback(table_name, manual_config)
+        
+        # Step 3: Automatic detection
+        return self._detect_automatic_strategy(table_name, connection)
+```
+
+#### JDBC Metadata Integration
+
+```python
+class JDBCMetadataArchitecture:
+    """
+    Architecture pattern: Cache-Aside Pattern with Circuit Breaker
+    """
+    
+    def __init__(self):
+        self.metadata_cache = {}
+        self.circuit_breaker = CircuitBreaker()
+        self.performance_metrics = MetricsCollector()
+    
+    def get_column_metadata(self, connection, table_name: str, column_name: str):
+        """
+        Cached JDBC metadata retrieval with performance optimization
+        """
+        cache_key = f"{table_name}.{column_name}"
+        
+        # Cache hit - return immediately
+        if cache_key in self.metadata_cache:
+            self.performance_metrics.record_cache_hit()
+            return self.metadata_cache[cache_key]
+        
+        # Cache miss - query database with circuit breaker protection
+        try:
+            with self.circuit_breaker:
+                metadata = self._query_jdbc_metadata(connection, table_name, column_name)
+                self.metadata_cache[cache_key] = metadata
+                self.performance_metrics.record_cache_miss()
+                return metadata
+        except CircuitBreakerOpenException:
+            # Circuit breaker is open - return cached failure or None
+            return self.metadata_cache.get(cache_key)
+```
+
+#### Data Type Mapping Architecture
+
+```python
+class DataTypeMappingArchitecture:
+    """
+    Architecture pattern: Strategy Pattern with Database Engine Abstraction
+    """
+    
+    # Comprehensive JDBC type to strategy mapping
+    JDBC_TYPE_STRATEGIES = {
+        # Timestamp types → timestamp strategy
+        'TIMESTAMP': 'timestamp',
+        'TIMESTAMP_WITH_TIMEZONE': 'timestamp',
+        'DATE': 'timestamp',
+        'DATETIME': 'timestamp',
+        'DATETIME2': 'timestamp',  # SQL Server
+        'TIMESTAMPTZ': 'timestamp',  # PostgreSQL
+        
+        # Integer types → primary_key strategy
+        'INTEGER': 'primary_key',
+        'BIGINT': 'primary_key',
+        'SERIAL': 'primary_key',  # PostgreSQL
+        'BIGSERIAL': 'primary_key',  # PostgreSQL
+        'NUMBER': 'primary_key',  # Oracle (context-dependent)
+        
+        # String and other types → hash strategy
+        'VARCHAR': 'hash',
+        'VARCHAR2': 'hash',  # Oracle
+        'NVARCHAR': 'hash',  # SQL Server
+        'TEXT': 'hash',
+        'CLOB': 'hash',
+        'DECIMAL': 'hash',
+        'FLOAT': 'hash',
+        'BOOLEAN': 'hash',
+        'BINARY': 'hash',
+        'BLOB': 'hash'
+    }
+    
+    def map_jdbc_type_to_strategy(self, jdbc_type: str, engine_type: str = None) -> str:
+        """
+        Map JDBC data type to bookmark strategy with database engine context
+        """
+        normalized_type = jdbc_type.upper().strip()
+        
+        # Direct mapping
+        if normalized_type in self.JDBC_TYPE_STRATEGIES:
+            return self.JDBC_TYPE_STRATEGIES[normalized_type]
+        
+        # Partial matching for database-specific variations
+        for type_pattern, strategy in self.JDBC_TYPE_STRATEGIES.items():
+            if type_pattern in normalized_type:
+                return strategy
+        
+        # Default fallback
+        return 'hash'
 ```
 
 #### S3 Operations Optimization

@@ -114,6 +114,7 @@ class JobConfig:
     tables: List[str]
     validate_connections: bool = True
     connection_timeout_seconds: int = 30
+    manual_bookmark_config: Optional[str] = None
     
     def __post_init__(self):
         """Validate job configuration after initialization."""

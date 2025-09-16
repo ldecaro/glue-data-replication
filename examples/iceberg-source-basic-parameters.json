@@ -1,0 +1,166 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "iceberg-source-basic-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "iceberg"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "postgresql"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "analytics_db"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "customer_events"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "analytics"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "public"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "customer_events_copy"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": "analytics_user"
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": "postgres_password"
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": "jdbc:postgresql://postgres-analytics.company.com:5432/analytics"
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": "s3://my-drivers-bucket/postgresql-42.5.0.jar"
+  },
+  {
+    "ParameterKey": "SourceWarehouseLocation",
+    "ParameterValue": "s3://my-datalake-bucket/warehouse/"
+  },
+  {
+    "ParameterKey": "SourceCatalogId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceFormatVersion",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://my-drivers-bucket/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "1440"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.1X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "SourceVpcId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceSubnetIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceSecurityGroupIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "CreateSourceGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "SourceAvailabilityZone",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "CreateSourceS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "TargetVpcId",
+    "ParameterValue": "vpc-target123"
+  },
+  {
+    "ParameterKey": "TargetSubnetIds",
+    "ParameterValue": "subnet-target123,subnet-target456"
+  },
+  {
+    "ParameterKey": "TargetSecurityGroupIds",
+    "ParameterValue": "sg-target123"
+  },
+  {
+    "ParameterKey": "TargetAvailabilityZone",
+    "ParameterValue": "us-east-1a"
+  },
+  {
+    "ParameterKey": "CreateTargetS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "CreateTargetGlueVpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "ErrorLogRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  }
+]

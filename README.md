@@ -6,7 +6,7 @@ A comprehensive AWS Glue-based data replication solution that supports full-load
 
 - **Multi-Database Support**: Oracle, SQL Server, PostgreSQL, DB2, Apache Iceberg
 - **Cross-VPC Connectivity**: Secure database access across different VPCs
-- **Incremental Processing**: Uses Glue job bookmarks for efficient data synchronization with automatic incremental column detection ([details](docs/BOOKMARK_DETAILS.md))
+- **Incremental Processing**: Uses Glue job bookmarks for efficient data synchronization with automatic incremental column detection and manual bookmark configuration ([details](docs/BOOKMARK_DETAILS.md))
 - **Comprehensive Monitoring**: CloudWatch metrics, dashboards, and alarms
 - **Network Security**: VPC endpoints for private subnet access to AWS services
 - **Error Handling**: Robust error recovery and retry mechanisms with table-level isolation ([details](docs/ERROR_HANDLING_GUIDE.md))
@@ -125,6 +125,9 @@ aws glue start-job-run --job-name my-job-name
 - **[Iceberg Usage Guide](docs/ICEBERG_USAGE_GUIDE.md)**: Apache Iceberg configuration and best practices
 - **[Network Configuration Guide](docs/NETWORK_CONFIGURATION_GUIDE.md)**: VPC and networking setup
 - **[Bookmark Details](docs/BOOKMARK_DETAILS.md)**: Job bookmark system and incremental loading strategies
+- **[Manual Bookmark Configuration](docs/MANUAL_BOOKMARK_CONFIGURATION.md)**: Comprehensive guide for manual bookmark configuration
+- **[JDBC Data Type Mapping Reference](docs/JDBC_DATA_TYPE_MAPPING_REFERENCE.md)**: Complete JDBC data type to strategy mapping
+
 
 ### Operations and Monitoring
 - **[Error Handling Guide](docs/ERROR_HANDLING_GUIDE.md)**: Comprehensive error handling during data transfer
@@ -215,6 +218,23 @@ from glue_job.storage.bookmark_manager import JobBookmarkManager
 bookmark_manager = JobBookmarkManager(s3_config)
 state = bookmark_manager.get_bookmark_state("table_name")
 bookmark_manager.update_bookmark_state("table_name", new_state)
+```
+
+#### Manual Bookmark Configuration
+```python
+from glue_job.storage.manual_bookmark_config import ManualBookmarkConfig, BookmarkStrategyResolver
+
+# Create manual configurations
+manual_configs = {
+    "employees": ManualBookmarkConfig("employees", "updated_at"),
+    "orders": ManualBookmarkConfig("orders", "order_id")
+}
+
+# Initialize strategy resolver
+resolver = BookmarkStrategyResolver(manual_configs, structured_logger)
+
+# Resolve strategy for a table
+strategy, column, is_manual = resolver.resolve_strategy("employees", jdbc_connection)
 ```
 
 #### S3BookmarkStorage
@@ -342,27 +362,38 @@ See the [Deployment Guide](DEPLOYMENT_GUIDE.md) for detailed troubleshooting ste
 # See examples/sqlserver-to-sqlserver-parameters.json
 ```
 
-### Oracle to PostgreSQL
+### Oracle to Oracle
 ```bash
-# Configure source as Oracle, target as PostgreSQL
-# Ensure both JDBC drivers are uploaded to S3
+# Configure source as oracle, target as oracle
+# Ensure JDBC driver is uploaded to S3
+# See examples/oracle-to-oracle-parameters.json
 ```
 
 ### Cross-VPC Replication
 ```bash
 # Configure SourceVpcId and TargetVpcId parameters
-# Enable appropriate VPC endpoints
+# Enable appropriate VPC endpoints (AWS Glue & Amazon S3)
 ```
 
 ### Iceberg Table Replication
 ```bash
 # Iceberg as target (traditional database to Iceberg)
 # Configure target engine as "iceberg" with warehouse location
-# See examples/oracle-to-iceberg-parameters.json
+# See examples/sqlserver-to-iceberg-parameters.json
+```
 
-# Iceberg as source (Iceberg to traditional database)  
-# Configure source engine as "iceberg" with Glue Data Catalog settings
-# See examples/iceberg-to-postgresql-parameters.json
+### Manual Bookmark Configuration
+```bash
+# SQLServer to SQLServer with manual bookmark configuration
+# See examples/sqlserver-to-sqlserver-parameters-with-manual-bookmarks.json
+
+# Manual bookmark is a configuration in the json file to define which tables and columns are used for bookmark. If not set, automatic column bookmark identification takes place. Example:
+
+#  {
+#    "ParameterKey": "ManualBookmarkConfig",
+#    "ParameterValue": "{\"customers\":\"customer_id\"}"
+#  }
+
 ```
 
 ## Contributing

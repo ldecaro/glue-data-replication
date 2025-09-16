@@ -34,7 +34,7 @@ except ImportError:
 
 # Import configuration modules
 from glue_job.config.parsers import JobConfigurationParser
-from glue_job.config.job_config import JobConfig
+from glue_job.config.job_config import JobConfig, ConnectionConfig
 
 # Import database modules
 from glue_job.database.connection_manager import UnifiedConnectionManager
@@ -137,13 +137,24 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
     source_jdbc_path = None if source_is_iceberg else config.source_connection.jdbc_driver_path
     target_jdbc_path = None if target_is_iceberg else config.target_connection.jdbc_driver_path
     
+    # Get manual bookmark configuration from job config
+    manual_bookmark_config = config.manual_bookmark_config
+    logger.info(f"Manual bookmark config from job config: {manual_bookmark_config}")
+    
     bookmark_manager = JobBookmarkManager(
         glue_context, 
         config.job_name, 
         None,  # Job will be set later
         source_jdbc_path=source_jdbc_path,
-        target_jdbc_path=target_jdbc_path
+        target_jdbc_path=target_jdbc_path,
+        manual_bookmark_config=manual_bookmark_config
     )
+    
+    # Log the parsed manual configurations
+    if hasattr(bookmark_manager, 'manual_bookmark_configs'):
+        logger.info(f"Parsed manual bookmark configs: {list(bookmark_manager.manual_bookmark_configs.keys())}")
+    else:
+        logger.info("No manual_bookmark_configs attribute found on bookmark_manager")
     
     # Initialize migrators with enhanced error handling for Iceberg
     full_migrator = FullLoadDataMigrator(spark, connection_manager)
@@ -175,31 +186,64 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
         try:
             logger.info(f"Processing table: {table_name}")
             
-            # Handle schema detection with engine-specific logic
-            try:
-                schema = _get_table_schema_with_engine_support(
-                    connection_manager, config.source_connection, table_name, source_is_iceberg
-                )
-                strategy_info = IncrementalColumnDetector.detect_incremental_strategy(schema, table_name)
-            except IcebergEngineError as e:
-                logger.error(f"Iceberg schema detection failed for {table_name}: {str(e)}")
-                failed_tables += 1
-                continue
-            except Exception as e:
-                logger.error(f"Schema detection failed for {table_name}: {str(e)}")
-                failed_tables += 1
-                continue
-            
-            # Initialize or use pre-loaded bookmark state with Iceberg support
+            # Initialize or use pre-loaded bookmark state with manual configuration support
             try:
                 if table_name in bookmark_states and bookmark_states[table_name] is not None:
                     bookmark_state = JobBookmarkState.from_s3_dict(bookmark_states[table_name])
                     bookmark_manager.bookmark_states[table_name] = bookmark_state
                 else:
-                    bookmark_state = _initialize_bookmark_state_with_iceberg_support(
-                        bookmark_manager, table_name, strategy_info, 
-                        config.source_connection, source_is_iceberg
-                    )
+                    # Use the new auto-detection method that considers manual configuration
+                    if source_is_iceberg:
+                        # For Iceberg tables, use Iceberg-specific initialization
+                        bookmark_state = _initialize_bookmark_state_with_iceberg_support_and_manual_config(
+                            bookmark_manager, table_name, connection_manager, 
+                            config.source_connection, source_is_iceberg
+                        )
+                    else:
+                        # For JDBC tables, use manual configuration if available, otherwise fall back to automatic detection
+                        logger.info(f"Checking manual configuration for {table_name}")
+                        logger.info(f"Has manual_bookmark_configs: {hasattr(bookmark_manager, 'manual_bookmark_configs')}")
+                        if hasattr(bookmark_manager, 'manual_bookmark_configs'):
+                            logger.info(f"Manual configs available: {list(bookmark_manager.manual_bookmark_configs.keys())}")
+                            logger.info(f"Table {table_name} in manual configs: {table_name in bookmark_manager.manual_bookmark_configs}")
+                        
+                        if (hasattr(bookmark_manager, 'manual_bookmark_configs') and 
+                            table_name in bookmark_manager.manual_bookmark_configs):
+                            # Use manual configuration
+                            manual_config = bookmark_manager.manual_bookmark_configs[table_name]
+                            column_name = manual_config.column_name
+                            
+                            # For manual config, assume primary_key strategy for ID columns, timestamp for others
+                            if 'id' in column_name.lower() or column_name.lower().endswith('_id'):
+                                strategy = 'primary_key'
+                            elif any(keyword in column_name.lower() for keyword in ['date', 'time', 'timestamp', 'created', 'updated', 'modified']):
+                                strategy = 'timestamp'
+                            else:
+                                strategy = 'hash'  # Safe fallback
+                            
+                            logger.info(f"Using manual bookmark configuration for {table_name}: column={column_name}, strategy={strategy}")
+                            
+                            bookmark_state = bookmark_manager.initialize_bookmark_state(
+                                table_name=table_name,
+                                incremental_strategy=strategy,
+                                incremental_column=column_name,
+                                database=config.source_connection.database,
+                                engine_type=config.source_connection.engine_type
+                            )
+                        else:
+                            # Fall back to automatic detection using existing logic
+                            schema = _get_table_schema_with_engine_support(
+                                connection_manager, config.source_connection, table_name, source_is_iceberg
+                            )
+                            strategy_info = IncrementalColumnDetector.detect_incremental_strategy(schema, table_name)
+                            
+                            bookmark_state = bookmark_manager.initialize_bookmark_state(
+                                table_name=table_name,
+                                incremental_strategy=strategy_info['strategy'],
+                                incremental_column=strategy_info['column'],
+                                database=config.source_connection.database,
+                                engine_type=config.source_connection.engine_type
+                            )
             except Exception as e:
                 logger.error(f"Bookmark state initialization failed for {table_name}: {str(e)}")
                 failed_tables += 1
@@ -213,7 +257,12 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
                         full_migrator, config, table_name, source_is_iceberg, target_is_iceberg
                     )
                     if progress.status == 'completed':
-                        bookmark_manager.update_bookmark_state(table_name, "full_load_completed", progress.processed_rows)
+                        # After successful full load, set bookmark to actual max value of incremental column
+                        # from target database to ensure we capture what was actually transferred
+                        max_bookmark_value = _get_max_incremental_value_after_full_load(
+                            connection_manager, config.target_connection, table_name, bookmark_state.incremental_column, target_is_iceberg
+                        )
+                        bookmark_manager.update_bookmark_state(table_name, max_bookmark_value, progress.processed_rows)
                 else:
                     logger.info(f"Incremental load for {table_name} using bookmark: last_processed_value={bookmark_state.last_processed_value}")
                     progress = _perform_incremental_load_with_engine_support(
@@ -263,6 +312,12 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
                 
         except Exception as e:
             logger.warning(f"Failed to perform final S3 bookmark batch operations: {e}")
+    
+    # Log bookmark detection summary for observability
+    try:
+        bookmark_manager.log_bookmark_detection_summary()
+    except Exception as e:
+        logger.warning(f"Failed to log bookmark detection summary: {e}")
     
     logger.info(f"Job completed: {successful_tables} successful, {failed_tables} failed")
     
@@ -375,15 +430,15 @@ def _get_table_schema_with_engine_support(connection_manager, source_config, tab
             raise
 
 
-def _initialize_bookmark_state_with_iceberg_support(bookmark_manager, table_name: str, strategy_info: Dict[str, Any], 
-                                                   source_config, source_is_iceberg: bool):
+def _initialize_bookmark_state_with_iceberg_support_and_manual_config(bookmark_manager, table_name: str, 
+                                                                     connection_manager, source_config, source_is_iceberg: bool):
     """
-    Initialize bookmark state with Iceberg support.
+    Initialize bookmark state with Iceberg support and manual configuration.
     
     Args:
         bookmark_manager: Bookmark manager instance
         table_name: Name of the table
-        strategy_info: Incremental strategy information
+        connection_manager: Connection manager for getting connections
         source_config: Source connection configuration
         source_is_iceberg: Whether source is Iceberg engine
         
@@ -391,24 +446,126 @@ def _initialize_bookmark_state_with_iceberg_support(bookmark_manager, table_name
         Initialized bookmark state
     """
     if source_is_iceberg:
-        # For Iceberg tables, try to use identifier-field-ids for bookmark management
-        logger.debug(f"Initializing Iceberg bookmark state for {table_name}")
-        try:
-            # The bookmark manager should handle Iceberg-specific bookmark extraction
+        # For Iceberg tables, check for manual configuration first
+        if (hasattr(bookmark_manager, 'manual_bookmark_configs') and 
+            table_name in bookmark_manager.manual_bookmark_configs):
+            # Use manual configuration for Iceberg
+            manual_config = bookmark_manager.manual_bookmark_configs[table_name]
+            column_name = manual_config.column_name
+            
+            # For manual config, assume primary_key strategy for ID columns, timestamp for others
+            if 'id' in column_name.lower() or column_name.lower().endswith('_id'):
+                strategy = 'primary_key'
+            elif any(keyword in column_name.lower() for keyword in ['date', 'time', 'timestamp', 'created', 'updated', 'modified']):
+                strategy = 'timestamp'
+            else:
+                strategy = 'hash'  # Safe fallback
+            
+            logger.info(f"Using manual bookmark configuration for Iceberg table {table_name}: column={column_name}, strategy={strategy}")
+            
             return bookmark_manager.initialize_bookmark_state(
-                table_name, strategy_info['strategy'], strategy_info['column']
+                table_name=table_name,
+                incremental_strategy=strategy,
+                incremental_column=column_name,
+                database=source_config.database,
+                engine_type=source_config.engine_type
             )
-        except Exception as e:
-            logger.warning(f"Failed to initialize Iceberg bookmark for {table_name}, falling back to traditional: {str(e)}")
-            # Fallback to traditional bookmark management
+        else:
+            # For Iceberg without manual config, use hash strategy as fallback
+            logger.info(f"No manual configuration for Iceberg table {table_name}, using hash strategy")
             return bookmark_manager.initialize_bookmark_state(
-                table_name, strategy_info['strategy'], strategy_info['column']
+                table_name=table_name,
+                incremental_strategy='hash',
+                incremental_column=None,
+                database=source_config.database,
+                engine_type=source_config.engine_type
             )
     else:
-        # For traditional databases, use standard bookmark initialization
-        return bookmark_manager.initialize_bookmark_state(
-            table_name, strategy_info['strategy'], strategy_info['column']
-        )
+        # This shouldn't be called for non-Iceberg engines, but handle it gracefully
+        logger.warning(f"_initialize_bookmark_state_with_iceberg_support_and_manual_config called for non-Iceberg engine")
+        # Use the same logic as the main JDBC path
+        if (hasattr(bookmark_manager, 'manual_bookmark_configs') and 
+            table_name in bookmark_manager.manual_bookmark_configs):
+            manual_config = bookmark_manager.manual_bookmark_configs[table_name]
+            column_name = manual_config.column_name
+            
+            if 'id' in column_name.lower() or column_name.lower().endswith('_id'):
+                strategy = 'primary_key'
+            elif any(keyword in column_name.lower() for keyword in ['date', 'time', 'timestamp', 'created', 'updated', 'modified']):
+                strategy = 'timestamp'
+            else:
+                strategy = 'hash'
+            
+            return bookmark_manager.initialize_bookmark_state(
+                table_name=table_name,
+                incremental_strategy=strategy,
+                incremental_column=column_name,
+                database=source_config.database,
+                engine_type=source_config.engine_type
+            )
+        else:
+            # Fall back to automatic detection
+            schema = _get_table_schema_with_engine_support(
+                connection_manager, source_config, table_name, False
+            )
+            strategy_info = IncrementalColumnDetector.detect_incremental_strategy(schema, table_name)
+            
+            return bookmark_manager.initialize_bookmark_state(
+                table_name=table_name,
+                incremental_strategy=strategy_info['strategy'],
+                incremental_column=strategy_info['column'],
+                database=source_config.database,
+                engine_type=source_config.engine_type
+            )
+
+
+def _get_max_incremental_value_after_full_load(connection_manager, target_config: ConnectionConfig, table_name: str, 
+                                             incremental_column: str, target_is_iceberg: bool):
+    """
+    Get the maximum value of the incremental column from the target database after a full load.
+    
+    This function queries the target database to get the actual maximum value that was 
+    transferred during the full load. This ensures:
+    1. We capture what was actually migrated to the target
+    2. We avoid conflicts with records inserted in source during transfer
+    3. Subsequent incremental loads start from the correct position
+    
+    Args:
+        connection_manager: Existing connection manager instance
+        target_config: Target database connection configuration
+        table_name: Name of the table
+        incremental_column: Name of the incremental column
+        target_is_iceberg: Whether target engine is Iceberg
+        
+    Returns:
+        Maximum value of the incremental column from the target database
+    """
+    try:
+        from pyspark.sql.functions import max as spark_max, col
+        
+        if target_is_iceberg:
+            # For Iceberg targets, read the table and get max value
+            df = connection_manager.read_table(
+                connection_config=target_config,
+                table_name=table_name
+            )
+            max_value_row = df.agg(spark_max(col(incremental_column)).alias("max_value")).collect()[0]
+            max_value = max_value_row["max_value"]
+        else:
+            # For traditional databases, use SQL query to get max value from target
+            query = f"SELECT MAX({incremental_column}) as max_value FROM {target_config.schema}.{table_name}"
+            result_df = connection_manager.read_table_data(target_config, table_name, query=query)
+            max_value = result_df.collect()[0]["max_value"]
+        
+        logger.info(f"Retrieved max incremental value from target {table_name}.{incremental_column}: {max_value}")
+        return max_value
+        
+    except Exception as e:
+        logger.error(f"Failed to get max incremental value from target {table_name}.{incremental_column}: {str(e)}")
+        # Fallback to a safe default that won't cause SQL conversion errors
+        # Return None so the next incremental load will do a full scan
+        logger.warning(f"Falling back to None bookmark value for {table_name} - next run will perform full scan")
+        return None
 
 
 def _perform_full_load_with_engine_support(full_migrator, config: JobConfig, table_name: str, 

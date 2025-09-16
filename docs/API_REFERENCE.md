@@ -470,8 +470,20 @@ class JobBookmarkManager:
     def get_bookmark_state(self, table_name: str) -> JobBookmarkState:
         """Get current bookmark state for table"""
         
-    def update_bookmark_state(self, table_name: str, state: JobBookmarkState) -> bool:
-        """Update bookmark state for table"""
+    def update_bookmark_state(self, table_name: str, new_max_value: Any,
+                            processed_rows: int = 0, 
+                            database: Optional[str] = None,
+                            engine_type: Optional[str] = None) -> None:
+        """
+        Update job bookmark state after successful processing with S3 persistence and Iceberg support.
+        
+        Args:
+            table_name: Name of the table to update bookmark for
+            new_max_value: New maximum value processed
+            processed_rows: Number of rows processed (default: 0)
+            database: Optional database name for Iceberg table validation
+            engine_type: Optional engine type for Iceberg detection
+        """
         
     def reset_bookmark(self, table_name: str) -> bool:
         """Reset bookmark for table"""
@@ -487,6 +499,79 @@ class JobBookmarkManager:
         
     def fallback_to_traditional_bookmark(self, dataframe: DataFrame) -> Optional[str]:
         """Fallback to traditional bookmark detection for Iceberg tables"""
+```
+
+### Manual Bookmark Configuration
+
+Manual bookmark configuration components for explicit column specification.
+
+```python
+from glue_job.storage.manual_bookmark_config import ManualBookmarkConfig, BookmarkStrategyResolver
+```
+
+#### ManualBookmarkConfig Class
+
+```python
+@dataclass
+class ManualBookmarkConfig:
+    table_name: str
+    column_name: str
+    
+    def __post_init__(self):
+        """Validate table and column names after initialization"""
+        
+    @classmethod
+    def from_dict(cls, data: Dict[str, str]) -> 'ManualBookmarkConfig':
+        """Create ManualBookmarkConfig instance from dictionary data"""
+        
+    def to_dict(self) -> Dict[str, str]:
+        """Convert ManualBookmarkConfig to dictionary"""
+        
+    def __str__(self) -> str:
+        """String representation of the configuration"""
+        
+    def __repr__(self) -> str:
+        """Detailed string representation of the configuration"""
+```
+
+#### BookmarkStrategyResolver Class
+
+```python
+class BookmarkStrategyResolver:
+    def __init__(self, manual_configs: Dict[str, ManualBookmarkConfig], structured_logger=None):
+        """Initialize BookmarkStrategyResolver with manual configurations"""
+        
+    def resolve_strategy(self, table_name: str, connection) -> Tuple[str, Optional[str], bool]:
+        """
+        Resolve bookmark strategy for a table using manual config or automatic detection.
+        
+        Returns:
+            Tuple of (strategy, column_name, is_manually_configured)
+        """
+        
+    def clear_cache(self):
+        """Clear the JDBC metadata cache"""
+        
+    def get_cache_stats(self) -> Dict[str, int]:
+        """Get cache statistics"""
+        
+    def _get_manual_strategy(self, table_name: str, connection) -> Optional[Tuple[str, str, str]]:
+        """Get bookmark strategy from manual configuration"""
+        
+    def _get_automatic_strategy(self, table_name: str, connection) -> Tuple[str, Optional[str]]:
+        """Get bookmark strategy using automatic detection"""
+        
+    def _get_column_metadata(self, connection, table_name: str, column_name: str) -> Optional[Dict[str, Any]]:
+        """Query JDBC metadata to get column information with caching"""
+        
+    def _map_jdbc_type_to_strategy(self, jdbc_data_type: str) -> str:
+        """Map JDBC data type to bookmark strategy"""
+        
+    def _detect_timestamp_columns(self, connection, table_name: str) -> List[str]:
+        """Detect timestamp columns using JDBC metadata"""
+        
+    def _detect_primary_key_columns(self, connection, table_name: str) -> List[str]:
+        """Detect primary key columns using JDBC metadata"""
 ```
 
 ### S3BookmarkStorage
@@ -797,9 +882,13 @@ s3_config = S3BookmarkConfig(
 )
 
 # Manage bookmarks
-bookmark_manager = JobBookmarkManager(s3_config)
+bookmark_manager = JobBookmarkManager(glue_context, job_name)
 current_state = bookmark_manager.get_bookmark_state("users")
-bookmark_manager.update_bookmark_state("users", updated_state)
+
+# Update bookmark with new maximum value after processing
+max_id = 12345  # Maximum ID processed
+rows_processed = 100
+bookmark_manager.update_bookmark_state("users", max_id, rows_processed)
 ```
 
 ### Iceberg Operations

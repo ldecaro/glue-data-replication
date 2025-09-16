@@ -165,3 +165,87 @@
   - Test recovery scenarios from corrupted bookmark files
   - Test performance with multiple tables and concurrent operations
   - _Requirements: 1.1, 1.4, 5.3, 7.1_
+
+- [x] 16. Create ManualBookmarkConfig dataclass and validation
+  - Implement ManualBookmarkConfig dataclass with table_name and column_name fields
+  - Add __post_init__ validation for required fields and proper naming conventions
+  - Implement from_dict() class method for creating instances from dictionary data
+  - Add validation for table and column name formats (alphanumeric, underscores)
+  - _Requirements: 8.1, 8.6_
+
+- [x] 17. Implement manual bookmark configuration parsing
+  - Add _parse_manual_bookmark_config() method to JobBookmarkManager
+  - Implement JSON parsing and validation for manual configuration parameter
+  - Add error handling for malformed JSON and invalid configuration structures
+  - Create dictionary mapping table names to ManualBookmarkConfig instances
+  - _Requirements: 8.5, 8.6_
+
+- [x] 18. Implement JDBC metadata querying for column data types
+  - Add _get_column_data_type() method to query JDBC metadata for specific columns
+  - Implement database connection metadata access using getMetaData() and getColumns()
+  - Add error handling for metadata query failures and missing columns
+  - Create caching mechanism for metadata queries to improve performance
+  - _Requirements: 8.2, 8.7_
+
+- [x] 19. Create JDBC data type to bookmark strategy mapping
+  - Implement _determine_strategy_from_data_type() method with comprehensive type mapping
+  - Create JDBC_TYPE_TO_STRATEGY dictionary mapping JDBC types to bookmark strategies
+  - Add support for timestamp, integer, and string/other data types
+  - Handle database-specific type variations and edge cases
+  - _Requirements: 8.3_
+
+- [x] 20. Implement BookmarkStrategyResolver class
+  - Create BookmarkStrategyResolver class to handle strategy resolution logic
+  - Implement resolve_strategy() method that prioritizes manual config over automatic detection
+  - Add _get_manual_strategy() method for manual configuration processing
+  - Integrate with existing automatic detection as fallback mechanism
+  - _Requirements: 8.1, 8.4_
+
+- [x] 21. Enhance JobBookmarkManager with manual configuration support
+  - Update JobBookmarkManager constructor to accept manual_bookmark_config parameter
+  - Integrate BookmarkStrategyResolver into bookmark initialization process
+  - Modify _get_bookmark_strategy_for_table() to use manual config when available
+  - Ensure manual configuration takes precedence over automatic detection
+  - _Requirements: 8.1, 8.4_
+
+- [x] 22. Update JobBookmarkState to track manual configuration usage
+  - Add is_manually_configured and manual_column_data_type fields to JobBookmarkState
+  - Update to_s3_dict() and from_s3_dict() methods to handle new fields
+  - Modify bookmark JSON schema to include manual configuration tracking
+  - Ensure backward compatibility with existing bookmark files
+  - _Requirements: 8.8_
+
+- [x] 23. Implement comprehensive logging for manual bookmark configuration
+  - Add structured logging for manual configuration parsing and validation
+  - Log which tables use manual vs automatic bookmark detection
+  - Add logging for JDBC metadata queries and data type resolution
+  - Implement error logging for invalid manual configurations with fallback notifications
+  - _Requirements: 8.8, 8.6, 8.7_
+
+- [x] 24. Create unit tests for manual bookmark configuration components
+  - Write unit tests for ManualBookmarkConfig class validation and creation
+  - Test manual configuration parsing with valid and invalid JSON structures
+  - Test JDBC metadata querying with mocked database connections
+  - Test data type to strategy mapping for all supported JDBC types
+  - _Requirements: 8.2, 8.3, 8.6_
+
+- [x] 25. Create unit tests for BookmarkStrategyResolver
+  - Write unit tests for strategy resolution with manual and automatic detection
+  - Test fallback behavior when manual configuration fails
+  - Test caching of JDBC metadata queries for performance
+  - Test error handling for missing columns and invalid configurations
+  - _Requirements: 8.1, 8.4, 8.7_
+
+- [x] 26. Create integration tests for manual bookmark configuration
+  - Write integration tests using real database connections and JDBC metadata
+  - Test manual configuration with various database engines (Oracle, PostgreSQL, SQL Server)
+  - Test end-to-end bookmark creation and persistence with manual configuration
+  - Test performance impact of JDBC metadata queries on job execution
+  - _Requirements: 8.2, 8.3, 8.5_
+
+- [x] 27. Update job parameter documentation and examples
+  - Create documentation for manual_bookmark_config parameter format and usage
+  - Add example configurations for common use cases with multiple tables
+  - Document JDBC data type to strategy mapping for reference
+  - Create troubleshooting guide for manual configuration issues
+  - _Requirements: 8.5, 8.6_
