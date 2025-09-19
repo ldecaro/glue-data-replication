@@ -6,6 +6,7 @@ when Iceberg engines are used, and that Iceberg-specific parameters are
 correctly validated.
 """
 
+import unittest
 import pytest
 import sys
 from unittest.mock import patch, MagicMock
@@ -17,7 +18,7 @@ from glue_job.config.database_engines import DatabaseEngineManager
 from glue_job.config.parsers import JobConfigurationParser
 
 
-class TestIcebergParameterExclusion:
+class TestIcebergParameterExclusion(unittest.TestCase):
     """Test that traditional database parameters are excluded for Iceberg engines."""
     
     def test_get_excluded_parameters_iceberg_source(self):
@@ -75,7 +76,7 @@ class TestIcebergParameterExclusion:
         assert excluded_params == []
 
 
-class TestIcebergRequiredParameters:
+class TestIcebergRequiredParameters(unittest.TestCase):
     """Test that Iceberg engines have correct required parameters."""
     
     def test_get_required_parameters_iceberg_source(self):
@@ -122,7 +123,7 @@ class TestIcebergRequiredParameters:
         assert required_params == []
 
 
-class TestJobConfigurationParserParameterExclusion:
+class TestJobConfigurationParserParameterExclusion(unittest.TestCase):
     """Test parameter exclusion in JobConfigurationParser."""
     
     def test_get_required_params_for_engines_iceberg_to_iceberg(self):

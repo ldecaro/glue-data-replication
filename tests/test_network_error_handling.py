@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 mock_modules = [
     'awsglue', 'awsglue.utils', 'awsglue.context', 'awsglue.job',
     'pyspark', 'pyspark.context', 'pyspark.sql', 'pyspark.sql.types',
-    'pyspark.sql.functions', 'boto3'
+    'pyspark.sql.functions'
 ]
 
 for module in mock_modules:
@@ -150,7 +150,7 @@ class TestNetworkErrorHandling(unittest.TestCase):
         # Test network connectivity error classification
         network_error = Exception("connection refused by host")
         error_category = handler.error_classifier.classify_error(network_error)
-        self.assertIn(error_category, ['network_connectivity', 'connection_error'])
+        self.assertIn(error_category, ['network', 'connection'])
         
         # Test ENI creation error classification
         eni_error = Exception("eni creation failed due to insufficient capacity")

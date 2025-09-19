@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 
 
 # Mock AWS dependencies for testing
-sys.modules['boto3'] = Mock()
+# Note: boto3 is not mocked to allow proper exception handling
 sys.modules['awsglue'] = Mock()
 sys.modules['awsglue.utils'] = Mock()
 sys.modules['awsglue.context'] = Mock()
@@ -27,6 +27,9 @@ sys.modules['pyspark.sql.functions'] = Mock()
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
+
+# Import monitoring classes
+from glue_job.monitoring.metrics import PerformanceMonitor
 
 # Import our classes from new modular structure
 from glue_job.monitoring import (

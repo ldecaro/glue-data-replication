@@ -75,6 +75,30 @@ class S3PathUtilities:
         return bucket_name
     
     @staticmethod
+    def validate_s3_path_format(s3_path: str) -> bool:
+        """
+        Validate if a string is a valid S3 path format.
+        
+        Args:
+            s3_path: Path to validate
+            
+        Returns:
+            True if valid S3 path format, False otherwise
+        """
+        try:
+            if not isinstance(s3_path, str):
+                return False
+            
+            if not s3_path.startswith('s3://'):
+                return False
+            
+            # Try to extract bucket name - if it succeeds, path is valid
+            S3PathUtilities.extract_s3_bucket_name(s3_path)
+            return True
+        except Exception:
+            return False
+    
+    @staticmethod
     def _is_valid_bucket_name(bucket_name: str) -> bool:
         """
         Validate S3 bucket name format (basic validation).
@@ -163,46 +187,7 @@ class S3PathUtilities:
         sanitized = sanitized.strip('-')
         return sanitized
     
-    @staticmethod
-    def validate_s3_path_format(s3_path: str) -> bool:
-        """
-        Validate S3 path format for JDBC driver paths.
-        
-        Args:
-            s3_path: S3 path to validate
-            
-        Returns:
-            True if path format is valid, False otherwise
-            
-        Examples:
-            >>> S3PathUtilities.validate_s3_path_format("s3://my-bucket/drivers/oracle.jar")
-            True
-            >>> S3PathUtilities.validate_s3_path_format("invalid-path")
-            False
-        """
-        try:
-            # Check basic S3 path format
-            if not s3_path.startswith('s3://'):
-                return False
-            
-            # Parse URL to validate structure
-            parsed = urlparse(s3_path)
-            if not parsed.netloc or not parsed.path:
-                return False
-            
-            # For JDBC drivers, expect .jar extension
-            if not parsed.path.lower().endswith('.jar'):
-                return False
-            
-            # Validate bucket name
-            bucket_name = parsed.netloc
-            if not S3PathUtilities._is_valid_bucket_name(bucket_name):
-                return False
-            
-            return True
-            
-        except Exception:
-            return False
+
     
     @staticmethod
     def detect_s3_bucket_from_jdbc_paths(source_jdbc_path: str, target_jdbc_path: str, 

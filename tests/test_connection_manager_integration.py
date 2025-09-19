@@ -44,6 +44,16 @@ class MockConnectionConfig:
     
     def get_glue_connection_name(self) -> Optional[str]:
         return None
+    
+    def get_iceberg_config(self):
+        """Return Iceberg configuration as a dictionary for compatibility."""
+        return {
+            'warehouse_location': self.warehouse_location,
+            'catalog_id': self.catalog_id,
+            'database_name': self.database,
+            'table_name': self.table_name,
+            'format_version': self.format_version
+        }
 
 
 def test_iceberg_engine_detection():

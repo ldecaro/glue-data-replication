@@ -5,6 +5,7 @@ Tests the routing logic between JDBC and Iceberg connections,
 configuration validation, and error handling.
 """
 
+import unittest
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from dataclasses import dataclass
@@ -78,6 +79,14 @@ class MockConnectionConfig:
     
     def get_glue_connection_name(self) -> Optional[str]:
         return self.network_config.glue_connection_name if self.network_config else None
+    
+    def get_iceberg_config(self):
+        """Return Iceberg configuration as a dictionary for compatibility."""
+        return {
+            'warehouse_location': self.warehouse_location,
+            'catalog_id': self.catalog_id,
+            'format_version': self.format_version
+        }
 
 # Import the class under test
 import sys

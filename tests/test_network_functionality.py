@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 mock_modules = [
     'awsglue', 'awsglue.utils', 'awsglue.context', 'awsglue.job',
     'pyspark', 'pyspark.context', 'pyspark.sql', 'pyspark.sql.types',
-    'pyspark.sql.functions', 'boto3'
+    'pyspark.sql.functions'
 ]
 
 for module in mock_modules:
@@ -74,8 +74,10 @@ def test_connection_config():
         network_config=network_config
     )
     
-    assert connection_config.requires_cross_vpc_connection() == True
-    assert connection_config.get_glue_connection_name() == 'source-glue-connection'
+    result = connection_config.requires_cross_vpc_connection()
+    assert result == True, f"Expected True, got {result}"
+    glue_name = connection_config.get_glue_connection_name()
+    assert glue_name == 'source-glue-connection', f"Expected 'source-glue-connection', got {glue_name}"
     print("✓ ConnectionConfig with network configuration works")
     
     # Test without network configuration
@@ -89,8 +91,10 @@ def test_connection_config():
         jdbc_driver_path='s3://bucket/postgresql-driver.jar'
     )
     
-    assert simple_config.requires_cross_vpc_connection() == False
-    assert simple_config.get_glue_connection_name() == None
+    result = simple_config.requires_cross_vpc_connection()
+    assert not result, f"Expected falsy value, got {result}"
+    glue_name = simple_config.get_glue_connection_name()
+    assert glue_name == None, f"Expected None, got {glue_name}"
     print("✓ ConnectionConfig without network configuration works")
 
 def test_job_config():
@@ -136,15 +140,16 @@ def test_job_config():
         connection_timeout_seconds=60
     )
     
-    assert job_config.has_cross_vpc_connections() == True
+    has_cross_vpc = job_config.has_cross_vpc_connections()
+    assert has_cross_vpc == True, f"Expected True, got {has_cross_vpc}"
     
     network_summary = job_config.get_network_summary()
-    assert network_summary['source_cross_vpc'] == True
-    assert network_summary['target_cross_vpc'] == False
-    assert network_summary['source_glue_connection'] == 'source-connection'
-    assert network_summary['target_glue_connection'] == None
-    assert network_summary['validate_connections'] == True
-    assert network_summary['connection_timeout'] == 60
+    assert network_summary['source_cross_vpc'] == True, f"Expected True, got {network_summary['source_cross_vpc']}"
+    assert not network_summary['target_cross_vpc'], f"Expected falsy value, got {network_summary['target_cross_vpc']}"
+    assert network_summary['source_glue_connection'] == 'source-connection', f"Expected 'source-connection', got {network_summary['source_glue_connection']}"
+    assert network_summary['target_glue_connection'] == None, f"Expected None, got {network_summary['target_glue_connection']}"
+    assert network_summary['validate_connections'] == True, f"Expected True, got {network_summary['validate_connections']}"
+    assert network_summary['connection_timeout'] == 60, f"Expected 60, got {network_summary['connection_timeout']}"
     
     print("✓ JobConfig with mixed network configuration works")
 

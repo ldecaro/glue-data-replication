@@ -615,7 +615,9 @@ class JdbcConnectionManager:
         properties = {
             'user': str(connection_config.username),
             'password': str(connection_config.password),
-            'driver': str(DatabaseEngineManager.get_driver_class(connection_config.engine_type))
+            'driver': str(DatabaseEngineManager.get_driver_class(connection_config.engine_type)),
+            'fetchsize': '10000',
+            'batchsize': '10000'
         }
         
         # Add engine-specific connection properties

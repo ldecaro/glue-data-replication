@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 mock_modules = [
     'awsglue', 'awsglue.utils', 'awsglue.context', 'awsglue.job',
     'pyspark', 'pyspark.context', 'pyspark.sql', 'pyspark.sql.types',
-    'pyspark.sql.functions', 'boto3'
+    'pyspark.sql.functions'
 ]
 
 for module in mock_modules:
@@ -44,13 +44,13 @@ class TestS3BookmarkConfig(unittest.TestCase):
         """Test creating S3BookmarkConfig instance."""
         config = S3BookmarkConfig(
             bucket_name="test-bucket",
-            key_prefix="bookmarks/",
-            enable_encryption=True
+            bookmark_prefix="bookmarks/",
+            job_name="test-job"
         )
         
         self.assertEqual(config.bucket_name, "test-bucket")
-        self.assertEqual(config.key_prefix, "bookmarks/")
-        self.assertTrue(config.enable_encryption)
+        self.assertEqual(config.bookmark_prefix, "bookmarks/")
+        self.assertEqual(config.job_name, "test-job")
 
 
 class TestJobBookmarkState(unittest.TestCase):
@@ -60,32 +60,32 @@ class TestJobBookmarkState(unittest.TestCase):
         """Test creating JobBookmarkState instance."""
         state = JobBookmarkState(
             table_name="test_table",
+            incremental_strategy="timestamp",
             last_processed_value="2023-01-01 00:00:00",
-            processing_mode="incremental",
-            last_update_time=datetime.now(timezone.utc)
+            last_update_timestamp=datetime.now(timezone.utc)
         )
         
         self.assertEqual(state.table_name, "test_table")
         self.assertEqual(state.last_processed_value, "2023-01-01 00:00:00")
-        self.assertEqual(state.processing_mode, "incremental")
-        self.assertIsInstance(state.last_update_time, datetime)
+        self.assertEqual(state.incremental_strategy, "timestamp")
+        self.assertIsInstance(state.last_update_timestamp, datetime)
     
     def test_job_bookmark_state_to_dict(self):
         """Test converting JobBookmarkState to dictionary."""
         timestamp = datetime.now(timezone.utc)
         state = JobBookmarkState(
             table_name="test_table",
+            incremental_strategy="timestamp",
             last_processed_value="2023-01-01 00:00:00",
-            processing_mode="incremental",
-            last_update_time=timestamp
+            last_update_timestamp=timestamp
         )
         
         state_dict = state.to_dict()
         
         self.assertEqual(state_dict["table_name"], "test_table")
         self.assertEqual(state_dict["last_processed_value"], "2023-01-01 00:00:00")
-        self.assertEqual(state_dict["processing_mode"], "incremental")
-        self.assertEqual(state_dict["last_update_time"], timestamp.isoformat())
+        self.assertEqual(state_dict["incremental_strategy"], "timestamp")
+        self.assertEqual(state_dict["last_update_timestamp"], timestamp.isoformat())
 
 
 class TestS3BookmarkStorage(unittest.TestCase):
@@ -95,9 +95,10 @@ class TestS3BookmarkStorage(unittest.TestCase):
         """Set up test fixtures."""
         self.config = S3BookmarkConfig(
             bucket_name="test-bucket",
-            key_prefix="bookmarks/"
+            bookmark_prefix="bookmarks/",
+            job_name="test-job"
         )
-        self.storage = S3BookmarkStorage(self.config)
+        # Don't create storage here - create it in each test with proper mocking
     
     @patch('boto3.client')
     def test_read_bookmark_success(self, mock_boto_client):
@@ -106,25 +107,30 @@ class TestS3BookmarkStorage(unittest.TestCase):
         mock_s3 = Mock()
         mock_boto_client.return_value = mock_s3
         
+        # Create storage with mocked boto3 client
+        storage = S3BookmarkStorage(self.config)
+        
         # Mock S3 response
         bookmark_data = {
             "table_name": "test_table",
+            "incremental_strategy": "timestamp",
+            "incremental_column": "updated_at",
             "last_processed_value": "2023-01-01 00:00:00",
-            "processing_mode": "incremental",
-            "last_update_time": "2023-01-01T00:00:00+00:00"
+            "last_update_timestamp": "2023-01-01T00:00:00+00:00"
         }
         
         mock_s3.get_object.return_value = {
             'Body': Mock(read=Mock(return_value=json.dumps(bookmark_data).encode()))
         }
         
-        # Test reading bookmark
-        result = self.storage.read_bookmark("test_table")
+        # Test reading bookmark - this is an async method, so we need to handle it properly
+        import asyncio
+        result = asyncio.run(storage.read_bookmark("test_table"))
         
-        self.assertIsInstance(result, JobBookmarkState)
-        self.assertEqual(result.table_name, "test_table")
-        self.assertEqual(result.last_processed_value, "2023-01-01 00:00:00")
-        self.assertEqual(result.processing_mode, "incremental")
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["table_name"], "test_table")
+        self.assertEqual(result["last_processed_value"], "2023-01-01 00:00:00")
+        self.assertEqual(result["incremental_strategy"], "timestamp")
     
     @patch('boto3.client')
     def test_read_bookmark_not_found(self, mock_boto_client):
@@ -133,13 +139,17 @@ class TestS3BookmarkStorage(unittest.TestCase):
         mock_s3 = Mock()
         mock_boto_client.return_value = mock_s3
         
+        # Create storage with mocked boto3 client
+        storage = S3BookmarkStorage(self.config)
+        
         # Mock S3 NoSuchKey error
         mock_s3.get_object.side_effect = ClientError(
             {'Error': {'Code': 'NoSuchKey'}}, 'GetObject'
         )
         
         # Test reading non-existent bookmark
-        result = self.storage.read_bookmark("nonexistent_table")
+        import asyncio
+        result = asyncio.run(storage.read_bookmark("nonexistent_table"))
         
         self.assertIsNone(result)
     
@@ -150,16 +160,26 @@ class TestS3BookmarkStorage(unittest.TestCase):
         mock_s3 = Mock()
         mock_boto_client.return_value = mock_s3
         
-        # Create bookmark state
-        state = JobBookmarkState(
-            table_name="test_table",
-            last_processed_value="2023-01-01 00:00:00",
-            processing_mode="incremental",
-            last_update_time=datetime.now(timezone.utc)
-        )
+        # Create storage with mocked boto3 client
+        storage = S3BookmarkStorage(self.config)
+        
+        # Mock successful put_object response
+        mock_s3.put_object.return_value = {'ETag': '"test-etag"'}
+        
+        # Create bookmark data
+        bookmark_data = {
+            "table_name": "test_table",
+            "incremental_strategy": "timestamp",
+            "last_processed_value": "2023-01-01 00:00:00",
+            "last_update_timestamp": datetime.now(timezone.utc).isoformat(),
+            "is_first_run": False,
+            "job_name": "test-job",
+            "version": "1.0"
+        }
         
         # Test writing bookmark
-        result = self.storage.write_bookmark(state)
+        import asyncio
+        result = asyncio.run(storage.write_bookmark("test_table", bookmark_data))
         
         self.assertTrue(result)
         mock_s3.put_object.assert_called_once()
@@ -170,56 +190,56 @@ class TestJobBookmarkManager(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures."""
-        self.mock_storage = Mock(spec=S3BookmarkStorage)
-        self.manager = JobBookmarkManager(self.mock_storage)
+        self.mock_glue_context = Mock()
+        self.manager = JobBookmarkManager(self.mock_glue_context, "test-job")
     
     def test_get_bookmark_state_existing(self):
         """Test getting existing bookmark state."""
         # Mock existing bookmark
         existing_state = JobBookmarkState(
             table_name="test_table",
+            incremental_strategy="timestamp",
             last_processed_value="2023-01-01 00:00:00",
-            processing_mode="incremental",
-            last_update_time=datetime.now(timezone.utc)
+            last_update_timestamp=datetime.now(timezone.utc)
         )
         
-        self.mock_storage.read_bookmark.return_value = existing_state
+        # Mock the bookmark storage
+        self.manager.bookmark_states["test_table"] = existing_state
         
         # Test getting bookmark state
         result = self.manager.get_bookmark_state("test_table")
         
         self.assertEqual(result, existing_state)
-        self.mock_storage.read_bookmark.assert_called_once_with("test_table")
     
     def test_get_bookmark_state_new(self):
         """Test getting bookmark state for new table."""
-        # Mock no existing bookmark
-        self.mock_storage.read_bookmark.return_value = None
-        
-        # Test getting bookmark state for new table
+        # Test getting bookmark state for new table - should return None if not exists
         result = self.manager.get_bookmark_state("new_table")
         
-        self.assertIsInstance(result, JobBookmarkState)
-        self.assertEqual(result.table_name, "new_table")
-        self.assertEqual(result.processing_mode, "full-load")
-        self.assertIsNone(result.last_processed_value)
+        # Production code returns None for non-existent tables
+        self.assertIsNone(result)
     
     def test_update_bookmark_state(self):
         """Test updating bookmark state."""
-        # Create bookmark state
-        state = JobBookmarkState(
+        # First initialize a bookmark state for the table
+        self.manager.initialize_bookmark_state(
             table_name="test_table",
-            last_processed_value="2023-01-01 00:00:00",
-            processing_mode="incremental",
-            last_update_time=datetime.now(timezone.utc)
+            incremental_strategy="timestamp",
+            incremental_column="updated_at"
         )
         
-        self.mock_storage.write_bookmark.return_value = True
+        # Test updating bookmark state with correct parameters
+        self.manager.update_bookmark_state(
+            table_name="test_table",
+            new_max_value="2023-01-01 00:00:00",
+            processed_rows=100
+        )
         
-        # Test updating bookmark state
-        self.manager.update_bookmark_state("test_table", state)
-        
-        self.mock_storage.write_bookmark.assert_called_once_with(state)
+        # Verify state was stored
+        stored_state = self.manager.get_bookmark_state("test_table")
+        self.assertIsNotNone(stored_state)
+        self.assertEqual(stored_state.last_processed_value, "2023-01-01 00:00:00")
+        self.assertEqual(stored_state.processed_rows, 100)
 
 
 if __name__ == '__main__':

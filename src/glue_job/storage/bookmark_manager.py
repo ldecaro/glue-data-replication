@@ -120,6 +120,14 @@ class JobBookmarkState:
     is_manually_configured: bool = False
     manual_column_data_type: Optional[str] = None
     
+    # Processing statistics
+    processed_rows: int = 0
+    
+    @property
+    def is_initial_load(self) -> bool:
+        """Check if this is an initial load (first run)."""
+        return self.is_first_run
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert bookmark state to dictionary for storage (legacy method)."""
         return {
@@ -157,7 +165,8 @@ class JobBookmarkState:
             'version': self.version,
             's3_key': self.s3_key,
             'is_manually_configured': self.is_manually_configured,
-            'manual_column_data_type': self.manual_column_data_type
+            'manual_column_data_type': self.manual_column_data_type,
+            'processed_rows': self.processed_rows
         }
     
     @classmethod
@@ -247,7 +256,8 @@ class JobBookmarkState:
             version=data.get('version', '1.0'),
             s3_key=data.get('s3_key'),
             is_manually_configured=data.get('is_manually_configured', False),
-            manual_column_data_type=data.get('manual_column_data_type')
+            manual_column_data_type=data.get('manual_column_data_type'),
+            processed_rows=data.get('processed_rows', 0)
         )
     
     @staticmethod
@@ -1625,6 +1635,7 @@ class JobBookmarkManager:
         state.last_processed_value = new_max_value
         state.last_update_timestamp = datetime.now(timezone.utc)
         state.is_first_run = False
+        state.processed_rows = processed_rows  # Update processed rows
         
         # Update S3-specific metadata
         state.updated_timestamp = datetime.now(timezone.utc)

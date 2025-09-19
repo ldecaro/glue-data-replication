@@ -37,46 +37,62 @@ Manual Configuration → JDBC Validation → Strategy Resolution → Bookmark Cr
 
 ## Quick Start
 
-### 1. Basic Configuration Format
+### 1. CloudFormation Parameter Format
+The manual bookmark configuration is provided as a CloudFormation parameter in your parameters file:
+
 ```json
-{
-  "table_name": "column_to_use"
-}
+[
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"table_name\":\"column_to_use\"}"
+  }
+]
 ```
 
-### 2. CloudFormation Parameter
-```yaml
-Parameters:
-  ManualBookmarkConfig:
-    Type: String
-    Default: '{}'
-    Description: JSON string with manual bookmark configurations
+### 2. Complete Example
+For a complete working example, see `examples/sqlserver-to-sqlserver-parameters-with-manual-bookmarks.json`:
+
+```json
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "sqlserver-to-sqlserver-replication"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "customers,inventory,order_items,orders,products"
+  },
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"customers\":\"customer_id\"}"
+  }
+]
 ```
 
-### 3. Example Usage
-```json
-{
-  "employees": "updated_at",
-  "orders": "order_id"
-}
+### 3. Deployment
+Deploy using the project's deploy script as described in `QUICK_START_GUIDE.md`:
+
+```bash
+./deploy.sh -s my-data-replication -b your-bucket -p my-parameters.json
 ```
 
 ## Configuration Format
 
-### CloudFormation Parameter
+### CloudFormation Parameter Format
 
-The manual bookmark configuration is provided through the `ManualBookmarkConfig` CloudFormation parameter as a JSON string.
+The manual bookmark configuration is provided through the `ManualBookmarkConfig` CloudFormation parameter in your parameters file. The parameter value is a JSON string containing the table-to-column mappings.
 
-```yaml
-Parameters:
-  ManualBookmarkConfig:
-    Type: String
-    Description: JSON string with manual bookmark configurations per table
-    Default: '{}'
+**Parameters File Format:**
+```json
+[
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"table_name_1\":\"column_to_use_for_bookmarks\",\"table_name_2\":\"column_to_use_for_bookmarks\"}"
+  }
+]
 ```
 
-### JSON Structure
-
+**JSON Structure (within the ParameterValue):**
 ```json
 {
   "table_name_1": "column_to_use_for_bookmarks",
@@ -102,25 +118,32 @@ Parameters:
 
 #### Single Table Configuration
 ```json
-{
-  "employees": "last_modified_date"
-}
+[
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"employees\":\"last_modified_date\"}"
+  }
+]
 ```
 
 #### Multiple Tables Configuration
 ```json
-{
-  "employees": "updated_at",
-  "orders": "order_id",
-  "audit_log": "audit_timestamp"
-}
+[
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"employees\":\"updated_at\",\"orders\":\"order_id\",\"audit_log\":\"audit_timestamp\"}"
+  }
+]
 ```
 
 #### Partial Configuration (Hybrid Approach)
 ```json
-{
-  "critical_table": "business_timestamp"
-}
+[
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"critical_table\":\"business_timestamp\"}"
+  }
+]
 ```
 *Note: Other tables in the job will use automatic detection*
 
@@ -128,10 +151,21 @@ Parameters:
 
 ### PostgreSQL Configuration
 
+**CloudFormation Parameter:**
+```json
+[
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"users\":\"updated_at\",\"sessions\":\"session_id\",\"events\":\"event_timestamp\"}"
+  }
+]
+```
+
+**Configuration Content:**
 ```json
 {
   "users": "updated_at",
-  "sessions": "session_id",
+  "sessions": "session_id", 
   "events": "event_timestamp"
 }
 ```
@@ -143,6 +177,17 @@ Parameters:
 
 ### Oracle Configuration
 
+**CloudFormation Parameter:**
+```json
+[
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"employees\":\"last_modified\",\"departments\":\"dept_id\",\"audit_trail\":\"audit_date\"}"
+  }
+]
+```
+
+**Configuration Content:**
 ```json
 {
   "employees": "last_modified",
@@ -158,11 +203,32 @@ Parameters:
 
 ### SQL Server Configuration
 
+**Complete Example from `examples/sqlserver-to-sqlserver-parameters-with-manual-bookmarks.json`:**
+```json
+[
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "sqlserver"
+  },
+  {
+    "ParameterKey": "TargetEngineType", 
+    "ParameterValue": "sqlserver"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "customers,inventory,order_items,orders,products"
+  },
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"customers\":\"customer_id\"}"
+  }
+]
+```
+
+**Configuration Content:**
 ```json
 {
-  "customers": "modified_date",
-  "orders": "order_id",
-  "products": "last_updated"
+  "customers": "customer_id"
 }
 ```
 
@@ -342,9 +408,10 @@ jdbc_metadata_cache = {
 ### Configuration Design
 
 1. **Start Small**: Begin with manual configuration for critical tables only
-2. **Validate First**: Test configurations in development environment
-3. **Document Choices**: Document why specific columns were chosen for manual configuration
-4. **Monitor Performance**: Track validation performance and cache hit rates
+2. **Use CloudFormation Parameter Format**: Always use the proper CloudFormation parameter format as shown in the examples
+3. **Validate First**: Test configurations in development environment using the deploy script
+4. **Document Choices**: Document why specific columns were chosen for manual configuration
+5. **Monitor Performance**: Track validation performance and cache hit rates
 
 ### Column Selection Guidelines
 
@@ -368,30 +435,53 @@ jdbc_metadata_cache = {
 
 ### Development Workflow
 
+#### Step 1: Create Configuration File
 ```bash
-# 1. Create readable configuration file
+# Create readable configuration file
 cat > manual-bookmark-config.json << EOF
 {
   "employees": "updated_at",
   "orders": "order_id"
 }
 EOF
+```
 
-# 2. Validate JSON format
+#### Step 2: Validate JSON Format
+```bash
+# Validate JSON syntax
 python -m json.tool manual-bookmark-config.json
+```
 
-# 3. Minify for CloudFormation parameter
-jq -c . manual-bookmark-config.json
+#### Step 3: Add to CloudFormation Parameters File
+```bash
+# Create or update your parameters file (e.g., my-parameters.json)
+# Add the ManualBookmarkConfig parameter in CloudFormation format:
+```
 
-# 4. Test in development environment
-aws cloudformation deploy \
-  --template-file template.yaml \
-  --stack-name dev-replication-test \
-  --parameter-overrides ManualBookmarkConfig="$(jq -c . manual-bookmark-config.json)"
+```json
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "my-replication-job"
+  },
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"employees\":\"updated_at\",\"orders\":\"order_id\"}"
+  }
+]
+```
 
-# 5. Monitor CloudWatch logs for validation results
+#### Step 4: Deploy Using the Deploy Script
+```bash
+# Deploy using the project's deploy script (see QUICK_START_GUIDE.md)
+./deploy.sh -s my-data-replication -b your-bucket -p my-parameters.json
+```
+
+#### Step 5: Monitor Deployment and Validation
+```bash
+# Monitor CloudWatch logs for validation results
 aws logs filter-log-events \
-  --log-group-name /aws/glue/jobs/dev-replication-test \
+  --log-group-name /aws/glue/jobs/my-replication-job \
   --filter-pattern "manual configuration"
 ```
 
@@ -470,6 +560,25 @@ aws logs filter-log-events \
 - Review database-specific naming conventions
 
 ### Diagnostic Commands
+
+#### Using the Example File with Deploy Script
+```bash
+# 1. Copy the example file
+cp examples/sqlserver-to-sqlserver-parameters-with-manual-bookmarks.json my-parameters.json
+
+# 2. Customize the parameters for your environment
+# Edit my-parameters.json to update:
+# - Connection strings
+# - Database names
+# - S3 bucket paths
+# - Network configuration (VPC, subnets, security groups)
+
+# 3. Deploy using the project's deploy script (see QUICK_START_GUIDE.md)
+./deploy.sh -s my-data-replication -b your-bucket -p my-parameters.json
+
+# 4. Monitor deployment
+# The deploy script will automatically wait for completion and show results
+```
 
 #### Configuration Validation Script
 ```bash
@@ -567,14 +676,28 @@ ManualConfigValidationFailureAlarm:
 
 ## Common Use Cases
 
-### E-commerce
+### E-commerce (SQL Server to SQL Server)
+**Based on `examples/sqlserver-to-sqlserver-parameters-with-manual-bookmarks.json`:**
+```json
+[
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "customers,inventory,order_items,orders,products"
+  },
+  {
+    "ParameterKey": "ManualBookmarkConfig",
+    "ParameterValue": "{\"customers\":\"customer_id\"}"
+  }
+]
+```
+
+**Configuration Content:**
 ```json
 {
-  "orders": "updated_at",
-  "products": "product_id",
-  "customers": "last_login"
+  "customers": "customer_id"
 }
 ```
+*Note: Only the `customers` table uses manual configuration; other tables (`inventory`, `order_items`, `orders`, `products`) use automatic detection.*
 
 ### Financial Services
 ```json
@@ -601,9 +724,11 @@ Manual bookmark configuration provides powerful control over incremental loading
 ### Key Takeaways
 
 1. **Use Judiciously**: Apply manual configuration only where automatic detection is insufficient
-2. **Validate Thoroughly**: Test configurations in development before production deployment
-3. **Monitor Performance**: Track validation performance and cache effectiveness
-4. **Plan for Fallback**: Design configurations with graceful fallback to automatic detection
-5. **Document Decisions**: Maintain clear documentation of manual configuration choices
+2. **Follow the Example**: Use `examples/sqlserver-to-sqlserver-parameters-with-manual-bookmarks.json` as a reference for proper CloudFormation parameter format
+3. **Deploy with Script**: Use the `./deploy.sh` script as described in `QUICK_START_GUIDE.md` for deployment
+4. **Validate Thoroughly**: Test configurations in development before production deployment
+5. **Monitor Performance**: Track validation performance and cache effectiveness
+6. **Plan for Fallback**: Design configurations with graceful fallback to automatic detection
+7. **Document Decisions**: Maintain clear documentation of manual configuration choices
 
 For additional support and advanced use cases, refer to the [Bookmark Details Guide](BOOKMARK_DETAILS.md) and [API Reference](API_REFERENCE.md).

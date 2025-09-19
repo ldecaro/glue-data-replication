@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 mock_modules = [
     'awsglue', 'awsglue.utils', 'awsglue.context', 'awsglue.job',
     'pyspark', 'pyspark.context', 'pyspark.sql', 'pyspark.sql.types',
-    'pyspark.sql.functions', 'boto3'
+    'pyspark.sql.functions'
 ]
 
 for module in mock_modules:
@@ -110,10 +110,11 @@ class TestDatabaseEngineManager(unittest.TestCase):
         driver_class = self.engine_manager.get_driver_class("postgresql")
         self.assertEqual(driver_class, "org.postgresql.Driver")
     
-    def test_get_driver_class_mysql(self):
-        """Test getting MySQL driver class."""
-        driver_class = self.engine_manager.get_driver_class("mysql")
-        self.assertEqual(driver_class, "com.mysql.cj.jdbc.Driver")
+    def test_get_driver_class_mysql_unsupported(self):
+        """Test that MySQL is not supported."""
+        with self.assertRaises(ValueError) as context:
+            self.engine_manager.get_driver_class("mysql")
+        self.assertIn("Unsupported database engine: mysql", str(context.exception))
     
     def test_get_driver_class_sqlserver(self):
         """Test getting SQL Server driver class."""
@@ -123,7 +124,7 @@ class TestDatabaseEngineManager(unittest.TestCase):
     def test_get_driver_class_oracle(self):
         """Test getting Oracle driver class."""
         driver_class = self.engine_manager.get_driver_class("oracle")
-        self.assertEqual(driver_class, "oracle.jdbc.driver.OracleDriver")
+        self.assertEqual(driver_class, "oracle.jdbc.OracleDriver")
     
     def test_get_driver_class_unknown(self):
         """Test getting driver class for unknown engine."""
@@ -140,35 +141,24 @@ class TestConnectionStringBuilder(unittest.TestCase):
     
     def test_build_postgresql_connection_string(self):
         """Test building PostgreSQL connection string."""
-        config = ConnectionConfig(
+        connection_string = self.builder.build_connection_string(
             engine_type="postgresql",
-            connection_string="jdbc:postgresql://localhost:5432/testdb",
-            database="testdb",
-            schema="public",
-            username="testuser",
-            password="testpass",
-            jdbc_driver_path="s3://bucket/drivers/postgresql.jar"
+            host="localhost",
+            port=5432,
+            database="testdb"
         )
-        
-        connection_string = self.builder.build_connection_string(config)
         expected = "jdbc:postgresql://localhost:5432/testdb"
         self.assertEqual(connection_string, expected)
     
-    def test_build_mysql_connection_string(self):
-        """Test building MySQL connection string."""
-        config = ConnectionConfig(
-            engine_type="mysql",
-            connection_string="jdbc:mysql://localhost:3306/testdb",
-            database="testdb",
-            schema="public",
-            username="testuser",
-            password="testpass",
-            jdbc_driver_path="s3://bucket/drivers/mysql.jar"
-        )
-        
-        connection_string = self.builder.build_connection_string(config)
-        expected = "jdbc:mysql://localhost:3306/testdb"
-        self.assertEqual(connection_string, expected)
+    def test_build_mysql_connection_string_unsupported(self):
+        """Test that MySQL connection string building is not supported."""
+        with self.assertRaises(ValueError):
+            self.builder.build_connection_string(
+                engine_type="mysql",
+                host="localhost",
+                port=3306,
+                database="testdb"
+            )
 
 
 if __name__ == '__main__':

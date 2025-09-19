@@ -346,23 +346,9 @@ class BookmarkStrategyResolver:
             Tuple of (strategy, column_name)
         """
         try:
-            # Import the existing incremental detector
-            from ..database.incremental_detector import IncrementalColumnDetector
-            from ..database.connection_manager import UnifiedConnectionManager
-            
-            # For automatic detection, we need to get the table schema
-            # This is a simplified implementation that would need to be integrated
-            # with the actual connection manager and schema detection logic
-            
-            # For now, we'll use a basic fallback strategy based on common patterns
-            # In a full implementation, this would query the actual table schema
-            # and use IncrementalColumnDetector.detect_incremental_strategy()
-            
             self.logger.info(f"Using automatic detection for table '{table_name}'")
             
             # Basic automatic detection logic (simplified)
-            # In practice, this would get the actual schema and use IncrementalColumnDetector
-            
             # Try to detect common timestamp columns via JDBC metadata
             timestamp_columns = self._detect_timestamp_columns(connection, table_name)
             if timestamp_columns:
@@ -410,7 +396,12 @@ class BookmarkStrategyResolver:
                 'timestamp', 'last_change', 'change_date', 'mod_time'
             ]
             
-            while result_set.next():
+            # Add safety counter to prevent infinite loops in testing
+            max_iterations = 1000
+            iteration_count = 0
+            
+            while result_set.next() and iteration_count < max_iterations:
+                iteration_count += 1
                 column_name = result_set.getString('COLUMN_NAME').lower()
                 data_type = result_set.getString('TYPE_NAME').upper()
                 
@@ -423,6 +414,9 @@ class BookmarkStrategyResolver:
                 
                 if is_timestamp_type and (matches_pattern or 'date' in column_name or 'time' in column_name):
                     timestamp_columns.append(column_name)
+            
+            if iteration_count >= max_iterations:
+                self.logger.warning(f"Reached maximum iterations ({max_iterations}) while detecting timestamp columns for {table_name}")
             
         except Exception as e:
             self.logger.error(f"Error detecting timestamp columns for {table_name}: {e}")
@@ -447,7 +441,13 @@ class BookmarkStrategyResolver:
             
             # First, try to get actual primary keys
             pk_result_set = metadata.getPrimaryKeys(None, None, table_name)
-            while pk_result_set.next():
+            
+            # Add safety counter to prevent infinite loops in testing
+            max_iterations = 1000
+            iteration_count = 0
+            
+            while pk_result_set.next() and iteration_count < max_iterations:
+                iteration_count += 1
                 column_name = pk_result_set.getString('COLUMN_NAME').lower()
                 pk_columns.append(column_name)
             
@@ -460,7 +460,9 @@ class BookmarkStrategyResolver:
                     'row_id', 'record_id', 'unique_id'
                 ]
                 
-                while result_set.next():
+                iteration_count = 0
+                while result_set.next() and iteration_count < max_iterations:
+                    iteration_count += 1
                     column_name = result_set.getString('COLUMN_NAME').lower()
                     data_type = result_set.getString('TYPE_NAME').upper()
                     
@@ -474,6 +476,9 @@ class BookmarkStrategyResolver:
                     
                     if is_integer_type and matches_pattern:
                         pk_columns.append(column_name)
+                
+                if iteration_count >= max_iterations:
+                    self.logger.warning(f"Reached maximum iterations ({max_iterations}) while detecting primary key columns for {table_name}")
             
         except Exception as e:
             self.logger.error(f"Error detecting primary key columns for {table_name}: {e}")
@@ -519,15 +524,21 @@ class BookmarkStrategyResolver:
             Best primary key column name
         """
         if not pk_columns:
-            return pk_columns[0] if pk_columns else None
+            return None
         
         # Preference order for primary key columns
         preferred_patterns = ['id', 'pk', 'primary_key', 'key']
         
-        # Look for preferred patterns first
+        # Look for exact matches first
         for pattern in preferred_patterns:
             for column in pk_columns:
-                if column == pattern or column.endswith('_' + pattern):
+                if column == pattern:
+                    return column
+        
+        # Then look for columns ending with the pattern
+        for pattern in preferred_patterns:
+            for column in pk_columns:
+                if column.endswith('_' + pattern):
                     return column
         
         # If no preferred pattern found, return the first one

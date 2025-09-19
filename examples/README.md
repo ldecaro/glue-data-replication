@@ -53,13 +53,7 @@ Manual bookmark configuration allows you to override automatic incremental colum
 
 | File | Description | Use Case |
 |------|-------------|----------|
-| `manual-bookmark-config-readable.json` | Simple readable format for manual configuration | Basic manual bookmark setup |
-| `manual-bookmark-configuration-example.json` | Complete CloudFormation parameter example | Production deployment with manual bookmarks |
-| `manual-bookmark-config-use-cases.json` | Comprehensive use case examples | Various scenarios and patterns |
-| `cloudformation-parameters-with-manual-config.json` | Oracle to PostgreSQL with manual bookmarks | Basic manual bookmark deployment |
-| `sqlserver-to-postgresql-with-manual-bookmarks.json` | E-commerce SQL Server to PostgreSQL | Multi-table manual configuration |
-| `postgresql-iot-with-manual-bookmarks.json` | IoT data platform with cross-VPC | Cross-VPC with manual bookmarks |
-| `partial-manual-bookmark-config.json` | Partial manual configuration example | Mixed manual/automatic detection |
+| `sqlserver-to-sqlserver-parameters-with-manual-bookmarks.json` | SQLServer to SQLServer replication | Single-table manual configuration (customers) and all other tables using automatic bookmark column identification |
 
 ### Manual Configuration Patterns
 

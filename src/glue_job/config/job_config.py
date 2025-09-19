@@ -25,6 +25,15 @@ class NetworkConfig:
     def requires_glue_connection(self) -> bool:
         """Check if Glue connection is required for cross-VPC access."""
         return self.has_network_config() and bool(self.glue_connection_name)
+    
+    def validate(self) -> None:
+        """Validate network configuration parameters."""
+        if self.vpc_id and not self.subnet_ids:
+            raise ValueError("subnet_ids are required when vpc_id is specified")
+        if self.vpc_id and not self.security_group_ids:
+            raise ValueError("security_group_ids are required when vpc_id is specified")
+        if self.glue_connection_name and not self.has_network_config():
+            raise ValueError("Network configuration is required when glue_connection_name is specified")
 
 
 @dataclass
