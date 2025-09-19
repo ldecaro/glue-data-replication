@@ -1,0 +1,162 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "iceberg-multi-region-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "iceberg"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "iceberg"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "global_analytics"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "user_events_us_east"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "global_analytics"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "user_events_consolidated"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "user_events_us_east"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceWarehouseLocation",
+    "ParameterValue": "s3://global-analytics-us-east-1/warehouse/"
+  },
+  {
+    "ParameterKey": "SourceCatalogId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceFormatVersion",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "TargetWarehouseLocation",
+    "ParameterValue": "s3://global-analytics-us-west-2/warehouse/"
+  },
+  {
+    "ParameterKey": "TargetCatalogId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetFormatVersion",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://global-analytics-bookmarks/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "4320"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.4X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "10"
+  },
+  {
+    "ParameterKey": "SourceVpcId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceSubnetIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceSecurityGroupIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "CreateSourceGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "SourceAvailabilityZone",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "CreateSourceS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "CreateTargetS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "CreateTargetGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "ErrorLogRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  }
+]

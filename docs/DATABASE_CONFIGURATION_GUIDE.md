@@ -4,7 +4,7 @@ This guide provides detailed information about supported database configurations
 
 ## Supported Database Engines
 
-The system supports four major database engines with cross-database replication capabilities:
+The system supports five major database engines with cross-database replication capabilities:
 
 ### Oracle Database
 
@@ -144,6 +144,41 @@ jdbc:db2://db2-host:50001/SAMPLE:sslConnection=true;
 - Compatible with Db2 on Cloud
 - Requires specific driver configuration for optimal performance
 
+### Apache Iceberg
+
+**Supported Versions**: Format version 1 and 2
+
+**JDBC Driver Requirements**:
+- **Driver Class**: Not applicable (uses Spark native integration)
+- **JAR Dependencies**: Built into AWS Glue 3.0+ runtime
+- **Additional JARs**: None required
+
+**Configuration Format**:
+```
+Engine Type: iceberg
+Database Name: {glue_catalog_database}
+Table Name: {iceberg_table_name}
+Warehouse Location: s3://{bucket}/{prefix}/
+```
+
+**Example Configurations**:
+```json
+{
+  "SourceEngine": "iceberg",
+  "SourceDatabaseName": "analytics_db",
+  "SourceTableName": "customer_events",
+  "SourceWarehouseLocation": "s3://my-datalake/warehouse/"
+}
+```
+
+**Configuration Notes**:
+- No JDBC driver required - uses Glue Data Catalog and Spark
+- Requires S3 warehouse location for table data storage
+- Supports cross-account Glue Data Catalog access with catalog_id
+- Automatic table creation when used as target
+- Built-in support for schema evolution and time travel
+- Optimized for analytical workloads and large-scale data processing
+
 ## JDBC Driver Management
 
 ### Driver Download and Storage
@@ -208,8 +243,13 @@ s3://your-glue-assets/
 │   └── db2/
 │       └── 11.5.8.0/
 │           └── db2jcc4.jar
-└── scripts/
-    └── glue_data_replication.py
+└── src/
+    └── glue_job/
+        ├── main.py
+        ├── config/
+        ├── database/
+        ├── storage/
+        └── utils/
 ```
 
 **Version Management**:
@@ -217,6 +257,193 @@ s3://your-glue-assets/
 - Use semantic versioning in directory names
 - Implement lifecycle policies for old versions
 - Document driver compatibility matrices
+
+## Iceberg Configuration
+
+### Glue Data Catalog Setup
+
+**Prerequisites**:
+1. AWS Glue Data Catalog database must exist
+2. S3 warehouse location must be accessible
+3. Proper IAM permissions for Glue and S3 operations
+
+**Creating Glue Database**:
+```bash
+# Create database in Glue Data Catalog
+aws glue create-database \
+  --database-input Name=analytics_db,Description="Analytics data lake database"
+```
+
+**Required IAM Permissions**:
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetDatabase",
+                "glue:GetTable",
+                "glue:CreateTable",
+                "glue:UpdateTable",
+                "glue:GetPartitions"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:ListBucket"
+            ],
+            "Resource": [
+                "arn:aws:s3:::your-warehouse-bucket/*",
+                "arn:aws:s3:::your-warehouse-bucket"
+            ]
+        }
+    ]
+}
+```
+
+### Warehouse Location Configuration
+
+**S3 Bucket Setup**:
+```bash
+# Create S3 bucket for Iceberg warehouse
+aws s3 mb s3://my-iceberg-warehouse
+
+# Set up bucket versioning (recommended)
+aws s3api put-bucket-versioning \
+  --bucket my-iceberg-warehouse \
+  --versioning-configuration Status=Enabled
+
+# Configure server-side encryption
+aws s3api put-bucket-encryption \
+  --bucket my-iceberg-warehouse \
+  --server-side-encryption-configuration '{
+    "Rules": [{
+      "ApplyServerSideEncryptionByDefault": {
+        "SSEAlgorithm": "AES256"
+      }
+    }]
+  }'
+```
+
+**Recommended Directory Structure**:
+```
+s3://my-iceberg-warehouse/
+├── analytics_db/
+│   ├── customer_events/
+│   │   ├── data/
+│   │   └── metadata/
+│   ├── transaction_history/
+│   │   ├── data/
+│   │   └── metadata/
+│   └── daily_aggregates/
+│       ├── data/
+│       └── metadata/
+└── processed_data/
+    ├── ml_features/
+    └── reporting_views/
+```
+
+### Cross-Account Configuration
+
+**Source Account Setup** (where Glue job runs):
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "glue:GetDatabase",
+                "glue:GetTable"
+            ],
+            "Resource": [
+                "arn:aws:glue:region:target-account:catalog",
+                "arn:aws:glue:region:target-account:database/*",
+                "arn:aws:glue:region:target-account:table/*"
+            ]
+        }
+    ]
+}
+```
+
+**Target Account Setup** (where Iceberg tables reside):
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::source-account:role/GlueJobRole"
+            },
+            "Action": [
+                "glue:GetDatabase",
+                "glue:GetTable",
+                "glue:CreateTable",
+                "glue:UpdateTable"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+```
+
+### Table Creation and Schema Management
+
+**Automatic Table Creation**:
+When using Iceberg as target, tables are automatically created with:
+- Schema inferred from source JDBC metadata
+- Identifier-field-ids configured for bookmark management
+- Format version 2 for optimal performance
+- Proper data type mapping from source to Iceberg types
+
+**Manual Table Creation** (optional):
+```sql
+CREATE TABLE glue_catalog.analytics_db.customer_events (
+    event_id bigint,
+    customer_id string,
+    event_type string,
+    event_timestamp timestamp,
+    event_data string
+) USING iceberg
+TBLPROPERTIES (
+    'format-version'='2',
+    'identifier-field-ids'='1'
+);
+```
+
+### Performance Optimization
+
+**Partitioning Strategy**:
+```sql
+-- Date-based partitioning
+CREATE TABLE glue_catalog.analytics_db.events (
+    event_id bigint,
+    event_date date,
+    event_data string
+) USING iceberg
+PARTITIONED BY (days(event_date));
+
+-- Multi-level partitioning
+CREATE TABLE glue_catalog.analytics_db.transactions (
+    transaction_id bigint,
+    customer_id string,
+    transaction_date date,
+    amount decimal(10,2)
+) USING iceberg
+PARTITIONED BY (days(transaction_date), bucket(16, customer_id));
+```
+
+**File Size Optimization**:
+- Target 128MB-1GB file sizes
+- Enable automatic compaction
+- Monitor file count and distribution
 
 ## Cross-Database Replication Scenarios
 
@@ -231,6 +458,9 @@ s3://your-glue-assets/
 | Any → Same | Low | Homogeneous replication, best performance |
 | Db2 → PostgreSQL | High | Legacy modernization, complex types |
 | SQL Server → Oracle | High | Cross-platform enterprise migration |
+| **Any JDBC → Iceberg** | **Low** | **Data lake ingestion, automatic table creation** |
+| **Iceberg → Any JDBC** | **Medium** | **Data lake to operational systems** |
+| **Iceberg → Iceberg** | **Low** | **Data lake transformations, cross-account** |
 
 ### Data Type Mapping
 
@@ -269,6 +499,38 @@ s3://your-glue-assets/
 | UUID | RAW(16) | Binary representation |
 | BYTEA | BLOB | Binary large objects |
 | TEXT | CLOB | Large text objects |
+
+#### JDBC to Iceberg
+
+| JDBC Type | Iceberg Type | Notes |
+|-----------|--------------|-------|
+| VARCHAR, CHAR, TEXT | string | All text types map to string |
+| INTEGER, SMALLINT | int | Integer types |
+| BIGINT | long | Long integer |
+| DECIMAL, NUMERIC | decimal(precision,scale) | Preserves precision and scale |
+| FLOAT | float | Single precision |
+| DOUBLE | double | Double precision |
+| BOOLEAN | boolean | Boolean values |
+| DATE | date | Date only |
+| TIMESTAMP | timestamp | Date and time |
+| TIME | time | Time only |
+| BINARY, VARBINARY | binary | Binary data |
+
+#### Iceberg to JDBC
+
+| Iceberg Type | Target JDBC Type | Notes |
+|--------------|------------------|-------|
+| string | VARCHAR(max_length) | Length determined by target DB |
+| int | INTEGER | Standard integer |
+| long | BIGINT | Long integer |
+| decimal(p,s) | DECIMAL(p,s) | Preserves precision and scale |
+| float | FLOAT | Single precision |
+| double | DOUBLE | Double precision |
+| boolean | BOOLEAN | Boolean values |
+| date | DATE | Date only |
+| timestamp | TIMESTAMP | Date and time |
+| time | TIME | Time only |
+| binary | VARBINARY | Binary data |
 
 ### Schema Compatibility Requirements
 

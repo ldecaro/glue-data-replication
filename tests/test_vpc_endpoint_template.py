@@ -14,7 +14,7 @@ def validate_cloudformation_template():
     """Validate the CloudFormation template syntax."""
     try:
         # Load the CloudFormation template
-        with open('cloudformation/glue-data-replication.yaml', 'r') as f:
+        with open('infrastructure/cloudformation/glue-data-replication.yaml', 'r') as f:
             template_content = f.read()
         
         # Parse YAML to ensure it's valid
@@ -107,43 +107,64 @@ def validate_cloudformation_template():
 def test_vpc_endpoint_policy():
     """Test the VPC endpoint policy configuration."""
     try:
-        with open('cloudformation/glue-data-replication.yaml', 'r') as f:
-            template_dict = yaml.safe_load(f.read())
+        # Read the CloudFormation template as raw text to check for VPC endpoint resources
+        with open('infrastructure/cloudformation/glue-data-replication.yaml', 'r') as f:
+            template_content = f.read()
         
-        resources = template_dict.get('Resources', {})
-        source_endpoint = resources.get('SourceS3VpcEndpoint', {})
+        # Check for VPC endpoint resources in the template (text-based validation)
+        required_vpc_resources = [
+            'SourceS3VpcEndpoint',
+            'TargetS3VpcEndpoint',
+            'CreateSourceS3Endpoint',
+            'CreateTargetS3Endpoint'
+        ]
         
-        if source_endpoint:
-            policy_doc = source_endpoint.get('Properties', {}).get('PolicyDocument')
-            
-            if policy_doc:
-                # Check policy allows required S3 actions
-                statements = policy_doc.get('Statement', [])
-                if statements:
-                    statement = statements[0]
-                    actions = statement.get('Action', [])
-                    
-                    required_actions = ['s3:GetObject', 's3:GetObjectVersion', 's3:ListBucket', 's3:GetBucketLocation']
-                    
-                    for action in required_actions:
-                        if action in actions:
-                            print(f"✓ VPC endpoint policy allows: {action}")
-                        else:
-                            print(f"✗ VPC endpoint policy missing: {action}")
-                    
-                    # Check resources include JDBC driver buckets
-                    resources_list = statement.get('Resource', [])
-                    if any('jdbc' in str(resource).lower() or 'driver' in str(resource).lower() for resource in resources_list):
-                        print("✓ VPC endpoint policy includes JDBC driver bucket access")
-                    else:
-                        print("✓ VPC endpoint policy uses dynamic bucket references")
+        missing_resources = []
+        for resource in required_vpc_resources:
+            if resource not in template_content:
+                missing_resources.append(resource)
+        
+        if missing_resources:
+            print(f"✗ Missing VPC endpoint resources: {missing_resources}")
+            assert False, f"Missing required VPC endpoint resources: {missing_resources}"
+        else:
+            print("✓ All required VPC endpoint resources found in template")
+        
+        # Check for S3 VPC endpoint policy elements
+        policy_elements = [
+            's3:GetObject',
+            's3:GetObjectVersion', 
+            's3:ListBucket',
+            's3:GetBucketLocation',
+            'PolicyDocument'
+        ]
+        
+        missing_policy_elements = []
+        for element in policy_elements:
+            if element not in template_content:
+                missing_policy_elements.append(element)
+        
+        if missing_policy_elements:
+            print(f"✗ Missing VPC endpoint policy elements: {missing_policy_elements}")
+            assert False, f"Missing required policy elements: {missing_policy_elements}"
+        else:
+            print("✓ All required VPC endpoint policy elements found")
+        
+        # Check for VPC endpoint type configuration
+        if 'VpcEndpointType' in template_content and 'Gateway' in template_content:
+            print("✓ VPC endpoint configured as Gateway type")
+        else:
+            print("✗ VPC endpoint Gateway type configuration not found")
+            assert False, "VPC endpoint should be configured as Gateway type"
         
         print("✓ VPC endpoint policy validation completed")
-        return True
         
+    except FileNotFoundError:
+        print("✗ CloudFormation template file not found")
+        assert False, "CloudFormation template file not found"
     except Exception as e:
         print(f"✗ Policy validation error: {e}")
-        return False
+        assert False, f"Policy validation failed: {e}"
 
 def main():
     """Main test function."""
@@ -156,7 +177,7 @@ def main():
     
     # Check if template file exists
     import os
-    template_path = 'cloudformation/glue-data-replication.yaml'
+    template_path = 'infrastructure/cloudformation/glue-data-replication.yaml'
     if os.path.exists(template_path):
         print(f"✓ Template file exists: {template_path}")
     else:
@@ -169,7 +190,11 @@ def main():
     print("\n" + "=" * 50)
     
     # Test VPC endpoint policy
-    policy_valid = test_vpc_endpoint_policy()
+    try:
+        test_vpc_endpoint_policy()
+        policy_valid = True
+    except (AssertionError, Exception):
+        policy_valid = False
     
     print("\n" + "=" * 50)
     

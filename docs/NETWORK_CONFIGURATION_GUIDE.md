@@ -37,8 +37,8 @@ The network connectivity solution consists of several AWS components:
 │  │ Glue ENI      │  │                │  │ Glue ENI      │  │
 │  │ (Auto-created)│  │                │  │ (Auto-created)│  │
 │  └───────────────┘  │                │  └───────────────┘  │
-│          │           │                │          │           │
-│          ▼           │                │          ▼           │
+│          │          │                │          │          │
+│          ▼          │                │          ▼          │
 │  ┌───────────────┐  │                │  ┌───────────────┐  │
 │  │ Source DB     │  │                │  │ Target DB     │  │
 │  │ (Oracle/SQL/  │  │                │  │ (Oracle/SQL/  │  │

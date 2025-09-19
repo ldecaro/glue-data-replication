@@ -1,0 +1,150 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "cross-account-iceberg-target"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "oracle"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "iceberg"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "ENTERPRISE"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "hr"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "hr_analytics"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "employee_data"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "employees"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": "etl_service"
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": "oracle_password"
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": "jdbc:oracle:thin:@//oracle-enterprise.company.com:1521/ENTERPRISE"
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": "s3://my-drivers-bucket/ojdbc8.jar"
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetWarehouseLocation",
+    "ParameterValue": "s3://shared-hr-datalake/warehouse/"
+  },
+  {
+    "ParameterKey": "TargetCatalogId",
+    "ParameterValue": "987654321098"
+  },
+  {
+    "ParameterKey": "TargetFormatVersion",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://my-drivers-bucket/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "2880"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.2X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "4"
+  },
+  {
+    "ParameterKey": "SourceVpcId",
+    "ParameterValue": "vpc-oracle-prod"
+  },
+  {
+    "ParameterKey": "SourceSubnetIds",
+    "ParameterValue": "subnet-oracle-prod1,subnet-oracle-prod2"
+  },
+  {
+    "ParameterKey": "SourceSecurityGroupIds",
+    "ParameterValue": "sg-oracle-prod"
+  },
+  {
+    "ParameterKey": "CreateSourceGlueVpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "SourceAvailabilityZone",
+    "ParameterValue": "us-east-1a"
+  },
+  {
+    "ParameterKey": "CreateSourceS3VpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "CreateTargetS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "CreateTargetGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "ErrorLogRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  }
+]

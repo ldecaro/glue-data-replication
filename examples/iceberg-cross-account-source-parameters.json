@@ -1,0 +1,166 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "iceberg-cross-account-source-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "iceberg"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "redshift"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "shared_analytics"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "customer_insights"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "analytics"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "public"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "customer_insights_copy"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": "analytics_user"
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": "redshift_password"
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": "jdbc:redshift://redshift-cluster.company.com:5439/analytics"
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": "s3://my-drivers-bucket/redshift-jdbc42-2.1.0.9.jar"
+  },
+  {
+    "ParameterKey": "SourceWarehouseLocation",
+    "ParameterValue": "s3://shared-analytics-bucket/warehouse/"
+  },
+  {
+    "ParameterKey": "SourceCatalogId",
+    "ParameterValue": "123456789012"
+  },
+  {
+    "ParameterKey": "SourceFormatVersion",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://my-drivers-bucket/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "2880"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.2X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "6"
+  },
+  {
+    "ParameterKey": "SourceVpcId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceSubnetIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "SourceSecurityGroupIds",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "CreateSourceGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "SourceAvailabilityZone",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "CreateSourceS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "TargetVpcId",
+    "ParameterValue": "vpc-redshift123"
+  },
+  {
+    "ParameterKey": "TargetSubnetIds",
+    "ParameterValue": "subnet-redshift123,subnet-redshift456"
+  },
+  {
+    "ParameterKey": "TargetSecurityGroupIds",
+    "ParameterValue": "sg-redshift123"
+  },
+  {
+    "ParameterKey": "TargetAvailabilityZone",
+    "ParameterValue": "us-east-1c"
+  },
+  {
+    "ParameterKey": "CreateTargetS3VpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "CreateTargetGlueVpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "ErrorLogRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  }
+]

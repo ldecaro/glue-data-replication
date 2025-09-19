@@ -18,19 +18,32 @@ from datetime import datetime, timezone
 # Add the scripts directory to the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
 
-# Import the classes we want to test
-from glue_data_replication import (
+# Add src directory to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
+
+# Mock PySpark and AWS Glue imports for testing
+from unittest.mock import MagicMock
+mock_modules = [
+    'awsglue', 'awsglue.utils', 'awsglue.context', 'awsglue.job',
+    'pyspark', 'pyspark.context', 'pyspark.sql', 'pyspark.sql.types',
+    'pyspark.sql.functions'
+]
+
+for module in mock_modules:
+    sys.modules[module] = MagicMock()
+
+# Import the classes we want to test from new modular structure
+from glue_job.network import (
     NetworkConnectivityError,
     GlueConnectionError,
     VpcEndpointError,
     ENICreationError,
     NetworkErrorHandler,
-    ConnectionRetryHandler,
-    GlueConnectionManager,
-    NetworkConfig,
-    ConnectionConfig,
-    StructuredLogger
+    ConnectionRetryHandler
 )
+from glue_job.database import GlueConnectionManager
+from glue_job.config import NetworkConfig, ConnectionConfig
+from glue_job.monitoring import StructuredLogger
 
 
 class TestNetworkErrorHandling(unittest.TestCase):
@@ -137,7 +150,7 @@ class TestNetworkErrorHandling(unittest.TestCase):
         # Test network connectivity error classification
         network_error = Exception("connection refused by host")
         error_category = handler.error_classifier.classify_error(network_error)
-        self.assertIn(error_category, ['network_connectivity', 'connection_error'])
+        self.assertIn(error_category, ['network', 'connection'])
         
         # Test ENI creation error classification
         eni_error = Exception("eni creation failed due to insufficient capacity")

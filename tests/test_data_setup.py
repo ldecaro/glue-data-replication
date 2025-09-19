@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 @dataclass
-class TestDatasetConfig:
+class DatasetConfig:
     """Configuration for test dataset generation."""
     name: str
     row_count: int
@@ -39,7 +39,7 @@ class TestDatasetConfig:
     data_distribution: Dict[str, Any]  # Distribution parameters for data generation
 
 
-class TestDataGenerator:
+class DataGenerator:
     """Generates realistic test data for multiple database scenarios."""
     
     def __init__(self, seed: int = 42):
@@ -159,7 +159,7 @@ class TestDataGenerator:
                 'weight_kg': round(random.uniform(0.1, 50.0), 2),
                 'dimensions_cm': f"{random.randint(5, 100)}x{random.randint(5, 100)}x{random.randint(5, 100)}",
                 'color': random.choice(['Black', 'White', 'Red', 'Blue', 'Green', 'Yellow', 'Gray', 'Brown']),
-                'size': random.choice(['XS', 'S', 'M', 'L', 'XL', 'XXL']) if category == 'Clothing' else None,
+                'product_size': random.choice(['XS', 'S', 'M', 'L', 'XL', 'XXL']) if category == 'Clothing' else None,
                 'description': self.fake.text(max_nb_chars=500),
                 'features': self._generate_product_features(category),
                 'is_active': random.choice([True, False]),
@@ -465,7 +465,7 @@ class TestDataGenerator:
         return changes
 
 
-class TestDataExporter:
+class DataExporter:
     """Exports test data to various formats for different database engines."""
     
     def __init__(self, output_dir: str = 'test_data'):
@@ -574,7 +574,7 @@ def main():
     print("Generating comprehensive test data for end-to-end testing...")
     
     # Initialize generator
-    generator = TestDataGenerator(seed=42)
+    generator = DataGenerator(seed=42)
     
     # Generate datasets of different sizes
     datasets = {
@@ -583,7 +583,7 @@ def main():
         'large': {'customers': 10000, 'orders': 50000, 'products': 5000}
     }
     
-    exporter = TestDataExporter()
+    exporter = DataExporter()
     
     for dataset_name, counts in datasets.items():
         print(f"\nGenerating {dataset_name} dataset...")
