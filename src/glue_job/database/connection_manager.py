@@ -1723,6 +1723,7 @@ class UnifiedConnectionManager:
                 raise ValueError(f"Iceberg configuration missing for connection")
             
             self.structured_logger.info(
+                "Configuring Iceberg connection",
                 warehouse_location=connection_iceberg_config.get('warehouse_location', ''),
                 catalog_id=connection_iceberg_config.get('catalog_id', None)
             )
