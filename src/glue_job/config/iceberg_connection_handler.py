@@ -128,14 +128,24 @@ class IcebergConnectionHandler:
             # Core Iceberg configuration
             # Note: spark.sql.extensions must be set as a Glue job parameter, not dynamically
             # It should be set to: org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+            
+            logger.info(f"Setting Iceberg catalog configuration for: {self.catalog_name}")
+            
             spark_conf.set(f"spark.sql.catalog.{self.catalog_name}", 
                           "org.apache.iceberg.spark.SparkCatalog")
+            logger.info(f"Set catalog class: spark.sql.catalog.{self.catalog_name}=org.apache.iceberg.spark.SparkCatalog")
+            
             spark_conf.set(f"spark.sql.catalog.{self.catalog_name}.catalog-impl", 
                           "org.apache.iceberg.aws.glue.GlueCatalog")
+            logger.info(f"Set catalog implementation: catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog")
+            
             spark_conf.set(f"spark.sql.catalog.{self.catalog_name}.io-impl", 
                           "org.apache.iceberg.aws.s3.S3FileIO")
+            logger.info(f"Set IO implementation: io-impl=org.apache.iceberg.aws.s3.S3FileIO")
+            
             spark_conf.set(f"spark.sql.catalog.{self.catalog_name}.warehouse", 
                           warehouse_location)
+            logger.info(f"Set warehouse location: warehouse={warehouse_location}")
             
             # Set catalog ID for cross-account access if provided
             if catalog_id:
@@ -147,6 +157,18 @@ class IcebergConnectionHandler:
             # --conf spark.serializer=org.apache.spark.serializer.KryoSerializer
             # --conf spark.sql.adaptive.enabled=true
             # --conf spark.sql.adaptive.coalescePartitions.enabled=true
+            
+            # Test catalog configuration by attempting to list databases
+            try:
+                logger.info(f"Testing Iceberg catalog configuration by listing databases")
+                test_sql = f"SHOW DATABASES IN {self.catalog_name}"
+                logger.info(f"Executing test SQL: {test_sql}")
+                result = self.spark.sql(test_sql)
+                databases = [row.databaseName for row in result.collect()]
+                logger.info(f"Successfully tested catalog configuration. Found databases: {databases}")
+            except Exception as test_error:
+                logger.warning(f"Catalog test failed, but continuing: {str(test_error)}")
+                # Don't fail the configuration, just log the warning
             
             self._configured_warehouses.add(warehouse_key)
             logger.info("Successfully configured Iceberg catalog")
@@ -189,6 +211,61 @@ class IcebergConnectionHandler:
             
         except Exception as e:
             logger.warning(f"Failed to validate Spark Iceberg configuration: {str(e)}")
+            # Don't fail the operation, just log the warning
+    
+    def _validate_catalog_configuration(self) -> None:
+        """Validate that the Iceberg catalog is properly configured and accessible.
+        
+        Raises:
+            IcebergConnectionError: If catalog configuration is invalid
+        """
+        try:
+            logger.info(f"Validating Iceberg catalog configuration for: {self.catalog_name}")
+            
+            # Check if catalog is configured in Spark
+            spark_conf = self.spark.conf
+            catalog_class = spark_conf.get(f"spark.sql.catalog.{self.catalog_name}", "")
+            
+            if not catalog_class:
+                raise IcebergConnectionError(
+                    f"Iceberg catalog '{self.catalog_name}' is not configured in Spark session. "
+                    f"Expected configuration: spark.sql.catalog.{self.catalog_name}=org.apache.iceberg.spark.SparkCatalog"
+                )
+            
+            logger.info(f"Catalog class configured: {catalog_class}")
+            
+            # Log all catalog-related configurations for debugging
+            catalog_configs = {}
+            for key in ["catalog-impl", "io-impl", "warehouse", "glue.id"]:
+                config_key = f"spark.sql.catalog.{self.catalog_name}.{key}"
+                config_value = spark_conf.get(config_key, "")
+                catalog_configs[key] = config_value
+                logger.info(f"Catalog config {key}: {config_value}")
+            
+            # Validate essential configurations
+            if not catalog_configs.get("catalog-impl"):
+                logger.warning(f"Missing catalog-impl configuration for {self.catalog_name}")
+            
+            if not catalog_configs.get("warehouse"):
+                logger.warning(f"Missing warehouse configuration for {self.catalog_name}")
+            
+            # Test basic catalog functionality
+            try:
+                logger.info(f"Testing catalog functionality by checking if catalog exists")
+                test_sql = f"DESCRIBE CATALOG {self.catalog_name}"
+                logger.info(f"Executing catalog test SQL: {test_sql}")
+                result = self.spark.sql(test_sql)
+                catalog_info = result.collect()
+                logger.info(f"Catalog test successful. Catalog info: {[row.asDict() for row in catalog_info]}")
+            except Exception as catalog_test_error:
+                logger.warning(f"Catalog functionality test failed: {str(catalog_test_error)}")
+                logger.warning(f"This may indicate catalog configuration issues")
+                # Don't fail here, continue with table creation attempt
+            
+        except IcebergConnectionError:
+            raise
+        except Exception as e:
+            logger.warning(f"Catalog validation failed with unexpected error: {str(e)}")
             # Don't fail the operation, just log the warning
     
     def _ensure_database_exists(self, database: str, catalog_id: Optional[str] = None) -> None:
@@ -965,6 +1042,9 @@ class IcebergConnectionHandler:
             full_table_name = f"{self.catalog_name}.{database}.{table}"
             logger.info(f"Creating table with full name: {full_table_name}")
             
+            # Validate Spark configuration before attempting table creation
+            self._validate_catalog_configuration()
+            
             # Try multiple approaches for table creation
             creation_successful = False
             
@@ -985,6 +1065,8 @@ class IcebergConnectionHandler:
                 
             except Exception as writeto_error:
                 logger.warning(f"writeTo API failed for {database}.{table}: {str(writeto_error)}")
+                logger.warning(f"writeTo error type: {type(writeto_error).__name__}")
+                logger.warning(f"writeTo error details: {str(writeto_error)}")
                 
                 # Approach 2: Use CREATE TABLE AS SELECT with LIMIT 0
                 try:

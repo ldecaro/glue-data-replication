@@ -98,6 +98,73 @@ def setup_glue_context(args: Dict[str, Any]) -> Tuple[GlueContext, Job]:
         raise RuntimeError(f"Glue context initialization failed: {str(e)}")
 
 
+def _validate_iceberg_configuration(spark: SparkSession, config: JobConfig) -> None:
+    """
+    Validate Iceberg configuration early to catch common issues.
+    
+    Args:
+        spark: Spark session
+        config: Job configuration
+        
+    Raises:
+        RuntimeError: If Iceberg configuration is invalid
+    """
+    # Check if any engine is Iceberg
+    source_is_iceberg = DatabaseEngineManager.is_iceberg_engine(config.source_connection.engine_type)
+    target_is_iceberg = DatabaseEngineManager.is_iceberg_engine(config.target_connection.engine_type)
+    
+    if not (source_is_iceberg or target_is_iceberg):
+        return  # No Iceberg engines, skip validation
+    
+    logger.info("Validating Iceberg configuration...")
+    
+    try:
+        spark_conf = spark.conf
+        
+        # Check essential Spark extensions
+        extensions = spark_conf.get("spark.sql.extensions", "")
+        if "IcebergSparkSessionExtensions" not in extensions:
+            error_msg = (
+                "Iceberg Spark extensions not configured. "
+                "Expected: org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions. "
+                "This will cause 'Couldn't find a catalog to handle the identifier' errors."
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        
+        # Check catalog configuration
+        catalog_name = "glue_catalog"
+        catalog_class = spark_conf.get(f"spark.sql.catalog.{catalog_name}", "")
+        if not catalog_class:
+            logger.warning(
+                f"Iceberg catalog '{catalog_name}' not configured in Spark session. "
+                f"Expected: spark.sql.catalog.{catalog_name}=org.apache.iceberg.spark.SparkCatalog. "
+                f"The job will attempt to configure it dynamically."
+            )
+            # Don't fail here - let the connection handler configure it dynamically
+        else:
+            logger.info(f"✓ Iceberg catalog '{catalog_name}' is configured: {catalog_class}")
+        
+        # Validate warehouse locations
+        if source_is_iceberg:
+            source_config = config.source_connection.get_iceberg_config()
+            if not source_config or not source_config.get('warehouse_location'):
+                raise RuntimeError("Source Iceberg engine missing warehouse_location configuration")
+        
+        if target_is_iceberg:
+            target_config = config.target_connection.get_iceberg_config()
+            if not target_config or not target_config.get('warehouse_location'):
+                raise RuntimeError("Target Iceberg engine missing warehouse_location configuration")
+        
+        logger.info("✓ Iceberg configuration validation passed")
+        
+    except Exception as e:
+        logger.error(f"Iceberg configuration validation failed: {str(e)}")
+        logger.error("This will likely cause table creation failures")
+        logger.error("Please check your CloudFormation parameters and Glue job configuration")
+        raise
+
+
 def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> None:
     """
     Execute the complete migration workflow with Iceberg engine support.
@@ -115,6 +182,9 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
     # Log engine types for debugging and monitoring
     logger.info(f"Source engine: {config.source_connection.engine_type}")
     logger.info(f"Target engine: {config.target_connection.engine_type}")
+    
+    # Validate Iceberg configuration early if using Iceberg engines
+    _validate_iceberg_configuration(spark, config)
     
     # Check if either source or target is Iceberg for engine-aware processing
     source_is_iceberg = DatabaseEngineManager.is_iceberg_engine(config.source_connection.engine_type)
