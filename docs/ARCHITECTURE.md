@@ -225,11 +225,80 @@ class JobBookmarkManager:
 
 ### Database Layer
 
-#### JdbcConnectionManager
-**Purpose**: Manage JDBC connections to source and target databases
+#### UnifiedConnectionManager (Enhanced)
+**Purpose**: Orchestrate connection creation using appropriate strategy based on configuration
 
 **Key Responsibilities**:
-- Create and validate JDBC connections
+- Determine connection strategy based on engine type and Glue configuration
+- Route connection creation to appropriate manager (Glue Connection vs Direct JDBC)
+- Maintain backward compatibility with existing JDBC connections
+- Handle mixed connection scenarios (source uses Glue, target uses direct JDBC)
+
+**Architecture Pattern**: Strategy Pattern with Factory Method
+```python
+class UnifiedConnectionManager:
+    def __init__(self, glue_context: GlueContext):
+        self.glue_context = glue_context
+        self.glue_connection_manager = GlueConnectionManager(glue_context)
+        self.jdbc_connection_manager = JdbcConnectionManager(glue_context)
+        self.iceberg_connection_handler = IcebergConnectionHandler(glue_context)
+    
+    def _determine_connection_strategy(self, connection_config: ConnectionConfig) -> str:
+        """Determine connection strategy based on engine type and Glue config"""
+        if self.is_iceberg_engine(connection_config.engine_type):
+            return "iceberg"
+        elif connection_config.uses_glue_connection():
+            return connection_config.get_glue_connection_strategy()
+        else:
+            return "direct_jdbc"
+            
+    def create_connection(self, connection_config: ConnectionConfig) -> Any:
+        """Enhanced connection creation with Glue Connection support"""
+        strategy = self._determine_connection_strategy(connection_config)
+        
+        if strategy == "iceberg":
+            return self.iceberg_connection_handler.create_connection(connection_config)
+        elif strategy in ["create_glue", "use_glue"]:
+            return self.glue_connection_manager.setup_jdbc_with_glue_connection_strategy(connection_config)
+        else:
+            return self.jdbc_connection_manager.create_connection(connection_config)
+```
+
+#### GlueConnectionManager (Enhanced)
+**Purpose**: Manage AWS Glue Connections for JDBC databases
+
+**Key Responsibilities**:
+- Create new AWS Glue Connections from JDBC parameters
+- Validate and use existing AWS Glue Connections
+- Handle Glue Connection-specific error scenarios
+- Integrate with existing JDBC connection setup
+- Implement retry logic for Glue API operations
+
+**Architecture Pattern**: Facade Pattern with Circuit Breaker
+```python
+class GlueConnectionManager:
+    def __init__(self, glue_context: GlueContext):
+        self.glue_context = glue_context
+        self.glue_client = boto3.client('glue')
+        self.circuit_breaker = CircuitBreaker()
+        self.retry_handler = GlueConnectionRetryHandler()
+    
+    def create_glue_connection(self, connection_config: ConnectionConfig, 
+                             connection_name: str) -> str:
+        """Create a new Glue Connection from JDBC parameters"""
+        
+    def validate_glue_connection_exists(self, connection_name: str) -> bool:
+        """Validate that a Glue Connection exists"""
+        
+    def setup_jdbc_with_glue_connection_strategy(self, connection_config: ConnectionConfig) -> DataFrame:
+        """Setup JDBC using the appropriate Glue Connection strategy"""
+```
+
+#### JdbcConnectionManager
+**Purpose**: Manage direct JDBC connections to source and target databases (existing functionality)
+
+**Key Responsibilities**:
+- Create and validate direct JDBC connections
 - Handle connection pooling and lifecycle
 - Implement connection retry logic
 - Support multiple database engines
@@ -275,6 +344,555 @@ class DataMigrator:
                          target_config: ConnectionConfig) -> ProcessingMetrics:
         """Abstract method implemented by subclasses"""
         raise NotImplementedError
+```
+
+### Glue Connection Architecture
+
+#### Connection Strategy Decision Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Parameter Processing                          │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  Parse Glue Connection Parameters                       │    │
+│  │  - createSourceConnection/createTargetConnection        │    │
+│  │  - useSourceConnection/useTargetConnection              │    │
+│  │  - Validate mutual exclusivity                          │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  Connection Strategy Determination               │
+│                                                                 │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐  │
+│  │   Iceberg   │    │    JDBC     │    │   JDBC + Glue       │  │
+│  │   Engine    │    │   Engine    │    │   Connection        │  │
+│  │             │    │             │    │   Parameters        │  │
+│  └─────────────┘    └─────────────┘    └─────────────────────┘  │
+│         │                   │                       │           │
+│         ▼                   ▼                       ▼           │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐  │
+│  │  Existing   │    │   Direct    │    │   Glue Connection   │  │
+│  │  Iceberg    │    │    JDBC     │    │   Strategy          │  │
+│  │ Mechanism   │    │ Connection  │    │                     │  │
+│  └─────────────┘    └─────────────┘    └─────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  Glue Connection Strategy Routing               │
+│                                                                 │
+│  ┌─────────────────────┐              ┌─────────────────────┐   │
+│  │  createConnection   │              │  useConnection      │   │
+│  │      = true         │              │      = name         │   │
+│  └─────────────────────┘              └─────────────────────┘   │
+│           │                                      │               │
+│           ▼                                      ▼               │
+│  ┌─────────────────────┐              ┌─────────────────────┐   │
+│  │  Create New Glue    │              │  Use Existing Glue  │   │
+│  │  Connection with    │              │  Connection         │   │
+│  │  Secrets Manager    │              │                     │   │
+│  └─────────────────────┘              └─────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Database Connection Execution                 │
+│                                                                 │
+│  All strategies converge to standard JDBC DataFrame creation    │
+│  using Glue Context with appropriate connection properties      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### AWS Secrets Manager Integration Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Glue Connection Creation Flow                   │
+│                                                                 │
+│  ┌─────────────────────┐              ┌─────────────────────┐   │
+│  │  Extract JDBC       │              │  Validate IAM       │   │
+│  │  Parameters from    │─────────────▶│  Permissions for    │   │
+│  │  ConnectionConfig   │              │  Secrets Manager    │   │
+│  └─────────────────────┘              └─────────────────────┘   │
+│                                                 │               │
+│                                                 ▼               │
+│  ┌─────────────────────┐              ┌─────────────────────┐   │
+│  │  Create AWS         │◀─────────────│  Generate Unique    │   │
+│  │  Secrets Manager    │              │  Secret Name        │   │
+│  │  Secret             │              │  /aws-glue/{name}   │   │
+│  └─────────────────────┘              └─────────────────────┘   │
+│           │                                      │               │
+│           ▼                                      ▼               │
+│  ┌─────────────────────┐              ┌─────────────────────┐   │
+│  │  Store Credentials  │              │  Create Glue        │   │
+│  │  in JSON Format:    │─────────────▶│  Connection with    │   │
+│  │  {username, password}│              │  Secret Reference   │   │
+│  └─────────────────────┘              └─────────────────────┘   │
+│                                                 │               │
+│                                                 ▼               │
+│  ┌─────────────────────┐              ┌─────────────────────┐   │
+│  │  Cleanup Secret     │◀─────────────│  Validate Connection│   │
+│  │  on Failure         │   (if fails) │  Creation Success   │   │
+│  └─────────────────────┘              └─────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Glue Connection Configuration Architecture
+
+**Enhanced ConnectionConfig Data Model**:
+```python
+@dataclass
+class GlueConnectionConfig:
+    """Configuration for Glue Connection operations"""
+    create_connection: bool = False
+    use_existing_connection: Optional[str] = None
+    
+    @property
+    def connection_strategy(self) -> str:
+        if self.create_connection:
+            return "create_glue"
+        elif self.use_existing_connection:
+            return "use_glue"
+        else:
+            return "direct_jdbc"
+    
+    def validate(self) -> None:
+        """Validate Glue Connection configuration"""
+        if self.create_connection and self.use_existing_connection:
+            raise ValueError("Cannot both create and use existing Glue Connection")
+
+@dataclass 
+class ConnectionConfig:
+    # Existing fields...
+    glue_connection_config: Optional[GlueConnectionConfig] = None
+    
+    def uses_glue_connection(self) -> bool:
+        """Check if this connection uses Glue Connection"""
+        return (self.glue_connection_config is not None and 
+                self.glue_connection_config.connection_strategy != "direct_jdbc")
+        
+    def get_glue_connection_strategy(self) -> str:
+        """Get the Glue Connection strategy"""
+        if self.glue_connection_config:
+            return self.glue_connection_config.connection_strategy
+        return "direct_jdbc"
+```
+
+#### Glue Connection Creation Architecture with Secrets Manager
+
+**Enhanced Connection Creation Flow**:
+```python
+def create_glue_connection(self, connection_config: ConnectionConfig, 
+                         connection_name: str) -> str:
+    """
+    Creates a Glue Connection with AWS Secrets Manager integration:
+    
+    1. Validate Secrets Manager IAM permissions
+    2. Extract JDBC parameters from ConnectionConfig
+    3. Create AWS Secrets Manager secret with credentials
+    4. Build Glue Connection properties with secret reference
+    5. Create connection via AWS Glue API
+    6. Validate connection creation success
+    7. Cleanup secret if connection creation fails
+    8. Return connection name for subsequent use
+    """
+    
+    # Step 1: Validate Secrets Manager permissions
+    self.secrets_manager_handler.validate_secret_permissions()
+    
+    # Step 2: Create secret with database credentials
+    secret_name = f"/aws-glue/{connection_name}"
+    secret_arn = self.secrets_manager_handler.create_secret(
+        secret_name=secret_name,
+        username=connection_config.username,
+        password=connection_config.password
+    )
+    
+    try:
+        # Step 3: Build Glue Connection properties with secret reference
+        connection_properties = {
+            'JDBC_CONNECTION_URL': connection_config.connection_string,
+            'SECRET_ID': secret_arn,  # Reference to Secrets Manager secret
+            'JDBC_ENFORCE_SSL': 'true'
+        }
+        
+        # Add network configuration if available
+        physical_requirements = {}
+        if connection_config.network_config:
+            physical_requirements = {
+                'SubnetId': connection_config.network_config.subnet_id,
+                'SecurityGroupIdList': connection_config.network_config.security_groups,
+                'AvailabilityZone': connection_config.network_config.availability_zone
+            }
+        
+        # Step 4: Create Glue Connection
+        response = self.glue_client.create_connection(
+            ConnectionInput={
+                'Name': connection_name,
+                'ConnectionType': 'JDBC',
+                'ConnectionProperties': connection_properties,
+                'PhysicalConnectionRequirements': physical_requirements
+            }
+        )
+        
+        return connection_name
+        
+    except Exception as e:
+        # Step 5: Cleanup secret on failure
+        try:
+            self.secrets_manager_handler.delete_secret(secret_name)
+        except Exception as cleanup_error:
+            self.logger.error(f"Failed to cleanup secret {secret_name}: {cleanup_error}")
+        
+        raise GlueConnectionCreationError(connection_name, str(e))
+```
+
+#### AWS Secrets Manager Handler Architecture
+
+**SecretsManagerHandler Implementation**:
+```python
+class SecretsManagerHandler:
+    """
+    Architecture pattern: Facade Pattern with Circuit Breaker and Retry Logic
+    """
+    
+    def __init__(self, region_name: str):
+        self.region_name = region_name
+        self.secrets_client = boto3.client('secretsmanager', region_name=region_name)
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=3,
+            timeout=60,
+            expected_exception=SecretsManagerError
+        )
+        self.retry_handler = SecretsManagerRetryHandler()
+    
+    def create_secret(self, secret_name: str, username: str, password: str) -> str:
+        """
+        Create AWS Secrets Manager secret with database credentials
+        
+        Architecture:
+        1. Generate unique secret name with timestamp
+        2. Create secret value in JSON format
+        3. Execute creation with circuit breaker protection
+        4. Return secret ARN for Glue Connection reference
+        """
+        
+        # Generate timestamped secret name to avoid conflicts
+        timestamped_name = f"{secret_name}-{int(time.time())}"
+        
+        # Create secret value in required JSON format
+        secret_value = {
+            "username": username,
+            "password": password
+        }
+        
+        # Execute with circuit breaker and retry logic
+        def create_operation():
+            response = self.secrets_client.create_secret(
+                Name=timestamped_name,
+                Description=f"Database credentials for Glue Connection",
+                SecretString=json.dumps(secret_value),
+                Tags=[
+                    {
+                        'Key': 'CreatedBy',
+                        'Value': 'GlueDataReplication'
+                    },
+                    {
+                        'Key': 'Purpose',
+                        'Value': 'GlueConnection'
+                    }
+                ]
+            )
+            return response['ARN']
+        
+        try:
+            return self.circuit_breaker.call(
+                lambda: self.retry_handler.execute_with_retry(
+                    create_operation, 
+                    "create_secret"
+                )
+            )
+        except Exception as e:
+            raise SecretCreationError(f"Failed to create secret {timestamped_name}: {str(e)}")
+    
+    def validate_secret_permissions(self) -> bool:
+        """
+        Validate IAM permissions for Secrets Manager operations
+        
+        Architecture:
+        1. Test permissions with dry-run operations
+        2. Validate required actions: CreateSecret, GetSecretValue, DeleteSecret
+        3. Return validation result with detailed error information
+        """
+        
+        required_actions = [
+            'secretsmanager:CreateSecret',
+            'secretsmanager:GetSecretValue', 
+            'secretsmanager:DescribeSecret',
+            'secretsmanager:DeleteSecret'
+        ]
+        
+        try:
+            # Test with a dummy secret name to validate permissions
+            test_secret_name = f"/aws-glue/permission-test-{int(time.time())}"
+            
+            # This will fail if permissions are insufficient
+            self.secrets_client.describe_secret(SecretId=test_secret_name)
+            
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            
+            if error_code == 'ResourceNotFoundException':
+                # Expected - secret doesn't exist, but we have permissions
+                return True
+            elif error_code in ['AccessDenied', 'UnauthorizedOperation']:
+                raise SecretsManagerPermissionError(
+                    f"Insufficient IAM permissions for Secrets Manager. Required actions: {required_actions}"
+                )
+            else:
+                # Other errors indicate permission or service issues
+                raise SecretsManagerError(f"Secrets Manager validation failed: {str(e)}")
+        
+        return True
+    
+    def delete_secret(self, secret_name: str, force_delete: bool = True) -> bool:
+        """
+        Delete AWS Secrets Manager secret with optional force delete
+        
+        Architecture:
+        1. Execute deletion with circuit breaker protection
+        2. Support immediate deletion (force_delete=True) for cleanup scenarios
+        3. Handle deletion errors gracefully for cleanup operations
+        """
+        
+        def delete_operation():
+            response = self.secrets_client.delete_secret(
+                SecretId=secret_name,
+                ForceDeleteWithoutRecovery=force_delete
+            )
+            return response['DeletionDate'] is not None
+        
+        try:
+            return self.circuit_breaker.call(
+                lambda: self.retry_handler.execute_with_retry(
+                    delete_operation,
+                    "delete_secret"
+                )
+            )
+        except ClientError as e:
+            error_code = e.response['Error']['Code']
+            
+            if error_code == 'ResourceNotFoundException':
+                # Secret already deleted or doesn't exist
+                return True
+            else:
+                self.logger.warning(f"Failed to delete secret {secret_name}: {str(e)}")
+                return False
+        except Exception as e:
+            self.logger.warning(f"Failed to delete secret {secret_name}: {str(e)}")
+            return False
+```
+
+#### Secrets Manager Error Handling Architecture
+
+**Error Hierarchy and Handling**:
+```python
+class SecretsManagerError(Exception):
+    """Base exception for Secrets Manager operations"""
+    pass
+
+class SecretCreationError(SecretsManagerError):
+    """Raised when secret creation fails"""
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(f"Secret creation failed: {message}")
+
+class SecretsManagerPermissionError(SecretsManagerError):
+    """Raised when IAM permissions are insufficient"""
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(f"Secrets Manager permission error: {message}")
+
+class SecretsManagerRetryHandler:
+    """
+    Architecture pattern: Exponential Backoff with Jitter
+    """
+    
+    def __init__(self):
+        self.max_attempts = 3
+        self.base_delay = 1.0
+        self.max_delay = 30.0
+        self.backoff_factor = 2.0
+        self.jitter_factor = 0.1
+    
+    def execute_with_retry(self, operation: Callable, operation_name: str):
+        """Execute Secrets Manager operation with retry logic"""
+        
+        for attempt in range(self.max_attempts):
+            try:
+                return operation()
+                
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                
+                # Determine if error is retryable
+                if error_code in ['Throttling', 'ServiceUnavailable', 'InternalFailure']:
+                    if attempt < self.max_attempts - 1:
+                        delay = self._calculate_backoff_delay(attempt)
+                        time.sleep(delay)
+                        continue
+                
+                # Non-retryable error or max attempts reached
+                raise SecretsManagerError(f"{operation_name} failed: {str(e)}")
+                
+            except Exception as e:
+                # Unexpected error - don't retry
+                raise SecretsManagerError(f"{operation_name} failed: {str(e)}")
+    
+    def _calculate_backoff_delay(self, attempt: int) -> float:
+        """Calculate exponential backoff delay with jitter"""
+        delay = min(
+            self.base_delay * (self.backoff_factor ** attempt),
+            self.max_delay
+        )
+        
+        # Add jitter to prevent thundering herd
+        jitter = delay * self.jitter_factor * random.random()
+        return delay + jitter
+```
+
+#### Error Handling Architecture for Glue Connections
+
+**Glue Connection Error Hierarchy**:
+```python
+class GlueConnectionError(Exception):
+    """Base exception for Glue Connection operations"""
+    pass
+
+class GlueConnectionCreationError(GlueConnectionError):
+    """Raised when Glue Connection creation fails"""
+    def __init__(self, connection_name: str, reason: str):
+        self.connection_name = connection_name
+        self.reason = reason
+        super().__init__(f"Failed to create Glue Connection '{connection_name}': {reason}")
+
+class GlueConnectionNotFoundError(GlueConnectionError):
+    """Raised when specified Glue Connection doesn't exist"""
+    def __init__(self, connection_name: str):
+        self.connection_name = connection_name
+        super().__init__(f"Glue Connection '{connection_name}' not found")
+
+class GlueConnectionValidationError(GlueConnectionError):
+    """Raised when Glue Connection validation fails"""
+    def __init__(self, connection_name: str, validation_error: str):
+        self.connection_name = connection_name
+        self.validation_error = validation_error
+        super().__init__(f"Glue Connection '{connection_name}' validation failed: {validation_error}")
+```
+
+**Circuit Breaker Pattern for Glue API Operations**:
+```python
+class GlueConnectionRetryHandler:
+    def __init__(self):
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=3,
+            timeout=60,
+            expected_exception=GlueConnectionError
+        )
+        self.retry_config = {
+            'max_attempts': 3,
+            'backoff_factor': 2.0,
+            'base_delay': 1.0
+        }
+    
+    def execute_with_retry(self, operation: Callable, operation_name: str):
+        """Execute Glue Connection operation with circuit breaker and retry logic"""
+        return self.circuit_breaker.call(
+            lambda: self._retry_operation(operation, operation_name)
+        )
+    
+    def _retry_operation(self, operation: Callable, operation_name: str):
+        """Internal retry logic for Glue Connection operations"""
+        for attempt in range(self.retry_config['max_attempts']):
+            try:
+                return operation()
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                
+                if error_code in ['Throttling', 'ServiceUnavailable', 'InternalFailure']:
+                    if attempt < self.retry_config['max_attempts'] - 1:
+                        delay = self._calculate_backoff_delay(attempt)
+                        time.sleep(delay)
+                        continue
+                
+                # Non-retryable error or max attempts reached
+                raise GlueConnectionError(f"{operation_name} failed: {str(e)}")
+            except Exception as e:
+                raise GlueConnectionError(f"{operation_name} failed: {str(e)}")
+```
+
+#### Backward Compatibility Architecture
+
+**Compatibility Guarantees**:
+```python
+class BackwardCompatibilityManager:
+    """Ensures backward compatibility with existing JDBC connections"""
+    
+    def __init__(self):
+        self.compatibility_checks = [
+            self._check_parameter_compatibility,
+            self._check_iceberg_compatibility,
+            self._check_existing_job_compatibility
+        ]
+    
+    def validate_compatibility(self, job_config: JobConfig) -> CompatibilityReport:
+        """Validate that Glue Connection enhancements maintain compatibility"""
+        report = CompatibilityReport()
+        
+        for check in self.compatibility_checks:
+            check_result = check(job_config)
+            report.add_check_result(check_result)
+        
+        return report
+    
+    def _check_parameter_compatibility(self, job_config: JobConfig) -> CheckResult:
+        """Ensure existing parameter files continue to work"""
+        # When no Glue Connection parameters are provided, 
+        # system should default to existing direct JDBC behavior
+        
+        for connection_config in [job_config.source_config, job_config.target_config]:
+            if not connection_config.uses_glue_connection():
+                # Verify all required JDBC parameters are present
+                required_params = ['connection_string', 'username', 'password']
+                missing_params = [p for p in required_params 
+                                if not hasattr(connection_config, p) or 
+                                getattr(connection_config, p) is None]
+                
+                if missing_params:
+                    return CheckResult(
+                        status='FAIL',
+                        message=f"Missing required JDBC parameters: {missing_params}"
+                    )
+        
+        return CheckResult(status='PASS', message="Parameter compatibility maintained")
+    
+    def _check_iceberg_compatibility(self, job_config: JobConfig) -> CheckResult:
+        """Ensure Iceberg connections remain unchanged"""
+        # Iceberg connections should ignore Glue Connection parameters
+        # and continue using existing connection mechanism
+        
+        for connection_config in [job_config.source_config, job_config.target_config]:
+            if connection_config.engine_type == 'iceberg':
+                if connection_config.uses_glue_connection():
+                    # This should log a warning but not fail
+                    return CheckResult(
+                        status='WARNING',
+                        message="Glue Connection parameters ignored for Iceberg engine"
+                    )
+        
+        return CheckResult(status='PASS', message="Iceberg compatibility maintained")
 ```
 
 ### Monitoring Layer
@@ -983,7 +1601,7 @@ class CloudWatchDashboard:
 
 ### IAM Permissions Model
 
-#### Minimum Required Permissions
+#### Enhanced Permissions for Glue Connections and Secrets Manager
 ```json
 {
   "Version": "2012-10-17",
@@ -1026,12 +1644,116 @@ class CloudWatchDashboard:
           "cloudwatch:namespace": "GlueJob"
         }
       }
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "glue:CreateConnection",
+        "glue:GetConnection",
+        "glue:GetConnections",
+        "glue:UpdateConnection",
+        "glue:DeleteConnection"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:UpdateSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:/aws-glue/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey",
+        "kms:CreateGrant"
+      ],
+      "Resource": "arn:aws:kms:*:*:key/*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": [
+            "secretsmanager.*.amazonaws.com",
+            "glue.*.amazonaws.com"
+          ]
+        }
+      }
     }
   ]
 }
 ```
 
-#### Data Encryption Strategy
+#### Secrets Manager Security Architecture
+
+**Encryption and Access Control**:
+```python
+class SecretsManagerSecurityManager:
+    """
+    Architecture pattern: Defense in Depth with Least Privilege Access
+    """
+    
+    def __init__(self, kms_key_id: Optional[str] = None):
+        self.kms_key_id = kms_key_id
+        self.encryption_config = self._build_encryption_config()
+        self.access_policy = self._build_access_policy()
+    
+    def _build_encryption_config(self) -> Dict[str, Any]:
+        """
+        Configure encryption for Secrets Manager secrets
+        
+        Security Architecture:
+        1. Use customer-managed KMS key if provided
+        2. Fall back to AWS-managed key for Secrets Manager
+        3. Enable automatic key rotation
+        4. Configure cross-service access policies
+        """
+        
+        if self.kms_key_id:
+            return {
+                'KmsKeyId': self.kms_key_id,
+                'EncryptionType': 'KMS_CUSTOMER_MANAGED'
+            }
+        else:
+            return {
+                'EncryptionType': 'KMS_AWS_MANAGED'
+            }
+    
+    def create_secure_secret(self, secret_name: str, secret_value: Dict[str, str]) -> str:
+        """
+        Create secret with enhanced security configuration
+        
+        Security Features:
+        1. Automatic encryption with KMS
+        2. Resource tagging for access control
+        3. Audit trail configuration
+        4. Automatic rotation setup (optional)
+        """
+        
+        create_params = {
+            'Name': secret_name,
+            'Description': 'Database credentials for AWS Glue Connection',
+            'SecretString': json.dumps(secret_value),
+            'Tags': [
+                {'Key': 'CreatedBy', 'Value': 'GlueDataReplication'},
+                {'Key': 'Purpose', 'Value': 'GlueConnection'},
+                {'Key': 'Environment', 'Value': os.getenv('ENVIRONMENT', 'dev')},
+                {'Key': 'CreatedAt', 'Value': datetime.utcnow().isoformat()}
+            ]
+        }
+        
+        # Add KMS encryption if configured
+        if self.kms_key_id:
+            create_params['KmsKeyId'] = self.kms_key_id
+        
+        return self.secrets_client.create_secret(**create_params)['ARN']
+```
+
+#### Data Encryption Strategy (Enhanced)
 ```python
 class EncryptionManager:
     def __init__(self):
@@ -1039,6 +1761,7 @@ class EncryptionManager:
             'ServerSideEncryption': 'AES256'
         }
         self.kms_key_id = os.getenv('KMS_KEY_ID')
+        self.secrets_encryption = self._configure_secrets_encryption()
     
     def get_s3_encryption_config(self) -> Dict[str, str]:
         """Get S3 encryption configuration"""
@@ -1048,11 +1771,20 @@ class EncryptionManager:
                 'SSEKMSKeyId': self.kms_key_id
             }
         return self.s3_encryption
+    
+    def _configure_secrets_encryption(self) -> Dict[str, Any]:
+        """Configure encryption for Secrets Manager"""
+        return {
+            'encryption_at_rest': True,
+            'encryption_in_transit': True,
+            'kms_key_id': self.kms_key_id,
+            'automatic_rotation': False  # Can be enabled per secret
+        }
 ```
 
 ### Network Security
 
-#### VPC Endpoint Configuration
+#### Enhanced VPC Endpoint Configuration for Glue Connections
 ```python
 class NetworkSecurityManager:
     def __init__(self):
@@ -1064,13 +1796,190 @@ class NetworkSecurityManager:
             'cloudwatch': {
                 'service_name': 'com.amazonaws.region.monitoring',
                 'vpc_endpoint_type': 'Interface'
+            },
+            'secretsmanager': {
+                'service_name': 'com.amazonaws.region.secretsmanager',
+                'vpc_endpoint_type': 'Interface',
+                'policy': {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": "*",
+                            "Action": [
+                                "secretsmanager:GetSecretValue",
+                                "secretsmanager:DescribeSecret"
+                            ],
+                            "Resource": "arn:aws:secretsmanager:*:*:secret:/aws-glue/*"
+                        }
+                    ]
+                }
+            },
+            'glue': {
+                'service_name': 'com.amazonaws.region.glue',
+                'vpc_endpoint_type': 'Interface',
+                'policy': {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": "*",
+                            "Action": [
+                                "glue:GetConnection",
+                                "glue:GetConnections"
+                            ],
+                            "Resource": "*"
+                        }
+                    ]
+                }
             }
         }
     
     def validate_network_connectivity(self) -> NetworkStatus:
         """Validate network connectivity to required services"""
-        # Implementation for network validation
+        # Implementation for network validation including Glue and Secrets Manager
         pass
+```
+
+#### Security Group Configuration for Glue Connections
+```python
+class GlueConnectionSecurityGroups:
+    """
+    Architecture pattern: Network Segmentation with Least Privilege Access
+    """
+    
+    def __init__(self):
+        self.security_group_rules = self._define_security_group_rules()
+    
+    def _define_security_group_rules(self) -> List[Dict[str, Any]]:
+        """
+        Define security group rules for Glue Connections
+        
+        Security Architecture:
+        1. Outbound rules for database connectivity only
+        2. Specific port access based on database type
+        3. No inbound rules (Glue connections are outbound only)
+        4. Logging and monitoring for all connections
+        """
+        
+        return [
+            {
+                'IpProtocol': 'tcp',
+                'FromPort': 1521,  # Oracle
+                'ToPort': 1521,
+                'Description': 'Oracle database access',
+                'CidrIp': '10.0.0.0/8'  # Private network only
+            },
+            {
+                'IpProtocol': 'tcp',
+                'FromPort': 1433,  # SQL Server
+                'ToPort': 1433,
+                'Description': 'SQL Server database access',
+                'CidrIp': '10.0.0.0/8'
+            },
+            {
+                'IpProtocol': 'tcp',
+                'FromPort': 5432,  # PostgreSQL
+                'ToPort': 5432,
+                'Description': 'PostgreSQL database access',
+                'CidrIp': '10.0.0.0/8'
+            },
+            {
+                'IpProtocol': 'tcp',
+                'FromPort': 50000,  # DB2
+                'ToPort': 50000,
+                'Description': 'DB2 database access',
+                'CidrIp': '10.0.0.0/8'
+            },
+            {
+                'IpProtocol': 'tcp',
+                'FromPort': 443,  # HTTPS for AWS services
+                'ToPort': 443,
+                'Description': 'HTTPS access to AWS services',
+                'CidrIp': '0.0.0.0/0'
+            }
+        ]
+```
+
+### Audit and Compliance
+
+#### CloudTrail Integration for Glue Connections and Secrets Manager
+```python
+class AuditManager:
+    """
+    Architecture pattern: Comprehensive Audit Trail with Event Correlation
+    """
+    
+    def __init__(self):
+        self.audit_events = [
+            'glue:CreateConnection',
+            'glue:GetConnection', 
+            'glue:DeleteConnection',
+            'secretsmanager:CreateSecret',
+            'secretsmanager:GetSecretValue',
+            'secretsmanager:DeleteSecret'
+        ]
+    
+    def configure_audit_logging(self) -> Dict[str, Any]:
+        """
+        Configure comprehensive audit logging for Glue Connections and Secrets Manager
+        
+        Audit Architecture:
+        1. CloudTrail logging for all API calls
+        2. CloudWatch Events for real-time monitoring
+        3. S3 bucket for long-term audit storage
+        4. Event correlation for security analysis
+        """
+        
+        return {
+            'cloudtrail_config': {
+                'include_global_service_events': True,
+                'is_multi_region_trail': True,
+                'enable_log_file_validation': True,
+                'event_selectors': [
+                    {
+                        'read_write_type': 'All',
+                        'include_management_events': True,
+                        'data_resources': [
+                            {
+                                'type': 'AWS::Glue::Connection',
+                                'values': ['arn:aws:glue:*:*:connection/*']
+                            },
+                            {
+                                'type': 'AWS::SecretsManager::Secret',
+                                'values': ['arn:aws:secretsmanager:*:*:secret:/aws-glue/*']
+                            }
+                        ]
+                    }
+                ]
+            },
+            'cloudwatch_events': {
+                'rules': [
+                    {
+                        'name': 'GlueConnectionEvents',
+                        'event_pattern': {
+                            'source': ['aws.glue'],
+                            'detail-type': ['AWS API Call via CloudTrail'],
+                            'detail': {
+                                'eventSource': ['glue.amazonaws.com'],
+                                'eventName': self.audit_events[:3]
+                            }
+                        }
+                    },
+                    {
+                        'name': 'SecretsManagerEvents',
+                        'event_pattern': {
+                            'source': ['aws.secretsmanager'],
+                            'detail-type': ['AWS API Call via CloudTrail'],
+                            'detail': {
+                                'eventSource': ['secretsmanager.amazonaws.com'],
+                                'eventName': self.audit_events[3:]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
 ```
 
 ## Deployment Architecture

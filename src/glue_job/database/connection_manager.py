@@ -30,12 +30,27 @@ except ImportError:
 # Import from other modules
 from ..config.job_config import ConnectionConfig
 from ..config.database_engines import DatabaseEngineManager
+from ..config.secrets_manager_handler import (
+    SecretsManagerHandler, SecretsManagerError, SecretCreationError, 
+    SecretsManagerPermissionError, SecretsManagerRetryableError
+)
 from ..monitoring.logging import StructuredLogger
 from ..network.error_handler import (
     NetworkConnectivityError, GlueConnectionError, VpcEndpointError, 
     ENICreationError, ErrorCategory
 )
 from ..network.retry_handler import ConnectionRetryHandler, ErrorClassifier
+from ..network.glue_connection_errors import (
+    GlueConnectionBaseError,
+    GlueConnectionCreationError,
+    GlueConnectionNotFoundError,
+    GlueConnectionValidationError,
+    GlueConnectionParameterError,
+    GlueConnectionPermissionError,
+    GlueConnectionNetworkError,
+    GlueConnectionRetryableError
+)
+from ..network.glue_connection_retry_handler import GlueConnectionRetryHandler
 from ..config.iceberg_connection_handler import IcebergConnectionHandler
 from ..config.iceberg_models import (
     IcebergConfig, IcebergEngineError, IcebergConnectionError, IcebergValidationError
@@ -55,6 +70,20 @@ class GlueConnectionManager:
         )
         self.glue_client = boto3.client('glue', config=config)
         self.structured_logger = StructuredLogger("GlueConnectionManager")
+        
+        # Initialize specialized retry handler for Glue Connection operations
+        self.retry_handler = GlueConnectionRetryHandler(
+            max_retries=3,
+            base_delay=1.0,
+            max_delay=30.0,
+            backoff_factor=2.0
+        )
+        
+        # Initialize Secrets Manager handler for credential storage
+        self.secrets_manager_handler = SecretsManagerHandler(
+            region_name=None,  # Use default region
+            job_name="glue-data-replication"
+        )
     
     def get_glue_connection(self, connection_name: str) -> Optional[Dict[str, Any]]:
         """Retrieve Glue connection details for cross-VPC database access with enhanced error handling.
@@ -73,41 +102,14 @@ class GlueConnectionManager:
             return None
         
         try:
-            self.structured_logger.info("Retrieving Glue connection", connection_name=connection_name)
+            self.structured_logger.info("Retrieving Glue connection with retry logic", connection_name=connection_name)
             
-            # Log diagnostic information first
-            try:
-                # First, try to list connections to verify access
-                self.structured_logger.info("Testing Glue API access by listing connections")
-                list_response = self.glue_client.get_connections(MaxResults=1)
-                self.structured_logger.info("Glue API access verified - can list connections")
-            except Exception as list_error:
-                self.structured_logger.error(
-                    "Cannot access Glue API - this indicates permission or configuration issues",
-                    error=str(list_error)
-                )
-                raise GlueConnectionError(
-                    f"Cannot access Glue API: {str(list_error)}. Please check IAM permissions for glue:GetConnections.",
-                    connection_name,
-                    {'error_type': 'api_access_error', 'original_error': str(list_error)}
-                )
-            
-            # Try to get the specific connection with better error handling
-            self.structured_logger.info("Attempting to retrieve specific Glue connection", connection_name=connection_name)
-            
-            try:
-                response = self.glue_client.get_connection(Name=connection_name)
-                connection = response.get('Connection', {})
-                self.structured_logger.info("Successfully retrieved Glue connection", connection_name=connection_name)
-            except Exception as get_error:
-                self.structured_logger.error(
-                    "Failed to retrieve specific Glue connection",
-                    connection_name=connection_name,
-                    error=str(get_error),
-                    error_type=type(get_error).__name__
-                )
-                # Re-raise the original exception to be handled by the outer try-catch
-                raise
+            # Use retry handler for connection retrieval
+            response = self.retry_handler.get_connection_with_retry(
+                self.glue_client, 
+                connection_name
+            )
+            connection = response.get('Connection', {})
             
             connection_details = {
                 'name': connection.get('Name'),
@@ -116,8 +118,13 @@ class GlueConnectionManager:
                 'physical_connection_requirements': connection.get('PhysicalConnectionRequirements', {})
             }
             
-            # Validate connection configuration
-            self._validate_glue_connection_config(connection_details, connection_name)
+            # Validate connection configuration with retry logic
+            self.retry_handler.validate_connection_with_retry(
+                self._validate_glue_connection_config,
+                connection_name,
+                connection_details,
+                connection_name
+            )
             
             self.structured_logger.info(
                 "Successfully retrieved and validated Glue connection",
@@ -127,6 +134,9 @@ class GlueConnectionManager:
             
             return connection_details
             
+        except GlueConnectionBaseError:
+            # Re-raise Glue Connection specific errors
+            raise
         except Exception as e:
             self.structured_logger.error(
                 "Failed to retrieve Glue connection",
@@ -134,28 +144,41 @@ class GlueConnectionManager:
                 error=str(e),
                 error_type=type(e).__name__
             )
-            raise GlueConnectionError(
-                f"Failed to retrieve Glue connection '{connection_name}': {str(e)}",
-                connection_name,
-                {'error_type': 'connection_retrieval_error', 'original_error': str(e)}
-            )
+            # Convert to appropriate Glue Connection error
+            if "EntityNotFoundException" in str(e):
+                raise GlueConnectionNotFoundError(connection_name)
+            elif "AccessDenied" in str(e) or "permission" in str(e).lower():
+                raise GlueConnectionPermissionError(
+                    f"Access denied retrieving connection: {str(e)}",
+                    connection_name=connection_name,
+                    operation="get_connection"
+                )
+            else:
+                raise GlueConnectionBaseError(
+                    f"Failed to retrieve Glue connection '{connection_name}': {str(e)}",
+                    connection_name=connection_name,
+                    error_code="CONNECTION_RETRIEVAL_ERROR",
+                    context={'original_error': str(e)}
+                )
     
     def _validate_glue_connection_config(self, connection_details: Dict[str, Any], connection_name: str):
-        """Validate Glue connection configuration."""
+        """Validate Glue connection configuration with enhanced error handling."""
         connection_type = connection_details.get('connection_type')
         if connection_type not in ['JDBC', 'NETWORK']:
-            raise GlueConnectionError(
-                f"Glue connection '{connection_name}' is not a JDBC or NETWORK connection (type: {connection_type})",
-                connection_name,
-                {'error_type': 'invalid_connection_type', 'connection_type': connection_type}
+            raise GlueConnectionValidationError(
+                f"Connection type '{connection_type}' is not supported (must be JDBC or NETWORK)",
+                connection_name=connection_name,
+                validation_field='connection_type',
+                expected_value='JDBC or NETWORK',
+                actual_value=connection_type
             )
         
         physical_reqs = connection_details.get('physical_connection_requirements', {})
         if not physical_reqs:
-            raise GlueConnectionError(
-                f"Glue connection '{connection_name}' lacks physical connection requirements",
-                connection_name,
-                {'error_type': 'missing_physical_requirements'}
+            raise GlueConnectionValidationError(
+                "Connection lacks physical connection requirements for cross-VPC access",
+                connection_name=connection_name,
+                validation_field='physical_connection_requirements'
             )
         
         # Check for required network configuration
@@ -163,18 +186,26 @@ class GlueConnectionManager:
         security_groups = physical_reqs.get('SecurityGroupIdList', [])
         
         if not subnet_id:
-            raise GlueConnectionError(
-                f"Glue connection '{connection_name}' missing subnet configuration",
-                connection_name,
-                {'error_type': 'missing_subnet', 'physical_requirements': physical_reqs}
+            raise GlueConnectionNetworkError(
+                "Missing subnet configuration in physical connection requirements",
+                connection_name=connection_name,
+                network_component='subnet'
             )
         
         if not security_groups:
-            raise GlueConnectionError(
-                f"Glue connection '{connection_name}' missing security group configuration",
-                connection_name,
-                {'error_type': 'missing_security_groups', 'physical_requirements': physical_reqs}
+            raise GlueConnectionNetworkError(
+                "Missing security group configuration in physical connection requirements",
+                connection_name=connection_name,
+                network_component='security_groups'
             )
+        
+        self.structured_logger.debug(
+            "Glue connection configuration validation passed",
+            connection_name=connection_name,
+            connection_type=connection_type,
+            subnet_id=subnet_id,
+            security_groups_count=len(security_groups)
+        )
     
     def validate_network_connectivity(self, connection_name: str, 
                                     connection_string: str, 
@@ -439,6 +470,691 @@ class GlueConnectionManager:
         return any(
             from_port <= port <= to_port for port in database_ports
         )
+    
+    def create_glue_connection(self, connection_config: ConnectionConfig, 
+                             connection_name: str) -> str:
+        """Create a new Glue Connection from JDBC parameters with Secrets Manager integration.
+        
+        Args:
+            connection_config: Database connection configuration containing JDBC parameters
+            connection_name: Name for the new Glue Connection
+            
+        Returns:
+            str: Name of the created Glue Connection
+            
+        Raises:
+            GlueConnectionError: For Glue Connection creation failures
+            SecretCreationError: For Secrets Manager secret creation failures
+            ValueError: For invalid parameters
+        """
+        secret_arn = None
+        try:
+            self.structured_logger.info(
+                "Creating new Glue Connection with Secrets Manager integration",
+                connection_name=connection_name,
+                engine_type=connection_config.engine_type
+            )
+            
+            # Validate required parameters for Glue Connection creation
+            self._validate_glue_connection_creation_params(connection_config, connection_name)
+            
+            # Create AWS Secrets Manager secret for database credentials
+            secret_arn = self._create_secrets_manager_secret(connection_config, connection_name)
+            
+            # Build Glue Connection input with secret reference
+            connection_input = self._build_glue_connection_input_with_secrets(
+                connection_config, connection_name, secret_arn
+            )
+            
+            # Create the Glue Connection with retry logic
+            response = self.retry_handler.create_connection_with_retry(
+                self.glue_client,
+                connection_input,
+                connection_name
+            )
+            
+            self.structured_logger.info(
+                "Successfully created Glue Connection with Secrets Manager integration",
+                connection_name=connection_name,
+                engine_type=connection_config.engine_type,
+                secret_arn=secret_arn
+            )
+            
+            return connection_name
+                    
+        except (SecretCreationError, SecretsManagerPermissionError, SecretsManagerRetryableError):
+            # Re-raise Secrets Manager specific errors without cleanup (secret wasn't created)
+            raise
+        except GlueConnectionParameterError:
+            # Re-raise parameter validation errors without cleanup (secret wasn't created)
+            raise
+        except GlueConnectionBaseError:
+            # Clean up secret if Glue Connection creation failed
+            if secret_arn:
+                self._cleanup_secret_on_failure(connection_name)
+            raise
+        except Exception as e:
+            # Clean up secret if Glue Connection creation failed
+            if secret_arn:
+                self._cleanup_secret_on_failure(connection_name)
+            
+            self.structured_logger.error(
+                "Unexpected error during Glue Connection creation with Secrets Manager",
+                connection_name=connection_name,
+                error=str(e),
+                error_type=type(e).__name__,
+                secret_arn=secret_arn
+            )
+            raise GlueConnectionCreationError(
+                f"Unexpected error during creation: {str(e)}",
+                connection_name=connection_name
+            )
+    
+    def _validate_glue_connection_creation_params(self, connection_config: ConnectionConfig, 
+                                                connection_name: str) -> None:
+        """Validate parameters required for Glue Connection creation.
+        
+        Args:
+            connection_config: Database connection configuration
+            connection_name: Name for the new Glue Connection
+            
+        Raises:
+            ValueError: If required parameters are missing or invalid
+            GlueConnectionError: If engine type is not supported for Glue Connections
+        """
+        # Validate connection name
+        if not connection_name or not connection_name.strip():
+            raise GlueConnectionParameterError(
+                "Connection name cannot be empty",
+                parameter_name="connection_name"
+            )
+        
+        # Validate connection name format (AWS Glue naming requirements)
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', connection_name):
+            raise GlueConnectionParameterError(
+                "Connection name must contain only alphanumeric characters, hyphens, and underscores",
+                parameter_name="connection_name",
+                parameter_value=connection_name
+            )
+        
+        if len(connection_name) > 255:
+            raise GlueConnectionParameterError(
+                "Connection name cannot exceed 255 characters",
+                parameter_name="connection_name",
+                parameter_value=connection_name
+            )
+        
+        # Validate that the engine type is supported for JDBC connections
+        supported_engines = ['oracle', 'sqlserver', 'postgresql', 'db2']
+        if connection_config.engine_type.lower() not in supported_engines:
+            # Check if it's an Iceberg engine first for a more specific error
+            if connection_config.is_iceberg_engine():
+                from ..network.glue_connection_errors import GlueConnectionEngineCompatibilityError
+                raise GlueConnectionEngineCompatibilityError(
+                    "Glue Connections are only supported for JDBC databases, not Iceberg tables",
+                    engine_type=connection_config.engine_type
+                )
+            else:
+                raise GlueConnectionParameterError(
+                    f"Engine type '{connection_config.engine_type}' is not supported for Glue Connections. Supported engines: {', '.join(supported_engines)}",
+                    parameter_name="engine_type",
+                    parameter_value=connection_config.engine_type
+                )
+        
+        # Validate required JDBC parameters for Glue Connection creation
+        if not connection_config.connection_string:
+            raise GlueConnectionParameterError(
+                "Connection string is required for Glue Connection creation",
+                parameter_name="connection_string"
+            )
+        
+        if not connection_config.username:
+            raise GlueConnectionParameterError(
+                "Username is required for Glue Connection creation",
+                parameter_name="username"
+            )
+        
+        if not connection_config.password:
+            raise GlueConnectionParameterError(
+                "Password is required for Glue Connection creation",
+                parameter_name="password"
+            )
+        
+        # Validate that username and password are not empty strings
+        if not connection_config.username.strip():
+            raise GlueConnectionParameterError(
+                "Username cannot be empty or whitespace only",
+                parameter_name="username",
+                parameter_value="<empty>"
+            )
+        
+        if not connection_config.password.strip():
+            raise GlueConnectionParameterError(
+                "Password cannot be empty or whitespace only",
+                parameter_name="password",
+                parameter_value="<empty>"
+            )
+        
+        # Validate connection string format for the engine type
+        from ..config.database_engines import DatabaseEngineManager
+        if not DatabaseEngineManager.validate_connection_string(
+            connection_config.engine_type, 
+            connection_config.connection_string
+        ):
+            raise GlueConnectionParameterError(
+                f"Invalid connection string format for {connection_config.engine_type} engine",
+                parameter_name="connection_string",
+                parameter_value=connection_config.connection_string[:50] + "..." if len(connection_config.connection_string) > 50 else connection_config.connection_string
+            )
+        supported_engines = ['oracle', 'sqlserver', 'postgresql', 'db2']
+        if connection_config.engine_type.lower() not in supported_engines:
+            raise GlueConnectionParameterError(
+                f"Engine type '{connection_config.engine_type}' is not supported for Glue Connections. Supported engines: {', '.join(supported_engines)}",
+                parameter_name="engine_type",
+                parameter_value=connection_config.engine_type
+            )
+        
+        # Validate database and schema names if provided
+        if connection_config.database and not connection_config.database.strip():
+            raise GlueConnectionParameterError(
+                "Database name cannot be empty or whitespace only if provided",
+                parameter_name="database",
+                parameter_value="<empty>"
+            )
+        
+        if connection_config.schema and not connection_config.schema.strip():
+            raise GlueConnectionParameterError(
+                "Schema name cannot be empty or whitespace only if provided",
+                parameter_name="schema",
+                parameter_value="<empty>"
+            )
+        
+        self.structured_logger.debug(
+            "Glue Connection creation parameters validated successfully for Secrets Manager integration",
+            connection_name=connection_name,
+            engine_type=connection_config.engine_type,
+            has_database=bool(connection_config.database),
+            has_schema=bool(connection_config.schema)
+        )
+    
+    def _build_glue_connection_input(self, connection_config: ConnectionConfig, 
+                                   connection_name: str) -> Dict[str, Any]:
+        """Build Glue Connection input dictionary from connection configuration.
+        
+        Args:
+            connection_config: Database connection configuration
+            connection_name: Name for the new Glue Connection
+            
+        Returns:
+            Dict[str, Any]: Glue Connection input dictionary
+        """
+        connection_input = {
+            'Name': connection_name,
+            'ConnectionType': 'JDBC',
+            'ConnectionProperties': {
+                'JDBC_CONNECTION_URL': connection_config.connection_string,
+                'USERNAME': connection_config.username,
+                'PASSWORD': connection_config.password
+            },
+            'Description': f'Auto-created JDBC connection for {connection_config.engine_type} database'
+        }
+        
+        # Add physical connection requirements if network configuration is available
+        if connection_config.network_config and connection_config.network_config.has_network_config():
+            physical_requirements = {}
+            
+            # Add subnet ID (required for cross-VPC connections)
+            if connection_config.network_config.subnet_ids:
+                # Use the first subnet ID for the connection
+                physical_requirements['SubnetId'] = connection_config.network_config.subnet_ids[0]
+            
+            # Add security group IDs (required for cross-VPC connections)
+            if connection_config.network_config.security_group_ids:
+                physical_requirements['SecurityGroupIdList'] = connection_config.network_config.security_group_ids
+            
+            # Add availability zone if specified
+            if hasattr(connection_config.network_config, 'availability_zone') and connection_config.network_config.availability_zone:
+                physical_requirements['AvailabilityZone'] = connection_config.network_config.availability_zone
+            
+            if physical_requirements:
+                connection_input['PhysicalConnectionRequirements'] = physical_requirements
+                
+                self.structured_logger.debug(
+                    "Added physical connection requirements to Glue Connection",
+                    connection_name=connection_name,
+                    subnet_id=physical_requirements.get('SubnetId'),
+                    security_groups_count=len(physical_requirements.get('SecurityGroupIdList', []))
+                )
+        
+        # Add engine-specific connection properties
+        engine_properties = self._get_engine_specific_properties(connection_config.engine_type)
+        if engine_properties:
+            connection_input['ConnectionProperties'].update(engine_properties)
+            
+            self.structured_logger.debug(
+                "Added engine-specific properties to Glue Connection",
+                connection_name=connection_name,
+                engine_type=connection_config.engine_type,
+                properties_count=len(engine_properties)
+            )
+        
+        return connection_input
+    
+    def _get_engine_specific_properties(self, engine_type: str) -> Dict[str, str]:
+        """Get engine-specific connection properties for Glue Connection.
+        
+        Args:
+            engine_type: Database engine type
+            
+        Returns:
+            Dict[str, str]: Engine-specific connection properties
+        """
+        engine_type_lower = engine_type.lower()
+        
+        if engine_type_lower == 'oracle':
+            return {
+                'JDBC_DRIVER_JAR_URI': 's3://aws-glue-assets-123456789012-us-east-1/drivers/ojdbc8.jar',
+                'JDBC_DRIVER_CLASS_NAME': 'oracle.jdbc.driver.OracleDriver'
+            }
+        elif engine_type_lower == 'sqlserver':
+            return {
+                'JDBC_DRIVER_JAR_URI': 's3://aws-glue-assets-123456789012-us-east-1/drivers/mssql-jdbc.jar',
+                'JDBC_DRIVER_CLASS_NAME': 'com.microsoft.sqlserver.jdbc.SQLServerDriver'
+            }
+        elif engine_type_lower == 'postgresql':
+            return {
+                'JDBC_DRIVER_JAR_URI': 's3://aws-glue-assets-123456789012-us-east-1/drivers/postgresql.jar',
+                'JDBC_DRIVER_CLASS_NAME': 'org.postgresql.Driver'
+            }
+        elif engine_type_lower == 'db2':
+            return {
+                'JDBC_DRIVER_JAR_URI': 's3://aws-glue-assets-123456789012-us-east-1/drivers/db2jcc4.jar',
+                'JDBC_DRIVER_CLASS_NAME': 'com.ibm.db2.jcc.DB2Driver'
+            }
+        else:
+            # Return empty dict for unknown engines
+            return {}
+    
+    def _create_secrets_manager_secret(self, connection_config: ConnectionConfig, 
+                                     connection_name: str) -> str:
+        """Create AWS Secrets Manager secret for database credentials.
+        
+        Args:
+            connection_config: Database connection configuration containing credentials
+            connection_name: Name of the Glue Connection (used to generate secret name)
+            
+        Returns:
+            str: Secret ARN for Glue Connection reference
+            
+        Raises:
+            SecretCreationError: If secret creation fails
+            SecretsManagerPermissionError: If insufficient permissions
+            SecretsManagerRetryableError: For transient failures
+        """
+        try:
+            self.structured_logger.info(
+                "Creating Secrets Manager secret for Glue Connection",
+                connection_name=connection_name,
+                engine_type=connection_config.engine_type
+            )
+            
+            # Validate Secrets Manager permissions before creating secret
+            try:
+                permissions_valid = self.secrets_manager_handler.validate_secret_permissions()
+                if not permissions_valid:
+                    raise SecretsManagerPermissionError(
+                        "Insufficient permissions for Secrets Manager operations",
+                        operation="create_secret",
+                        required_permissions=self.secrets_manager_handler.REQUIRED_PERMISSIONS
+                    )
+            except SecretsManagerPermissionError:
+                raise
+            except Exception as perm_error:
+                self.structured_logger.warning(
+                    "Could not validate Secrets Manager permissions, proceeding with secret creation",
+                    error=str(perm_error)
+                )
+            
+            # Create the secret with database credentials
+            secret_arn = self.secrets_manager_handler.create_secret(
+                connection_name=connection_name,
+                username=connection_config.username,
+                password=connection_config.password,
+                description=f"Database credentials for Glue Connection '{connection_name}' ({connection_config.engine_type})",
+                tags={
+                    'EngineType': connection_config.engine_type,
+                    'Database': connection_config.database or 'unknown',
+                    'Schema': connection_config.schema or 'unknown'
+                }
+            )
+            
+            self.structured_logger.info(
+                "Successfully created Secrets Manager secret for Glue Connection",
+                connection_name=connection_name,
+                secret_arn=secret_arn,
+                engine_type=connection_config.engine_type
+            )
+            
+            return secret_arn
+            
+        except (SecretCreationError, SecretsManagerPermissionError, SecretsManagerRetryableError):
+            # Re-raise Secrets Manager specific errors
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during Secrets Manager secret creation",
+                connection_name=connection_name,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            raise SecretCreationError(
+                f"Unexpected error during secret creation: {str(e)}",
+                connection_name
+            )
+    
+    def _build_glue_connection_input_with_secrets(self, connection_config: ConnectionConfig, 
+                                                connection_name: str, secret_arn: str) -> Dict[str, Any]:
+        """Build Glue Connection input dictionary with Secrets Manager secret reference.
+        
+        Args:
+            connection_config: Database connection configuration
+            connection_name: Name for the new Glue Connection
+            secret_arn: ARN of the Secrets Manager secret containing credentials
+            
+        Returns:
+            Dict[str, Any]: Glue Connection input dictionary with secret reference
+        """
+        connection_input = {
+            'Name': connection_name,
+            'ConnectionType': 'JDBC',
+            'ConnectionProperties': {
+                'JDBC_CONNECTION_URL': connection_config.connection_string,
+                'SECRET_ID': secret_arn  # Reference to Secrets Manager secret
+            },
+            'Description': f'Auto-created JDBC connection for {connection_config.engine_type} database with Secrets Manager integration'
+        }
+        
+        # Add physical connection requirements if network configuration is available
+        if connection_config.network_config and connection_config.network_config.has_network_config():
+            physical_requirements = {}
+            
+            # Add subnet ID (required for cross-VPC connections)
+            if connection_config.network_config.subnet_ids:
+                # Use the first subnet ID for the connection
+                physical_requirements['SubnetId'] = connection_config.network_config.subnet_ids[0]
+            
+            # Add security group IDs (required for cross-VPC connections)
+            if connection_config.network_config.security_group_ids:
+                physical_requirements['SecurityGroupIdList'] = connection_config.network_config.security_group_ids
+            
+            # Add availability zone if specified
+            if hasattr(connection_config.network_config, 'availability_zone') and connection_config.network_config.availability_zone:
+                physical_requirements['AvailabilityZone'] = connection_config.network_config.availability_zone
+            
+            if physical_requirements:
+                connection_input['PhysicalConnectionRequirements'] = physical_requirements
+                
+                self.structured_logger.debug(
+                    "Added physical connection requirements to Glue Connection with Secrets Manager",
+                    connection_name=connection_name,
+                    subnet_id=physical_requirements.get('SubnetId'),
+                    security_groups_count=len(physical_requirements.get('SecurityGroupIdList', []))
+                )
+        
+        # Add engine-specific connection properties
+        engine_properties = self._get_engine_specific_properties(connection_config.engine_type)
+        if engine_properties:
+            connection_input['ConnectionProperties'].update(engine_properties)
+            
+            self.structured_logger.debug(
+                "Added engine-specific properties to Glue Connection with Secrets Manager",
+                connection_name=connection_name,
+                engine_type=connection_config.engine_type,
+                properties_count=len(engine_properties)
+            )
+        
+        return connection_input
+    
+    def _cleanup_secret_on_failure(self, connection_name: str) -> None:
+        """Clean up Secrets Manager secret if Glue Connection creation fails.
+        
+        Args:
+            connection_name: Name of the Glue Connection (used to identify the secret)
+        """
+        try:
+            self.structured_logger.info(
+                "Cleaning up Secrets Manager secret after Glue Connection creation failure",
+                connection_name=connection_name
+            )
+            
+            cleanup_successful = self.secrets_manager_handler.cleanup_secret_on_failure(connection_name)
+            
+            if cleanup_successful:
+                self.structured_logger.info(
+                    "Successfully cleaned up Secrets Manager secret after failure",
+                    connection_name=connection_name
+                )
+            else:
+                self.structured_logger.warning(
+                    "Failed to clean up Secrets Manager secret after failure",
+                    connection_name=connection_name
+                )
+                
+        except Exception as cleanup_error:
+            self.structured_logger.error(
+                "Unexpected error during secret cleanup after Glue Connection failure",
+                connection_name=connection_name,
+                error=str(cleanup_error),
+                error_type=type(cleanup_error).__name__
+            )
+            # Don't raise exception during cleanup to avoid masking the original error
+    
+    def validate_glue_connection_exists(self, connection_name: str) -> bool:
+        """Validate that a Glue Connection exists.
+        
+        Args:
+            connection_name: Name of the Glue Connection to validate
+            
+        Returns:
+            bool: True if connection exists and is accessible, False otherwise
+            
+        Raises:
+            GlueConnectionError: For Glue Connection access issues
+        """
+        try:
+            self.structured_logger.info(
+                "Validating Glue Connection existence",
+                connection_name=connection_name
+            )
+            
+            if not connection_name or not connection_name.strip():
+                raise ValueError("Connection name cannot be empty")
+            
+            # Try to retrieve the connection
+            try:
+                response = self.glue_client.get_connection(Name=connection_name)
+                connection = response.get('Connection', {})
+                
+                # Validate that it's a JDBC connection
+                connection_type = connection.get('ConnectionType', '').upper()
+                if connection_type not in ['JDBC', 'NETWORK']:
+                    raise GlueConnectionError(
+                        f"Glue Connection '{connection_name}' is not a JDBC or NETWORK connection (type: {connection_type})",
+                        connection_name,
+                        {'error_type': 'invalid_connection_type', 'connection_type': connection_type}
+                    )
+                
+                # Validate connection properties
+                connection_properties = connection.get('ConnectionProperties', {})
+                if connection_type == 'JDBC' and not connection_properties.get('JDBC_CONNECTION_URL'):
+                    raise GlueConnectionError(
+                        f"Glue Connection '{connection_name}' lacks required JDBC_CONNECTION_URL property",
+                        connection_name,
+                        {'error_type': 'missing_jdbc_url'}
+                    )
+                
+                self.structured_logger.info(
+                    "Glue Connection validation successful",
+                    connection_name=connection_name,
+                    connection_type=connection_type
+                )
+                
+                return True
+                
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', '')
+                error_message = e.response.get('Error', {}).get('Message', str(e))
+                
+                if error_code == 'EntityNotFoundException':
+                    self.structured_logger.warning(
+                        "Glue Connection does not exist",
+                        connection_name=connection_name
+                    )
+                    return False
+                elif error_code == 'AccessDeniedException':
+                    raise GlueConnectionError(
+                        f"Access denied to Glue Connection '{connection_name}': {error_message}",
+                        connection_name,
+                        {'error_type': 'access_denied', 'error_code': error_code}
+                    )
+                else:
+                    raise GlueConnectionError(
+                        f"Failed to access Glue Connection '{connection_name}': {error_message}",
+                        connection_name,
+                        {'error_type': 'access_error', 'error_code': error_code, 'aws_error': error_message}
+                    )
+                    
+        except GlueConnectionError:
+            raise
+        except ValueError:
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during Glue Connection validation",
+                connection_name=connection_name,
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            raise GlueConnectionError(
+                f"Unexpected error validating Glue Connection '{connection_name}': {str(e)}",
+                connection_name,
+                {'error_type': 'unexpected_error', 'original_error': str(e)}
+            )
+    
+    def setup_jdbc_with_glue_connection_strategy(self, connection_config: ConnectionConfig) -> Dict[str, Any]:
+        """Setup JDBC using the appropriate Glue Connection strategy.
+        
+        Args:
+            connection_config: Database connection configuration with Glue Connection config
+            
+        Returns:
+            Dictionary with JDBC connection properties
+            
+        Raises:
+            GlueConnectionError: For Glue Connection specific issues
+            NetworkConnectivityError: For network connectivity issues
+        """
+        try:
+            if not connection_config.glue_connection_config:
+                # No Glue Connection config, use direct JDBC
+                return self.setup_jdbc_with_connection(connection_config, '')
+            
+            strategy = connection_config.get_glue_connection_strategy()
+            
+            self.structured_logger.info(
+                "Setting up JDBC with Glue Connection strategy",
+                engine_type=connection_config.engine_type,
+                strategy=strategy
+            )
+            
+            if strategy == "create_glue":
+                return self._setup_jdbc_with_create_strategy(connection_config)
+            elif strategy == "use_glue":
+                return self._setup_jdbc_with_use_strategy(connection_config)
+            else:
+                # Direct JDBC strategy
+                return self.setup_jdbc_with_connection(connection_config, '')
+                
+        except (GlueConnectionError, NetworkConnectivityError):
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Failed to setup JDBC with Glue Connection strategy",
+                engine_type=connection_config.engine_type,
+                strategy=connection_config.get_glue_connection_strategy(),
+                error=str(e)
+            )
+            raise GlueConnectionError(
+                f"Failed to setup JDBC with Glue Connection strategy: {str(e)}",
+                connection_config.get_glue_connection_name_for_creation() or "unknown",
+                {'error_type': 'strategy_setup_error', 'original_error': str(e)}
+            )
+    
+    def _setup_jdbc_with_create_strategy(self, connection_config: ConnectionConfig) -> Dict[str, Any]:
+        """Setup JDBC by creating a new Glue Connection.
+        
+        Args:
+            connection_config: Database connection configuration
+            
+        Returns:
+            Dictionary with JDBC connection properties
+        """
+        # Generate a unique connection name if not provided
+        import time
+        import hashlib
+        
+        # Create a deterministic connection name based on config
+        name_base = f"{connection_config.engine_type}_{connection_config.database}_{connection_config.schema}"
+        name_hash = hashlib.md5(name_base.encode()).hexdigest()[:8]
+        connection_name = f"glue-conn-{name_hash}-{int(time.time())}"
+        
+        self.structured_logger.info(
+            "Creating new Glue Connection for JDBC setup",
+            connection_name=connection_name,
+            engine_type=connection_config.engine_type
+        )
+        
+        # Create the Glue Connection
+        created_name = self.create_glue_connection(connection_config, connection_name)
+        
+        # Now use the created connection
+        return self.setup_jdbc_with_connection(connection_config, created_name)
+    
+    def _setup_jdbc_with_use_strategy(self, connection_config: ConnectionConfig) -> Dict[str, Any]:
+        """Setup JDBC using an existing Glue Connection.
+        
+        Args:
+            connection_config: Database connection configuration
+            
+        Returns:
+            Dictionary with JDBC connection properties
+        """
+        connection_name = connection_config.get_glue_connection_name_for_creation()
+        
+        if not connection_name:
+            raise GlueConnectionError(
+                "No Glue Connection name specified for use strategy",
+                "unknown",
+                {'error_type': 'missing_connection_name'}
+            )
+        
+        self.structured_logger.info(
+            "Using existing Glue Connection for JDBC setup",
+            connection_name=connection_name,
+            engine_type=connection_config.engine_type
+        )
+        
+        # Validate that the connection exists
+        if not self.validate_glue_connection_exists(connection_name):
+            raise GlueConnectionError(
+                f"Glue Connection '{connection_name}' does not exist or is not accessible",
+                connection_name,
+                {'error_type': 'connection_not_found'}
+            )
+        
+        # Use the existing connection
+        return self.setup_jdbc_with_connection(connection_config, connection_name)
     
     def setup_jdbc_with_connection(self, connection_config: ConnectionConfig, 
                                  glue_connection_name: str) -> Dict[str, Any]:
@@ -1298,7 +2014,7 @@ class UnifiedConnectionManager:
     
     def validate_connection(self, connection_config: ConnectionConfig,
                           timeout_seconds: int = 30) -> bool:
-        """Validate database connection with engine-specific routing.
+        """Validate database connection with strategy-based routing.
         
         Args:
             connection_config: Connection configuration to validate
@@ -1310,6 +2026,7 @@ class UnifiedConnectionManager:
         Raises:
             IcebergConnectionError: For Iceberg connection issues
             NetworkConnectivityError: For network connectivity issues
+            GlueConnectionError: For Glue Connection specific issues
         """
         try:
             # Check validation cache first
@@ -1325,17 +2042,23 @@ class UnifiedConnectionManager:
                     )
                     return cached_result['valid']
             
+            # Determine connection strategy
+            strategy = self._determine_connection_strategy(connection_config)
+            
             self.structured_logger.info(
-                "Validating database connection",
+                "Validating database connection with strategy",
                 engine_type=connection_config.engine_type,
+                strategy=strategy,
                 timeout_seconds=timeout_seconds
             )
             
             start_time = time.time()
             
-            # Route validation based on engine type
-            if self.is_iceberg_engine(connection_config.engine_type):
+            # Route validation based on strategy
+            if strategy == "iceberg":
                 result = self._validate_iceberg_connection(connection_config, timeout_seconds)
+            elif strategy in ["create_glue", "use_glue"]:
+                result = self._validate_jdbc_connection_with_glue_strategy(connection_config, timeout_seconds)
             else:
                 result = self._validate_jdbc_connection(connection_config, timeout_seconds)
             
@@ -1349,13 +2072,14 @@ class UnifiedConnectionManager:
             self.structured_logger.info(
                 "Connection validation completed",
                 engine_type=connection_config.engine_type,
+                strategy=strategy,
                 result="passed" if result else "failed",
                 duration_seconds=round(duration, 2)
             )
             
             return result
             
-        except (IcebergConnectionError, NetworkConnectivityError):
+        except (IcebergConnectionError, NetworkConnectivityError, GlueConnectionError):
             raise
         except Exception as e:
             self.structured_logger.error(
@@ -1459,9 +2183,101 @@ class UnifiedConnectionManager:
                 spark_error=e
             )
     
+    def _validate_jdbc_connection_with_glue_strategy(self, connection_config: ConnectionConfig,
+                                                   timeout_seconds: int) -> bool:
+        """Validate JDBC connection using Glue Connection strategy.
+        
+        Args:
+            connection_config: JDBC connection configuration with Glue Connection config
+            timeout_seconds: Connection timeout in seconds
+            
+        Returns:
+            bool: True if connection is valid
+            
+        Raises:
+            GlueConnectionError: For Glue Connection specific issues
+        """
+        try:
+            strategy = connection_config.get_glue_connection_strategy()
+            
+            self.structured_logger.info(
+                "Validating JDBC connection with Glue Connection strategy",
+                engine_type=connection_config.engine_type,
+                strategy=strategy
+            )
+            
+            # For create_glue strategy, validate that we can create the connection
+            if strategy == "create_glue":
+                # Validate that all required parameters are present for creation
+                try:
+                    self.jdbc_manager.glue_connection_manager._validate_glue_connection_creation_params(
+                        connection_config, "validation-test"
+                    )
+                except Exception as e:
+                    self.structured_logger.error(
+                        "Glue Connection creation parameters validation failed",
+                        error=str(e)
+                    )
+                    return False
+                
+                # Test direct JDBC connection since we haven't created the Glue Connection yet
+                return self.jdbc_manager.validate_connection(connection_config)
+            
+            # For use_glue strategy, validate that the connection exists and test it
+            elif strategy == "use_glue":
+                connection_name = connection_config.get_glue_connection_name_for_creation()
+                if not connection_name:
+                    self.structured_logger.error("No Glue Connection name specified for use strategy")
+                    return False
+                
+                # Validate that the connection exists
+                try:
+                    exists = self.jdbc_manager.glue_connection_manager.validate_glue_connection_exists(
+                        connection_name
+                    )
+                    if not exists:
+                        self.structured_logger.error(
+                            "Glue Connection does not exist",
+                            connection_name=connection_name
+                        )
+                        return False
+                except Exception as e:
+                    self.structured_logger.error(
+                        "Failed to validate Glue Connection existence",
+                        connection_name=connection_name,
+                        error=str(e)
+                    )
+                    return False
+                
+                # Test the connection using the Glue Connection
+                return self.jdbc_manager.validate_connection_with_network_check(
+                    connection_config=connection_config,
+                    glue_connection_name=connection_name,
+                    timeout_seconds=timeout_seconds
+                )
+            
+            else:
+                # Fallback to direct JDBC validation
+                return self._validate_jdbc_connection(connection_config, timeout_seconds)
+                
+        except GlueConnectionError:
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Unexpected error during Glue Connection strategy validation",
+                engine_type=connection_config.engine_type,
+                strategy=strategy,
+                error=str(e)
+            )
+            raise NetworkConnectivityError(
+                f"Glue Connection strategy validation failed: {str(e)}",
+                error_type='strategy_validation_error',
+                connection_name=connection_config.get_glue_connection_name_for_creation()
+            )
+    
     def _validate_jdbc_connection(self, connection_config: ConnectionConfig,
                                 timeout_seconds: int) -> bool:
-        """Validate JDBC connection using the JDBC manager.
+        """Validate JDBC connection using direct JDBC (no Glue Connection).
         
         Args:
             connection_config: JDBC connection configuration
@@ -1472,12 +2288,31 @@ class UnifiedConnectionManager:
         """
         return self.jdbc_manager.validate_connection_with_network_check(
             connection_config=connection_config,
-            glue_connection_name=connection_config.get_glue_connection_name() or '',
+            glue_connection_name='',  # Empty string for direct JDBC
             timeout_seconds=timeout_seconds
         )
     
+    def _determine_connection_strategy(self, connection_config: ConnectionConfig) -> str:
+        """Determine connection strategy based on engine type and Glue config.
+        
+        Args:
+            connection_config: Connection configuration to analyze
+            
+        Returns:
+            str: Connection strategy - 'iceberg', 'create_glue', 'use_glue', or 'direct_jdbc'
+        """
+        # For Iceberg engines, always use Iceberg strategy regardless of Glue config
+        if self.is_iceberg_engine(connection_config.engine_type):
+            return "iceberg"
+        
+        # For JDBC engines, check Glue Connection configuration
+        if connection_config.uses_glue_connection():
+            return connection_config.get_glue_connection_strategy()
+        else:
+            return "direct_jdbc"
+    
     def create_connection(self, connection_config: ConnectionConfig) -> Any:
-        """Create appropriate connection based on engine type.
+        """Create appropriate connection based on engine type and connection strategy.
         
         Args:
             connection_config: Connection configuration
@@ -1488,20 +2323,27 @@ class UnifiedConnectionManager:
         Raises:
             IcebergConnectionError: For Iceberg connection issues
             RuntimeError: For JDBC connection issues
+            GlueConnectionError: For Glue Connection specific issues
         """
         try:
+            # Determine connection strategy
+            strategy = self._determine_connection_strategy(connection_config)
+            
             self.structured_logger.info(
-                "Creating connection",
-                engine_type=connection_config.engine_type
+                "Creating connection with strategy",
+                engine_type=connection_config.engine_type,
+                strategy=strategy
             )
             
-            # Route connection creation based on engine type
-            if self.is_iceberg_engine(connection_config.engine_type):
+            # Route connection creation based on strategy
+            if strategy == "iceberg":
                 return self._create_iceberg_connection(connection_config)
+            elif strategy in ["create_glue", "use_glue"]:
+                return self._create_jdbc_connection_with_glue(connection_config)
             else:
                 return self._create_jdbc_connection(connection_config)
                 
-        except (IcebergConnectionError, RuntimeError):
+        except (IcebergConnectionError, RuntimeError, GlueConnectionError):
             raise
         except Exception as e:
             self.structured_logger.error(
@@ -1561,8 +2403,55 @@ class UnifiedConnectionManager:
                 spark_error=e
             )
     
+    def _create_jdbc_connection_with_glue(self, connection_config: ConnectionConfig) -> DataFrame:
+        """Create JDBC connection using Glue Connection strategy.
+        
+        Args:
+            connection_config: JDBC connection configuration with Glue Connection config
+            
+        Returns:
+            DataFrame: Spark DataFrame reader configured for JDBC with Glue Connection
+            
+        Raises:
+            GlueConnectionError: For Glue Connection specific issues
+        """
+        try:
+            # Use the GlueConnectionManager to setup JDBC with the appropriate strategy
+            jdbc_properties = self.jdbc_manager.glue_connection_manager.setup_jdbc_with_glue_connection_strategy(
+                connection_config
+            )
+            
+            # Create DataFrame reader with JDBC properties
+            df_reader = self.spark.read.format('jdbc')
+            
+            # Configure connection properties
+            for key, value in jdbc_properties.items():
+                if not key.startswith('_'):  # Skip metadata keys
+                    df_reader = df_reader.option(key, value)
+            
+            strategy = connection_config.get_glue_connection_strategy()
+            self.structured_logger.info(
+                "Created JDBC connection with Glue Connection strategy",
+                engine_type=connection_config.engine_type,
+                strategy=strategy,
+                has_glue_metadata='_glue_connection_metadata' in jdbc_properties
+            )
+            
+            return df_reader
+            
+        except GlueConnectionError:
+            raise
+        except Exception as e:
+            self.structured_logger.error(
+                "Failed to create JDBC connection with Glue Connection strategy",
+                engine_type=connection_config.engine_type,
+                strategy=connection_config.get_glue_connection_strategy(),
+                error=str(e)
+            )
+            raise RuntimeError(f"Failed to create JDBC connection with Glue strategy: {str(e)}")
+    
     def _create_jdbc_connection(self, connection_config: ConnectionConfig) -> DataFrame:
-        """Create JDBC connection using the JDBC manager.
+        """Create JDBC connection using direct JDBC (no Glue Connection).
         
         Args:
             connection_config: JDBC connection configuration
@@ -1572,7 +2461,7 @@ class UnifiedConnectionManager:
         """
         return self.jdbc_manager.create_connection_with_glue_support(
             connection_config=connection_config,
-            glue_connection_name=connection_config.get_glue_connection_name() or ''
+            glue_connection_name=''  # Empty string for direct JDBC
         )
     
     def read_table(self, connection_config: ConnectionConfig, table_name: str,
@@ -1860,7 +2749,10 @@ class UnifiedConnectionManager:
                 catalog_id = ''
             return f"iceberg_{connection_config.database}_{warehouse_location}_{catalog_id}"
         else:
-            return f"jdbc_{connection_config.engine_type}_{connection_config.database}_{connection_config.schema}_{connection_config.username}"
+            # Include Glue Connection strategy in cache key for JDBC connections
+            strategy = self._determine_connection_strategy(connection_config)
+            glue_connection_name = connection_config.get_glue_connection_name_for_creation() or ''
+            return f"jdbc_{connection_config.engine_type}_{connection_config.database}_{connection_config.schema}_{connection_config.username}_{strategy}_{glue_connection_name}"
     
     # Compatibility methods for existing migration classes
     def read_table_data(self, connection_config: ConnectionConfig, table_name: str,

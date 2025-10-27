@@ -45,6 +45,14 @@ class MockConnectionConfig:
     def get_glue_connection_name(self) -> Optional[str]:
         return None
     
+    def uses_glue_connection(self) -> bool:
+        """Return whether this connection uses Glue Connection."""
+        return False
+    
+    def get_glue_connection_name_for_creation(self) -> Optional[str]:
+        """Return the Glue connection name for creation."""
+        return None
+    
     def get_iceberg_config(self):
         """Return Iceberg configuration as a dictionary for compatibility."""
         return {

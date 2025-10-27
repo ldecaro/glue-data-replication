@@ -28,12 +28,113 @@ mock_modules = [
 for module in mock_modules:
     sys.modules[module] = MagicMock()
 
+# Create a mock ClientError class for testing
+class MockClientError(Exception):
+    """Mock ClientError that behaves like botocore.exceptions.ClientError"""
+    def __init__(self, error_response, operation_name):
+        self.response = error_response
+        self.operation_name = operation_name
+        error_code = error_response.get('Error', {}).get('Code', 'Unknown')
+        super().__init__(f"An error occurred ({error_code})")
+
 # Import the classes to test from new modular structure
 from glue_job.config import (
-    JobConfig, NetworkConfig, ConnectionConfig,
+    JobConfig, NetworkConfig, ConnectionConfig, GlueConnectionConfig,
     DatabaseEngineManager, JdbcDriverLoader,
-    JobConfigurationParser, ConnectionStringBuilder
+    JobConfigurationParser, ConnectionStringBuilder,
+    SecretsManagerHandler, SecretsManagerError, SecretCreationError,
+    SecretsManagerPermissionError, SecretsManagerRetryableError
 )
+
+
+class TestGlueConnectionConfig(unittest.TestCase):
+    """Test GlueConnectionConfig dataclass."""
+    
+    def test_glue_connection_config_default(self):
+        """Test default GlueConnectionConfig creation."""
+        config = GlueConnectionConfig()
+        
+        self.assertFalse(config.create_connection)
+        self.assertIsNone(config.use_existing_connection)
+        self.assertEqual(config.connection_strategy, "direct_jdbc")
+        self.assertFalse(config.uses_glue_connection())
+    
+    def test_glue_connection_config_create_connection(self):
+        """Test GlueConnectionConfig with create_connection=True."""
+        config = GlueConnectionConfig(create_connection=True)
+        
+        self.assertTrue(config.create_connection)
+        self.assertIsNone(config.use_existing_connection)
+        self.assertEqual(config.connection_strategy, "create_glue")
+        self.assertTrue(config.uses_glue_connection())
+    
+    def test_glue_connection_config_use_existing(self):
+        """Test GlueConnectionConfig with existing connection name."""
+        config = GlueConnectionConfig(use_existing_connection="my-connection")
+        
+        self.assertFalse(config.create_connection)
+        self.assertEqual(config.use_existing_connection, "my-connection")
+        self.assertEqual(config.connection_strategy, "use_glue")
+        self.assertTrue(config.uses_glue_connection())
+    
+    def test_glue_connection_config_validation_success(self):
+        """Test successful validation of GlueConnectionConfig."""
+        # Test default config
+        config = GlueConnectionConfig()
+        config.validate()  # Should not raise
+        
+        # Test create connection
+        config = GlueConnectionConfig(create_connection=True)
+        config.validate()  # Should not raise
+        
+        # Test use existing connection
+        config = GlueConnectionConfig(use_existing_connection="my-connection")
+        config.validate()  # Should not raise
+    
+    def test_glue_connection_config_validation_mutually_exclusive(self):
+        """Test validation fails for mutually exclusive parameters."""
+        config = GlueConnectionConfig(
+            create_connection=True,
+            use_existing_connection="my-connection"
+        )
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("mutually exclusive", str(context.exception))
+    
+    def test_glue_connection_config_validation_empty_connection_name(self):
+        """Test validation fails for empty connection name."""
+        config = GlueConnectionConfig(use_existing_connection="")
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("cannot be empty", str(context.exception))
+    
+    def test_glue_connection_config_validation_whitespace_connection_name(self):
+        """Test validation fails for whitespace-only connection name."""
+        config = GlueConnectionConfig(use_existing_connection="   ")
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("cannot be empty", str(context.exception))
+    
+    def test_glue_connection_config_validation_invalid_types(self):
+        """Test validation fails for invalid parameter types."""
+        # Test invalid create_connection type
+        config = GlueConnectionConfig()
+        config.create_connection = "true"  # Should be boolean
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("must be a boolean", str(context.exception))
+        
+        # Test invalid use_existing_connection type
+        config = GlueConnectionConfig()
+        config.use_existing_connection = 123  # Should be string
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("must be a string", str(context.exception))
 
 
 class TestConnectionConfig(unittest.TestCase):
@@ -56,6 +157,358 @@ class TestConnectionConfig(unittest.TestCase):
         self.assertEqual(config.schema, "public")
         self.assertEqual(config.username, "testuser")
         self.assertEqual(config.password, "testpass")
+    
+    def test_connection_config_with_glue_connection_config(self):
+        """Test ConnectionConfig with GlueConnectionConfig."""
+        glue_config = GlueConnectionConfig(create_connection=True)
+        
+        config = ConnectionConfig(
+            engine_type="postgresql",
+            connection_string="jdbc:postgresql://localhost:5432/testdb",
+            database="testdb",
+            schema="public",
+            username="testuser",
+            password="testpass",
+            jdbc_driver_path="s3://bucket/drivers/postgresql.jar",
+            glue_connection_config=glue_config
+        )
+        
+        self.assertEqual(config.glue_connection_config, glue_config)
+        self.assertTrue(config.uses_glue_connection())
+        self.assertEqual(config.get_glue_connection_strategy(), "create_glue")
+        self.assertTrue(config.should_create_glue_connection())
+        self.assertFalse(config.should_use_existing_glue_connection())
+        self.assertIsNone(config.get_glue_connection_name_for_creation())
+    
+    def test_connection_config_glue_connection_methods_default(self):
+        """Test Glue Connection methods with default ConnectionConfig."""
+        config = ConnectionConfig(
+            engine_type="postgresql",
+            connection_string="jdbc:postgresql://localhost:5432/testdb",
+            database="testdb",
+            schema="public",
+            username="testuser",
+            password="testpass",
+            jdbc_driver_path="s3://bucket/drivers/postgresql.jar"
+        )
+        
+        self.assertFalse(config.uses_glue_connection())
+        self.assertEqual(config.get_glue_connection_strategy(), "direct_jdbc")
+        self.assertFalse(config.should_create_glue_connection())
+        self.assertFalse(config.should_use_existing_glue_connection())
+        self.assertIsNone(config.get_glue_connection_name_for_creation())
+    
+    def test_connection_config_use_existing_glue_connection(self):
+        """Test ConnectionConfig with existing Glue Connection."""
+        glue_config = GlueConnectionConfig(use_existing_connection="my-connection")
+        
+        config = ConnectionConfig(
+            engine_type="postgresql",
+            connection_string="jdbc:postgresql://localhost:5432/testdb",
+            database="testdb",
+            schema="public",
+            username="testuser",
+            password="testpass",
+            jdbc_driver_path="s3://bucket/drivers/postgresql.jar",
+            glue_connection_config=glue_config
+        )
+        
+        self.assertTrue(config.uses_glue_connection())
+        self.assertEqual(config.get_glue_connection_strategy(), "use_glue")
+        self.assertFalse(config.should_create_glue_connection())
+        self.assertTrue(config.should_use_existing_glue_connection())
+        self.assertEqual(config.get_glue_connection_name_for_creation(), "my-connection")
+    
+    @patch('glue_job.config.job_config.logging.getLogger')
+    def test_connection_config_iceberg_with_glue_connection_warning(self, mock_logger):
+        """Test that Iceberg engines log warning when Glue Connection parameters are provided."""
+        mock_logger_instance = Mock()
+        mock_logger.return_value = mock_logger_instance
+        
+        glue_config = GlueConnectionConfig(create_connection=True)
+        iceberg_config = {
+            'database_name': 'test_db',
+            'table_name': 'test_table',
+            'warehouse_location': 's3://test-bucket/warehouse/'
+        }
+        
+        # Creating the config will trigger validation in __post_init__
+        config = ConnectionConfig(
+            engine_type="iceberg",
+            connection_string="",  # Not used for Iceberg
+            database="test_db",
+            schema="test_table",  # table_name for Iceberg
+            username="",  # Not used for Iceberg
+            password="",  # Not used for Iceberg
+            jdbc_driver_path="",  # Not used for Iceberg
+            iceberg_config=iceberg_config,
+            glue_connection_config=glue_config
+        )
+        
+        # Check that warning was logged
+        mock_logger_instance.warning.assert_called_once()
+        warning_call = mock_logger_instance.warning.call_args[0][0]
+        self.assertIn("Glue Connection parameters provided for Iceberg engine", warning_call)
+        self.assertIn("will be ignored", warning_call)
+    
+    def test_connection_config_jdbc_validation_with_existing_glue_connection(self):
+        """Test JDBC validation when using existing Glue Connection."""
+        glue_config = GlueConnectionConfig(use_existing_connection="my-connection")
+        
+        # When using existing Glue Connection, some JDBC parameters are not required
+        config = ConnectionConfig(
+            engine_type="postgresql",
+            connection_string="",  # Not required when using existing connection
+            database="testdb",
+            schema="public",
+            username="",  # Not required when using existing connection
+            password="",  # Not required when using existing connection
+            jdbc_driver_path="",  # Not required when using existing connection
+            glue_connection_config=glue_config
+        )
+        
+        # Should not raise validation error
+        config.validate()
+    
+    def test_connection_config_jdbc_validation_with_create_glue_connection(self):
+        """Test JDBC validation when creating new Glue Connection."""
+        glue_config = GlueConnectionConfig(create_connection=True)
+        
+        # When creating Glue Connection, all JDBC parameters are required
+        # The validation happens in __post_init__, so we catch the exception during object creation
+        with self.assertRaises(ValueError) as context:
+            config = ConnectionConfig(
+                engine_type="postgresql",
+                connection_string="",  # Required for creation
+                database="testdb",
+                schema="public",
+                username="testuser",
+                password="testpass",
+                jdbc_driver_path="s3://bucket/drivers/postgresql.jar",
+                glue_connection_config=glue_config
+            )
+        self.assertIn("Connection string is required when creating Glue Connection", str(context.exception))
+
+
+class TestJobConfigurationParserGlueConnection(unittest.TestCase):
+    """Test JobConfigurationParser Glue Connection functionality."""
+    
+    def test_parse_glue_connection_params_create_source(self):
+        """Test parsing createSourceConnection parameter."""
+        args = {'createSourceConnection': 'true'}
+        
+        config = JobConfigurationParser.parse_glue_connection_params(args, 'SOURCE')
+        
+        self.assertTrue(config.create_connection)
+        self.assertIsNone(config.use_existing_connection)
+        self.assertEqual(config.connection_strategy, "create_glue")
+        self.assertTrue(config.uses_glue_connection())
+    
+    def test_parse_glue_connection_params_use_target(self):
+        """Test parsing useTargetConnection parameter."""
+        args = {'useTargetConnection': 'my-existing-connection'}
+        
+        config = JobConfigurationParser.parse_glue_connection_params(args, 'TARGET')
+        
+        self.assertFalse(config.create_connection)
+        self.assertEqual(config.use_existing_connection, 'my-existing-connection')
+        self.assertEqual(config.connection_strategy, "use_glue")
+        self.assertTrue(config.uses_glue_connection())
+    
+    def test_parse_glue_connection_params_default(self):
+        """Test parsing with no Glue Connection parameters."""
+        args = {}
+        
+        config = JobConfigurationParser.parse_glue_connection_params(args, 'SOURCE')
+        
+        self.assertFalse(config.create_connection)
+        self.assertIsNone(config.use_existing_connection)
+        self.assertEqual(config.connection_strategy, "direct_jdbc")
+        self.assertFalse(config.uses_glue_connection())
+    
+    def test_parse_glue_connection_params_boolean_variations(self):
+        """Test parsing createConnection with various boolean representations."""
+        test_cases = [
+            ('true', True),
+            ('True', True),
+            ('TRUE', True),
+            ('1', True),
+            ('yes', True),
+            ('false', False),
+            ('False', False),
+            ('FALSE', False),
+            ('0', False),
+            ('no', False),
+            ('', False),
+            ('invalid', False)
+        ]
+        
+        for value, expected in test_cases:
+            with self.subTest(value=value, expected=expected):
+                args = {'createSourceConnection': value}
+                config = JobConfigurationParser.parse_glue_connection_params(args, 'SOURCE')
+                self.assertEqual(config.create_connection, expected)
+    
+    def test_validate_glue_connection_params_success(self):
+        """Test successful validation of Glue Connection parameters."""
+        # Test no conflicts
+        args = {
+            'createSourceConnection': 'true',
+            'useTargetConnection': 'my-connection',
+            'SOURCE_ENGINE_TYPE': 'postgresql',
+            'TARGET_ENGINE_TYPE': 'oracle',
+            'SOURCE_CONNECTION_STRING': 'jdbc:postgresql://localhost:5432/testdb',
+            'SOURCE_DB_USER': 'testuser',
+            'SOURCE_DB_PASSWORD': 'testpass'
+        }
+        
+        # Should not raise - this tests the basic conflict detection, not comprehensive validation
+        try:
+            result = JobConfigurationParser.validate_glue_connection_params(args)
+            # If it returns a result, validation passed
+            self.assertIsInstance(result, dict)
+        except Exception as e:
+            # If it's not a parameter conflict error, that's unexpected
+            if "mutually exclusive" not in str(e):
+                self.fail(f"Unexpected validation error: {e}")
+    
+    def test_validate_glue_connection_params_source_conflict(self):
+        """Test validation fails for conflicting source parameters."""
+        from glue_job.network.glue_connection_errors import GlueConnectionParameterError
+        
+        args = {
+            'createSourceConnection': 'true',
+            'useSourceConnection': 'my-connection'
+        }
+        
+        with self.assertRaises(GlueConnectionParameterError) as context:
+            JobConfigurationParser.validate_glue_connection_params(args)
+        self.assertIn("mutually exclusive", str(context.exception))
+        self.assertIn("createSourceConnection", str(context.exception))
+        self.assertIn("useSourceConnection", str(context.exception))
+    
+    def test_validate_glue_connection_params_target_conflict(self):
+        """Test validation fails for conflicting target parameters."""
+        from glue_job.network.glue_connection_errors import GlueConnectionParameterError
+        
+        args = {
+            'createTargetConnection': 'true',
+            'useTargetConnection': 'my-connection'
+        }
+        
+        with self.assertRaises(GlueConnectionParameterError) as context:
+            JobConfigurationParser.validate_glue_connection_params(args)
+        self.assertIn("mutually exclusive", str(context.exception))
+        self.assertIn("createTargetConnection", str(context.exception))
+        self.assertIn("useTargetConnection", str(context.exception))
+    
+    @patch('glue_job.config.parsers.logger')
+    def test_validate_engine_specific_glue_connection_params_iceberg_warning(self, mock_logger):
+        """Test that Iceberg engines generate warnings for Glue Connection parameters."""
+        args = {
+            'SOURCE_ENGINE_TYPE': 'iceberg',
+            'TARGET_ENGINE_TYPE': 'postgresql',
+            'createSourceConnection': 'true',
+            'useTargetConnection': 'my-connection'
+        }
+        
+        JobConfigurationParser.validate_engine_specific_glue_connection_params(args)
+        
+        # Check that warning was logged for Iceberg source
+        mock_logger.warning.assert_called()
+        warning_calls = [call[0][0] for call in mock_logger.warning.call_args_list]
+        
+        # Should have warning about createSourceConnection for Iceberg
+        iceberg_warning_found = any(
+            'createSourceConnection' in call and 'Iceberg' in call and 'ignored' in call
+            for call in warning_calls
+        )
+        self.assertTrue(iceberg_warning_found, f"Expected Iceberg warning not found in: {warning_calls}")
+    
+    @patch('glue_job.config.parsers.logger')
+    def test_validate_engine_specific_glue_connection_params_no_warning_for_jdbc(self, mock_logger):
+        """Test that JDBC engines do not generate warnings for Glue Connection parameters."""
+        args = {
+            'SOURCE_ENGINE_TYPE': 'postgresql',
+            'TARGET_ENGINE_TYPE': 'oracle',
+            'createSourceConnection': 'true',
+            'useTargetConnection': 'my-connection'
+        }
+        
+        JobConfigurationParser.validate_engine_specific_glue_connection_params(args)
+        
+        # Should not have any warnings for JDBC engines
+        mock_logger.warning.assert_not_called()
+    
+    def test_create_connection_config_with_glue_support_jdbc_create(self):
+        """Test creating ConnectionConfig with Glue Connection creation for JDBC engine."""
+        args = {
+            'SOURCE_ENGINE_TYPE': 'postgresql',
+            'SOURCE_CONNECTION_STRING': 'jdbc:postgresql://localhost:5432/testdb',
+            'SOURCE_DATABASE': 'testdb',
+            'SOURCE_SCHEMA': 'public',
+            'SOURCE_DB_USER': 'testuser',
+            'SOURCE_DB_PASSWORD': 'testpass',
+            'SOURCE_JDBC_DRIVER_S3_PATH': 's3://bucket/drivers/postgresql.jar',
+            'createSourceConnection': 'true'
+        }
+        
+        config = JobConfigurationParser.create_connection_config_with_glue_support(
+            args, 'SOURCE', None, {}
+        )
+        
+        self.assertEqual(config.engine_type, 'postgresql')
+        self.assertIsNotNone(config.glue_connection_config)
+        self.assertTrue(config.glue_connection_config.create_connection)
+        self.assertTrue(config.uses_glue_connection())
+        self.assertEqual(config.get_glue_connection_strategy(), 'create_glue')
+    
+    def test_create_connection_config_with_glue_support_jdbc_use_existing(self):
+        """Test creating ConnectionConfig with existing Glue Connection for JDBC engine."""
+        args = {
+            'SOURCE_ENGINE_TYPE': 'oracle',
+            'SOURCE_CONNECTION_STRING': 'jdbc:oracle:thin:@localhost:1521:testdb',
+            'SOURCE_DATABASE': 'testdb',
+            'SOURCE_SCHEMA': 'testschema',
+            'SOURCE_DB_USER': 'testuser',
+            'SOURCE_DB_PASSWORD': 'testpass',
+            'SOURCE_JDBC_DRIVER_S3_PATH': 's3://bucket/drivers/oracle.jar',
+            'useSourceConnection': 'my-existing-connection'
+        }
+        
+        config = JobConfigurationParser.create_connection_config_with_glue_support(
+            args, 'SOURCE', None, {}
+        )
+        
+        self.assertEqual(config.engine_type, 'oracle')
+        self.assertIsNotNone(config.glue_connection_config)
+        self.assertEqual(config.glue_connection_config.use_existing_connection, 'my-existing-connection')
+        self.assertTrue(config.uses_glue_connection())
+        self.assertEqual(config.get_glue_connection_strategy(), 'use_glue')
+    
+    def test_create_connection_config_with_glue_support_iceberg_ignores_glue_params(self):
+        """Test creating ConnectionConfig for Iceberg engine ignores Glue Connection parameters."""
+        iceberg_config = {
+            'database_name': 'test_db',
+            'table_name': 'test_table',
+            'warehouse_location': 's3://test-bucket/warehouse/'
+        }
+        
+        args = {
+            'SOURCE_ENGINE_TYPE': 'iceberg',
+            'SOURCE_DATABASE': 'test_db',
+            'SOURCE_SCHEMA': 'test_table',
+            'createSourceConnection': 'true'  # Should be ignored for Iceberg
+        }
+        
+        config = JobConfigurationParser.create_connection_config_with_glue_support(
+            args, 'SOURCE', None, iceberg_config
+        )
+        
+        self.assertEqual(config.engine_type, 'iceberg')
+        self.assertIsNone(config.glue_connection_config)  # Should be None for Iceberg
+        self.assertFalse(config.uses_glue_connection())
+        self.assertEqual(config.get_glue_connection_strategy(), 'direct_jdbc')
 
 
 class TestJobConfig(unittest.TestCase):
@@ -159,6 +612,270 @@ class TestConnectionStringBuilder(unittest.TestCase):
                 port=3306,
                 database="testdb"
             )
+
+
+class TestSecretsManagerHandler(unittest.TestCase):
+    """Test SecretsManagerHandler functionality."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        # Mock boto3 to avoid actual AWS calls during testing
+        self.boto3_patcher = patch('glue_job.config.secrets_manager_handler.boto3')
+        self.mock_boto3 = self.boto3_patcher.start()
+        
+        # Mock the client
+        self.mock_client = Mock()
+        self.mock_boto3.client.return_value = self.mock_client
+        
+        # Create handler instance
+        self.handler = SecretsManagerHandler(region_name="us-east-1", job_name="test-job")
+    
+    def tearDown(self):
+        """Clean up test fixtures."""
+        self.boto3_patcher.stop()
+    
+    def test_secrets_manager_handler_initialization(self):
+        """Test SecretsManagerHandler initialization."""
+        self.assertEqual(self.handler.region_name, "us-east-1")
+        self.assertEqual(self.handler.job_name, "test-job")
+        self.assertIsNotNone(self.handler.structured_logger)
+        self.assertIsNotNone(self.handler.retry_handler)
+        self.mock_boto3.client.assert_called_once_with('secretsmanager', region_name='us-east-1')
+    
+    def test_generate_secret_name(self):
+        """Test secret name generation."""
+        connection_name = "my-test-connection"
+        expected_name = "/aws-glue/my-test-connection"
+        
+        secret_name = self.handler.generate_secret_name(connection_name)
+        self.assertEqual(secret_name, expected_name)
+    
+    def test_generate_secret_name_with_special_characters(self):
+        """Test secret name generation with special characters."""
+        connection_name = "my test connection!"
+        expected_name = "/aws-glue/my-test-connection-"
+        
+        secret_name = self.handler.generate_secret_name(connection_name)
+        self.assertEqual(secret_name, expected_name)
+    
+    def test_validate_secret_inputs_success(self):
+        """Test successful secret input validation."""
+        # Should not raise any exception
+        self.handler._validate_secret_inputs("test-connection", "username", "password")
+    
+    def test_validate_secret_inputs_empty_connection_name(self):
+        """Test validation fails for empty connection name."""
+        with self.assertRaises(SecretsManagerError) as context:
+            self.handler._validate_secret_inputs("", "username", "password")
+        self.assertIn("Connection name cannot be empty", str(context.exception))
+    
+    def test_validate_secret_inputs_empty_username(self):
+        """Test validation fails for empty username."""
+        with self.assertRaises(SecretsManagerError) as context:
+            self.handler._validate_secret_inputs("test-connection", "", "password")
+        self.assertIn("Username cannot be empty", str(context.exception))
+    
+    def test_validate_secret_inputs_empty_password(self):
+        """Test validation fails for empty password."""
+        with self.assertRaises(SecretsManagerError) as context:
+            self.handler._validate_secret_inputs("test-connection", "username", "")
+        self.assertIn("Password cannot be empty", str(context.exception))
+    
+    def test_validate_secret_inputs_invalid_connection_name_format(self):
+        """Test validation fails for invalid connection name format."""
+        with self.assertRaises(SecretsManagerError) as context:
+            self.handler._validate_secret_inputs("test connection!", "username", "password")
+        self.assertIn("must contain only alphanumeric characters", str(context.exception))
+    
+    @patch('glue_job.config.secrets_manager_handler.json.dumps')
+    def test_create_secret_success(self, mock_json_dumps):
+        """Test successful secret creation."""
+        # Mock successful AWS response
+        mock_response = {'ARN': 'arn:aws:secretsmanager:us-east-1:123456789012:secret:/aws-glue/test-connection-AbCdEf'}
+        self.mock_client.create_secret.return_value = mock_response
+        mock_json_dumps.return_value = '{"username": "testuser", "password": "testpass"}'
+        
+        # Call create_secret
+        secret_arn = self.handler.create_secret("test-connection", "testuser", "testpass")
+        
+        # Verify result
+        self.assertEqual(secret_arn, mock_response['ARN'])
+        
+        # Verify AWS client was called correctly
+        self.mock_client.create_secret.assert_called_once()
+        call_args = self.mock_client.create_secret.call_args[1]
+        
+        self.assertEqual(call_args['Name'], '/aws-glue/test-connection')
+        self.assertIn('Database credentials for Glue Connection', call_args['Description'])
+        self.assertEqual(call_args['SecretString'], '{"username": "testuser", "password": "testpass"}')
+        self.assertIsInstance(call_args['Tags'], list)
+        
+        # Verify tags
+        tags_dict = {tag['Key']: tag['Value'] for tag in call_args['Tags']}
+        self.assertEqual(tags_dict['CreatedBy'], 'AWS-Glue-Data-Replication')
+        self.assertEqual(tags_dict['JobName'], 'test-job')
+        self.assertEqual(tags_dict['ConnectionName'], 'test-connection')
+        self.assertIn('CreatedAt', tags_dict)
+    
+    def test_create_secret_resource_exists_error(self):
+        """Test secret creation fails when secret already exists."""
+        # Mock AWS error response
+        error_response = {
+            'Error': {
+                'Code': 'ResourceExistsException',
+                'Message': 'The request failed because a resource with the specified name already exists.'
+            }
+        }
+        
+        # Mock ClientError in the handler
+        with patch('glue_job.config.secrets_manager_handler.ClientError', MockClientError):
+            client_error = MockClientError(error_response, 'CreateSecret')
+            self.mock_client.create_secret.side_effect = client_error
+            
+            # Call create_secret and expect SecretCreationError
+            with self.assertRaises(SecretCreationError) as context:
+                self.handler.create_secret("test-connection", "testuser", "testpass")
+            
+            self.assertIn("Secret already exists", str(context.exception))
+            self.assertEqual(context.exception.aws_error_code, 'ResourceExistsException')
+    
+    def test_create_secret_permission_error(self):
+        """Test secret creation fails with permission error."""
+        # Mock AWS permission error response
+        error_response = {
+            'Error': {
+                'Code': 'AccessDeniedException',
+                'Message': 'User is not authorized to perform: secretsmanager:CreateSecret'
+            }
+        }
+        
+        # Mock ClientError in the handler
+        with patch('glue_job.config.secrets_manager_handler.ClientError', MockClientError):
+            client_error = MockClientError(error_response, 'CreateSecret')
+            self.mock_client.create_secret.side_effect = client_error
+            
+            # Call create_secret and expect SecretsManagerPermissionError
+            with self.assertRaises(SecretsManagerPermissionError) as context:
+                self.handler.create_secret("test-connection", "testuser", "testpass")
+            
+            self.assertIn("Insufficient permissions", str(context.exception))
+            self.assertEqual(context.exception.operation, 'create_secret')
+    
+    def test_create_secret_retryable_error(self):
+        """Test secret creation fails with retryable error."""
+        # Mock AWS throttling error response
+        error_response = {
+            'Error': {
+                'Code': 'ThrottlingException',
+                'Message': 'Rate exceeded'
+            }
+        }
+        
+        # Mock ClientError in the handler
+        with patch('glue_job.config.secrets_manager_handler.ClientError', MockClientError):
+            client_error = MockClientError(error_response, 'CreateSecret')
+            self.mock_client.create_secret.side_effect = client_error
+            
+            # Call create_secret and expect SecretsManagerRetryableError
+            with self.assertRaises(SecretsManagerRetryableError) as context:
+                self.handler.create_secret("test-connection", "testuser", "testpass")
+            
+            self.assertIn("Transient error", str(context.exception))
+            self.assertEqual(context.exception.retry_after_seconds, 5)
+    
+    def test_validate_secret_permissions_success(self):
+        """Test successful permissions validation."""
+        # Mock successful list_secrets call
+        self.mock_client.list_secrets.return_value = {'SecretList': []}
+        
+        result = self.handler.validate_secret_permissions()
+        
+        self.assertTrue(result)
+        self.mock_client.list_secrets.assert_called_once_with(MaxResults=1)
+    
+    def test_validate_secret_permissions_access_denied(self):
+        """Test permissions validation fails with access denied."""
+        # Mock AWS permission error response
+        error_response = {
+            'Error': {
+                'Code': 'AccessDeniedException',
+                'Message': 'User is not authorized to perform: secretsmanager:ListSecrets'
+            }
+        }
+        
+        # Mock ClientError in the handler
+        with patch('glue_job.config.secrets_manager_handler.ClientError', MockClientError):
+            client_error = MockClientError(error_response, 'ListSecrets')
+            self.mock_client.list_secrets.side_effect = client_error
+            
+            # Call validate_secret_permissions and expect SecretsManagerPermissionError
+            with self.assertRaises(SecretsManagerPermissionError) as context:
+                self.handler.validate_secret_permissions()
+            
+            self.assertIn("Insufficient permissions", str(context.exception))
+            self.assertEqual(context.exception.operation, 'list_secrets')
+    
+    def test_cleanup_secret_on_failure_success(self):
+        """Test successful secret cleanup."""
+        # Mock successful delete_secret call
+        self.mock_client.delete_secret.return_value = {}
+        
+        result = self.handler.cleanup_secret_on_failure("test-connection")
+        
+        self.assertTrue(result)
+        self.mock_client.delete_secret.assert_called_once_with(
+            SecretId='/aws-glue/test-connection',
+            ForceDeleteWithoutRecovery=True
+        )
+    
+    def test_cleanup_secret_on_failure_not_found(self):
+        """Test secret cleanup when secret doesn't exist."""
+        # Mock AWS not found error response
+        error_response = {
+            'Error': {
+                'Code': 'ResourceNotFoundException',
+                'Message': 'Secrets Manager can\'t find the specified secret.'
+            }
+        }
+        
+        # Mock ClientError in the handler
+        with patch('glue_job.config.secrets_manager_handler.ClientError', MockClientError):
+            client_error = MockClientError(error_response, 'DeleteSecret')
+            self.mock_client.delete_secret.side_effect = client_error
+            
+            result = self.handler.cleanup_secret_on_failure("test-connection")
+            
+            # Should return True because cleanup is successful (secret doesn't exist)
+            self.assertTrue(result)
+    
+    def test_cleanup_secret_on_failure_error(self):
+        """Test secret cleanup fails with other error."""
+        # Mock AWS error response
+        error_response = {
+            'Error': {
+                'Code': 'InternalServiceError',
+                'Message': 'An error occurred on the server side.'
+            }
+        }
+        
+        # Mock ClientError in the handler
+        with patch('glue_job.config.secrets_manager_handler.ClientError', MockClientError):
+            client_error = MockClientError(error_response, 'DeleteSecret')
+            self.mock_client.delete_secret.side_effect = client_error
+            
+            result = self.handler.cleanup_secret_on_failure("test-connection")
+            
+            # Should return False because cleanup failed
+            self.assertFalse(result)
+    
+    def test_get_secret_arn_for_connection(self):
+        """Test getting secret ARN format for connection."""
+        connection_name = "test-connection"
+        
+        arn = self.handler.get_secret_arn_for_connection(connection_name)
+        
+        expected_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:/aws-glue/test-connection"
+        self.assertEqual(arn, expected_arn)
 
 
 if __name__ == '__main__':

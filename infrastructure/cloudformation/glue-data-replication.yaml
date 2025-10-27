@@ -340,6 +340,41 @@ Parameters:
       - 'NO'
     ConstraintDescription: 'Must be YES or NO'
 
+  # Glue Connection Configuration Parameters (Optional)
+  CreateSourceConnection:
+    Type: String
+    Description: 'Create a new Glue Connection for source database with AWS Secrets Manager integration (JDBC databases only, not applicable for Iceberg). Credentials will be securely stored in Secrets Manager at /aws-glue/{JobName}-source-jdbc-connection'
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    ConstraintDescription: 'Must be true or false'
+
+  CreateTargetConnection:
+    Type: String
+    Description: 'Create a new Glue Connection for target database with AWS Secrets Manager integration (JDBC databases only, not applicable for Iceberg). Credentials will be securely stored in Secrets Manager at /aws-glue/{JobName}-target-jdbc-connection'
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    ConstraintDescription: 'Must be true or false'
+
+  UseSourceConnection:
+    Type: String
+    Description: 'Name of existing Glue Connection to use for source database (JDBC databases only, optional). Mutually exclusive with CreateSourceConnection parameter'
+    Default: ''
+    MaxLength: 255
+    AllowedPattern: '^[a-zA-Z0-9_-]*$'
+    ConstraintDescription: 'Must be empty or contain only alphanumeric characters, hyphens, and underscores'
+
+  UseTargetConnection:
+    Type: String
+    Description: 'Name of existing Glue Connection to use for target database (JDBC databases only, optional). Mutually exclusive with CreateTargetConnection parameter'
+    Default: ''
+    MaxLength: 255
+    AllowedPattern: '^[a-zA-Z0-9_-]*$'
+    ConstraintDescription: 'Must be empty or contain only alphanumeric characters, hyphens, and underscores'
+
   # Observability Configuration Parameters (Optional)
   LogRetentionDays:
     Type: Number
@@ -434,6 +469,30 @@ Conditions:
     - !Condition CreateSourceGlueEndpoint
     - !Condition CreateTargetGlueEndpoint
   
+  # Glue Connection Conditions
+  ShouldCreateSourceConnection: !And
+    - !Not [!Condition IsSourceIceberg]
+    - !Equals [!Ref CreateSourceConnection, 'true']
+  ShouldCreateTargetConnection: !And
+    - !Not [!Condition IsTargetIceberg]
+    - !Equals [!Ref CreateTargetConnection, 'true']
+  HasUseSourceConnection: !And
+    - !Not [!Condition IsSourceIceberg]
+    - !Not [!Equals [!Ref UseSourceConnection, '']]
+  HasUseTargetConnection: !And
+    - !Not [!Condition IsTargetIceberg]
+    - !Not [!Equals [!Ref UseTargetConnection, '']]
+
+  # Database Engine Type Conditions for Driver Class Mapping
+  IsSourceOracle: !Equals [!Ref SourceEngineType, 'oracle']
+  IsSourceSqlServer: !Equals [!Ref SourceEngineType, 'sqlserver']
+  IsSourcePostgreSQL: !Equals [!Ref SourceEngineType, 'postgresql']
+  IsSourceDb2: !Equals [!Ref SourceEngineType, 'db2']
+  IsTargetOracle: !Equals [!Ref TargetEngineType, 'oracle']
+  IsTargetSqlServer: !Equals [!Ref TargetEngineType, 'sqlserver']
+  IsTargetPostgreSQL: !Equals [!Ref TargetEngineType, 'postgresql']
+  IsTargetDb2: !Equals [!Ref TargetEngineType, 'db2']
+
   # Observability Conditions
   EnableDashboard: !Equals [!Ref EnableCloudWatchDashboard, 'YES']
   EnableAlarms: !Equals [!Ref EnableCloudWatchAlarms, 'YES']
@@ -473,8 +532,8 @@ Resources:
                   - s3:GetObjectVersion
                 Resource:
                   - !Sub
-                    - 'arn:aws:s3:::${S3Path}'
-                    - S3Path: !Select [1, !Split ['s3://', !Ref GlueJobScriptS3Path]]
+                    - 'arn:aws:s3:::${BucketName}/*'
+                    - BucketName: !Select [2, !Split ['/', !Ref GlueJobScriptS3Path]]
               # S3 permissions for job script bucket (for bookmarks and other job data)
               - Effect: Allow
                 Action:
@@ -500,8 +559,8 @@ Resources:
                     - s3:GetObjectVersion
                   Resource:
                     - !Sub
-                      - 'arn:aws:s3:::${S3Path}'
-                      - S3Path: !Select [1, !Split ['s3://', !Ref SourceJdbcDriverS3Path]]
+                      - 'arn:aws:s3:::${BucketName}/*'
+                      - BucketName: !Select [2, !Split ['/', !Ref SourceJdbcDriverS3Path]]
                 - !Ref AWS::NoValue
               # S3 permissions for target JDBC driver (only when not Iceberg)
               - !If
@@ -512,8 +571,8 @@ Resources:
                     - s3:GetObjectVersion
                   Resource:
                     - !Sub
-                      - 'arn:aws:s3:::${S3Path}'
-                      - S3Path: !Select [1, !Split ['s3://', !Ref TargetJdbcDriverS3Path]]
+                      - 'arn:aws:s3:::${BucketName}/*'
+                      - BucketName: !Select [2, !Split ['/', !Ref TargetJdbcDriverS3Path]]
                 - !Ref AWS::NoValue
               # S3 permissions for Glue job modules (when provided)
               - !If
@@ -524,8 +583,8 @@ Resources:
                     - s3:GetObjectVersion
                   Resource:
                     - !Sub
-                      - 'arn:aws:s3:::${S3Path}'
-                      - S3Path: !Select [1, !Split ['s3://', !Ref GlueJobModulesS3Path]]
+                      - 'arn:aws:s3:::${BucketName}/*'
+                      - BucketName: !Select [2, !Split ['/', !Ref GlueJobModulesS3Path]]
                 - !Ref AWS::NoValue
               # S3 permissions for Glue job modules bucket (for bookmarks when modules bucket is used)
               - !If
@@ -627,7 +686,7 @@ Resources:
                   - logs:DescribeQueryDefinitions
                 Resource: '*'
 
-              # Glue Connection permissions for cross-VPC access
+              # Glue Connection permissions for cross-VPC access and JDBC connections
               - Effect: Allow
                 Action:
                   - glue:GetConnection
@@ -639,6 +698,16 @@ Resources:
                 Resource:
                   - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-source-network-connection'
                   - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-target-network-connection'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-source-jdbc-connection'
+                  - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${JobName}-target-jdbc-connection'
+                  - !If
+                    - HasUseSourceConnection
+                    - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${UseSourceConnection}'
+                    - !Ref 'AWS::NoValue'
+                  - !If
+                    - HasUseTargetConnection
+                    - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:connection/${UseTargetConnection}'
+                    - !Ref 'AWS::NoValue'
               # Enhanced EC2 permissions for VPC network interface management
               - Effect: Allow
                 Action:
@@ -794,6 +863,28 @@ Resources:
                     - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/${TargetDatabase}'
                     - !Sub 'arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/${TargetDatabase}/*'
                 - !Ref AWS::NoValue
+              # AWS Secrets Manager permissions for Glue Connection credential storage
+              - Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:DeleteSecret
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/aws-glue/*'
+              # KMS permissions for Secrets Manager encryption (using default key)
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                  - kms:CreateGrant
+                Resource:
+                  - !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+                Condition:
+                  StringEquals:
+                    'kms:ViaService': !Sub 'secretsmanager.${AWS::Region}.amazonaws.com'
 
   # Source Network Connection for VPC Access
   SourceNetworkConnection:
@@ -824,6 +915,120 @@ Resources:
           SecurityGroupIdList: !Ref TargetSecurityGroupIds
           SubnetId: !Select [0, !Ref TargetSubnetIds]
           AvailabilityZone: !Ref TargetAvailabilityZone
+
+  # AWS Secrets Manager Secret for Source Database Credentials
+  SourceDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: ShouldCreateSourceConnection
+    Properties:
+      Name: !Sub '/aws-glue/${JobName}-source-jdbc-connection'
+      Description: !Sub 'Database credentials for source ${SourceEngineType} database - ${JobName}'
+      SecretString: !Sub |
+        {
+          "username": "${SourceDbUser}",
+          "password": "${SourceDbPassword}"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-source-db-credentials'
+        - Key: Purpose
+          Value: 'Source database credentials for Glue Connection'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # Source JDBC Connection (created when requested for JDBC databases)
+  # Enhanced for Visual ETL compatibility with JDBC driver information and Secrets Manager integration
+  SourceJdbcConnection:
+    Type: AWS::Glue::Connection
+    Condition: ShouldCreateSourceConnection
+    DependsOn: SourceDatabaseSecret
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${JobName}-source-jdbc-connection'
+        Description: !Sub 'Universal JDBC connection for source ${SourceEngineType} database - Compatible with both programmatic jobs and Visual ETL - Uses AWS Secrets Manager for credentials'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Ref SourceConnectionString
+          SECRET_ID: !Ref SourceDatabaseSecret
+          # JDBC Driver information for Visual ETL compatibility
+          JDBC_DRIVER_JAR_URI: !Ref SourceJdbcDriverS3Path
+          JDBC_DRIVER_CLASS_NAME: !If
+            - IsSourceOracle
+            - 'oracle.jdbc.OracleDriver'
+            - !If
+              - IsSourceSqlServer
+              - 'com.microsoft.sqlserver.jdbc.SQLServerDriver'
+              - !If
+                - IsSourcePostgreSQL
+                - 'org.postgresql.Driver'
+                - !If
+                  - IsSourceDb2
+                  - 'com.ibm.db2.jcc.DB2Driver'
+                  - !Ref 'AWS::NoValue'
+        PhysicalConnectionRequirements: !If
+          - HasSourceNetworkConfig
+          - SecurityGroupIdList: !Ref SourceSecurityGroupIds
+            SubnetId: !Select [0, !Ref SourceSubnetIds]
+            AvailabilityZone: !Ref SourceAvailabilityZone
+          - !Ref 'AWS::NoValue'
+
+  # AWS Secrets Manager Secret for Target Database Credentials
+  TargetDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: ShouldCreateTargetConnection
+    Properties:
+      Name: !Sub '/aws-glue/${JobName}-target-jdbc-connection'
+      Description: !Sub 'Database credentials for target ${TargetEngineType} database - ${JobName}'
+      SecretString: !Sub |
+        {
+          "username": "${TargetDbUser}",
+          "password": "${TargetDbPassword}"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${JobName}-target-db-credentials'
+        - Key: Purpose
+          Value: 'Target database credentials for Glue Connection'
+        - Key: JobName
+          Value: !Ref JobName
+
+  # Target JDBC Connection (created when requested for JDBC databases)
+  # Enhanced for Visual ETL compatibility with JDBC driver information and Secrets Manager integration
+  TargetJdbcConnection:
+    Type: AWS::Glue::Connection
+    Condition: ShouldCreateTargetConnection
+    DependsOn: TargetDatabaseSecret
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub '${JobName}-target-jdbc-connection'
+        Description: !Sub 'Universal JDBC connection for target ${TargetEngineType} database - Compatible with both programmatic jobs and Visual ETL - Uses AWS Secrets Manager for credentials'
+        ConnectionType: JDBC
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Ref TargetConnectionString
+          SECRET_ID: !Ref TargetDatabaseSecret
+          # JDBC Driver information for Visual ETL compatibility
+          JDBC_DRIVER_JAR_URI: !Ref TargetJdbcDriverS3Path
+          JDBC_DRIVER_CLASS_NAME: !If
+            - IsTargetOracle
+            - 'oracle.jdbc.OracleDriver'
+            - !If
+              - IsTargetSqlServer
+              - 'com.microsoft.sqlserver.jdbc.SQLServerDriver'
+              - !If
+                - IsTargetPostgreSQL
+                - 'org.postgresql.Driver'
+                - !If
+                  - IsTargetDb2
+                  - 'com.ibm.db2.jcc.DB2Driver'
+                  - !Ref 'AWS::NoValue'
+        PhysicalConnectionRequirements: !If
+          - HasTargetNetworkConfig
+          - SecurityGroupIdList: !Ref TargetSecurityGroupIds
+            SubnetId: !Select [0, !Ref TargetSubnetIds]
+            AvailabilityZone: !Ref TargetAvailabilityZone
+          - !Ref 'AWS::NoValue'
 
   # Lambda function to look up route table IDs for source subnets
   SourceRouteTableLookupFunction:
@@ -1493,6 +1698,14 @@ Resources:
         '--TARGET_GLUE_CONNECTION_NAME': !If [HasTargetNetworkConfig, !Sub '${JobName}-target-network-connection', '']
         '--SOURCE_S3_VPC_ENDPOINT_ID': !If [CreateSourceS3Endpoint, !Ref SourceS3VpcEndpoint, '']
         '--TARGET_S3_VPC_ENDPOINT_ID': !If [CreateTargetS3Endpoint, !Ref TargetS3VpcEndpoint, '']
+        '--CREATE_SOURCE_CONNECTION': !Ref CreateSourceConnection
+        '--CREATE_TARGET_CONNECTION': !Ref CreateTargetConnection
+        '--USE_SOURCE_CONNECTION': !Ref UseSourceConnection
+        '--USE_TARGET_CONNECTION': !Ref UseTargetConnection
+        '--SOURCE_JDBC_CONNECTION_NAME': !If [ShouldCreateSourceConnection, !Sub '${JobName}-source-jdbc-connection', '']
+        '--TARGET_JDBC_CONNECTION_NAME': !If [ShouldCreateTargetConnection, !Sub '${JobName}-target-jdbc-connection', '']
+        '--SOURCE_DATABASE_SECRET_ARN': !If [ShouldCreateSourceConnection, !Ref SourceDatabaseSecret, '']
+        '--TARGET_DATABASE_SECRET_ARN': !If [ShouldCreateTargetConnection, !Ref TargetDatabaseSecret, '']
         '--VALIDATE_CONNECTIONS': 'true'
         '--CONNECTION_TIMEOUT_SECONDS': '30'
         '--MANUAL_BOOKMARK_CONFIG': !Ref ManualBookmarkConfig
@@ -1501,18 +1714,20 @@ Resources:
       MaxRetries: !Ref MaxRetries
       Timeout: !Ref Timeout
       GlueVersion: '4.0'
-      Connections:
-        Connections: !If
-          - HasBothNetworkConfigs
-          - - !Sub '${JobName}-source-network-connection'
+      Connections: !If
+        - HasBothNetworkConfigs
+        - Connections:
+            - !Sub '${JobName}-source-network-connection'
             - !Sub '${JobName}-target-network-connection'
+        - !If
+          - HasOnlySourceNetworkConfig
+          - Connections:
+              - !Sub '${JobName}-source-network-connection'
           - !If
-            - HasOnlySourceNetworkConfig
-            - - !Sub '${JobName}-source-network-connection'
-            - !If
-              - HasOnlyTargetNetworkConfig
-              - - !Sub '${JobName}-target-network-connection'
-              - []
+            - HasOnlyTargetNetworkConfig
+            - Connections:
+                - !Sub '${JobName}-target-network-connection'
+            - !Ref 'AWS::NoValue'
       WorkerType: !If [IsStandardWorker, !Ref 'AWS::NoValue', !Ref WorkerType]
       NumberOfWorkers: !If [IsStandardWorker, !Ref 'AWS::NoValue', !Ref NumberOfWorkers]
       MaxCapacity: !If [IsStandardWorker, 10, !Ref 'AWS::NoValue']
@@ -1561,6 +1776,34 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-TargetNetworkConnectionName'
   
+  SourceJdbcConnectionName:
+    Condition: ShouldCreateSourceConnection
+    Description: 'Name of the created source JDBC connection'
+    Value: !Ref SourceJdbcConnection
+    Export:
+      Name: !Sub '${AWS::StackName}-SourceJdbcConnectionName'
+  
+  TargetJdbcConnectionName:
+    Condition: ShouldCreateTargetConnection
+    Description: 'Name of the created target JDBC connection'
+    Value: !Ref TargetJdbcConnection
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetJdbcConnectionName'
+  
+  SourceDatabaseSecretArn:
+    Condition: ShouldCreateSourceConnection
+    Description: 'ARN of the AWS Secrets Manager secret for source database credentials'
+    Value: !Ref SourceDatabaseSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-SourceDatabaseSecretArn'
+  
+  TargetDatabaseSecretArn:
+    Condition: ShouldCreateTargetConnection
+    Description: 'ARN of the AWS Secrets Manager secret for target database credentials'
+    Value: !Ref TargetDatabaseSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetDatabaseSecretArn'
+  
   NetworkConfiguration:
     Description: 'Summary of network configuration used'
     Value: !Sub
@@ -1592,6 +1835,21 @@ Outputs:
         TargetEndpoint: !If [CreateTargetS3Endpoint, 'Created', 'Not Created']
     Export:
       Name: !Sub '${AWS::StackName}-S3VpcEndpointConfiguration'
+
+  GlueConnectionConfiguration:
+    Description: 'Summary of Glue Connection configuration with Secrets Manager integration'
+    Value: !Sub
+      - 'Source JDBC: ${SourceJdbc}, Target JDBC: ${TargetJdbc}, Source Existing: ${SourceExisting}, Target Existing: ${TargetExisting}, Secrets Manager: ${SecretsManager}'
+      - SourceJdbc: !If [ShouldCreateSourceConnection, 'Created with Secrets Manager', 'Not Created']
+        TargetJdbc: !If [ShouldCreateTargetConnection, 'Created with Secrets Manager', 'Not Created']
+        SourceExisting: !If [HasUseSourceConnection, !Ref UseSourceConnection, 'None']
+        TargetExisting: !If [HasUseTargetConnection, !Ref UseTargetConnection, 'None']
+        SecretsManager: !If 
+          - ShouldCreateSourceConnection
+          - !If [ShouldCreateTargetConnection, 'Both connections use Secrets Manager', 'Source connection uses Secrets Manager']
+          - !If [ShouldCreateTargetConnection, 'Target connection uses Secrets Manager', 'Not used']
+    Export:
+      Name: !Sub '${AWS::StackName}-GlueConnectionConfiguration'
 
   # Observability Outputs
   GlueJobLogGroup:

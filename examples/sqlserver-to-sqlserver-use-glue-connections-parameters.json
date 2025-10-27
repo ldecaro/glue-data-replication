@@ -1,0 +1,78 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "sqlserver-to-sqlserver-use-glue-connections"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "sqlserver"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "sqlserver"
+  },
+  {
+    "ParameterKey": "UseSourceConnection",
+    "ParameterValue": "production-sqlserver-connection"
+  },
+  {
+    "ParameterKey": "UseTargetConnection",
+    "ParameterValue": "reporting-sqlserver-connection"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "ProductionDB"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "ReportingDB"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "dbo"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "dbo"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "orders,customers,products,inventory"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://my-glue-assets/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "1440"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.2X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "4"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "AlarmNotificationEmail",
+    "ParameterValue": "dataops@example.com"
+  }
+]

@@ -18,8 +18,14 @@ except ImportError:
         """Mock implementation for local testing"""
         return {opt: f"mock_{opt.lower()}" for opt in options}
 
-from .job_config import JobConfig, NetworkConfig, ConnectionConfig
+from .job_config import JobConfig, NetworkConfig, ConnectionConfig, GlueConnectionConfig
 from .database_engines import DatabaseEngineManager
+from .glue_connection_validator import validate_glue_connection_parameters_comprehensive
+from ..network.glue_connection_errors import (
+    GlueConnectionParameterError,
+    GlueConnectionEngineCompatibilityError
+)
+from ..monitoring.logging import StructuredLogger
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +70,14 @@ class JobConfigurationParser:
         'TARGET_FORMAT_VERSION'
     ]
     
+    # Glue Connection parameters
+    GLUE_CONNECTION_PARAMS = [
+        'createSourceConnection',
+        'createTargetConnection',
+        'useSourceConnection',
+        'useTargetConnection'
+    ]
+    
     # Optional network configuration parameters
     OPTIONAL_NETWORK_PARAMS = [
         'SOURCE_VPC_ID',
@@ -85,8 +99,8 @@ class JobConfigurationParser:
         'MANUAL_BOOKMARK_CONFIG'
     ]
     
-    # All optional parameters (network + Iceberg + bookmark)
-    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS
+    # All optional parameters (network + Iceberg + bookmark + Glue Connection)
+    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS + GLUE_CONNECTION_PARAMS
     
     @classmethod
     def get_required_params_for_engines(cls, source_engine: str, target_engine: str) -> List[str]:
@@ -328,6 +342,229 @@ class JobConfigurationParser:
                 logger.info(f"JDBC parameter validation passed for {connection_type} {engine_type} engine")
     
     @classmethod
+    def parse_glue_connection_params(cls, args: Dict[str, str], connection_type: str) -> 'GlueConnectionConfig':
+        """Parse Glue Connection parameters for source or target with enhanced logging.
+        
+        Args:
+            args: Parsed job arguments
+            connection_type: 'SOURCE' or 'TARGET' to identify which connection to parse
+            
+        Returns:
+            GlueConnectionConfig: Parsed Glue Connection configuration
+            
+        Raises:
+            GlueConnectionParameterError: If Glue Connection parameters are invalid
+        """
+        from .job_config import GlueConnectionConfig
+        
+        structured_logger = StructuredLogger("JobConfigurationParser")
+        
+        # Get connection type prefix for parameter names
+        prefix = connection_type.upper()
+        
+        # Parse create connection parameter
+        create_param_name = f'create{connection_type.title()}Connection'
+        create_connection_str = args.get(create_param_name, '').strip().lower()
+        create_connection = create_connection_str in ['true', '1', 'yes']
+        
+        # Parse use existing connection parameter
+        use_param_name = f'use{connection_type.title()}Connection'
+        use_existing_connection = args.get(use_param_name, '').strip()
+        use_existing_connection = use_existing_connection if use_existing_connection else None
+        
+        # Determine connection strategy
+        if create_connection:
+            strategy = "create_glue"
+            structured_logger.info(
+                f"Glue Connection strategy determined: CREATE new connection",
+                connection_type=connection_type.lower(),
+                strategy=strategy,
+                parameter=create_param_name
+            )
+        elif use_existing_connection:
+            strategy = "use_glue"
+            structured_logger.info(
+                f"Glue Connection strategy determined: USE existing connection",
+                connection_type=connection_type.lower(),
+                strategy=strategy,
+                connection_name=use_existing_connection,
+                parameter=use_param_name
+            )
+        else:
+            strategy = "direct_jdbc"
+            structured_logger.info(
+                f"Glue Connection strategy determined: DIRECT JDBC connection",
+                connection_type=connection_type.lower(),
+                strategy=strategy
+            )
+        
+        # Create and validate configuration
+        try:
+            glue_config = GlueConnectionConfig(
+                create_connection=create_connection,
+                use_existing_connection=use_existing_connection
+            )
+            
+            # Validate the configuration
+            glue_config.validate()
+            
+            structured_logger.debug(
+                f"Glue Connection configuration parsed successfully",
+                connection_type=connection_type.lower(),
+                strategy=glue_config.connection_strategy,
+                create_connection=create_connection,
+                use_existing_connection=use_existing_connection
+            )
+            
+        except Exception as e:
+            structured_logger.error(
+                f"Failed to parse Glue Connection configuration",
+                connection_type=connection_type.lower(),
+                error=str(e)
+            )
+            raise GlueConnectionParameterError(
+                f"Invalid Glue Connection configuration for {connection_type.lower()}: {str(e)}"
+            )
+        
+        logger.info(f"Parsed Glue Connection configuration for {connection_type}: strategy={glue_config.connection_strategy}")
+        
+        return glue_config
+    
+    @classmethod
+    def validate_glue_connection_params(cls, args: Dict[str, str]) -> Dict[str, Any]:
+        """Validate Glue Connection parameter combinations with comprehensive validation.
+        
+        Args:
+            args: Parsed job arguments
+            
+        Returns:
+            Dict containing validation results and configurations
+            
+        Raises:
+            GlueConnectionParameterError: If Glue Connection parameter combinations are invalid
+            GlueConnectionEngineCompatibilityError: If engine compatibility issues exist
+        """
+        structured_logger = StructuredLogger("JobConfigurationParser")
+        
+        try:
+            structured_logger.info("Starting comprehensive Glue Connection parameter validation")
+            
+            # Use comprehensive validator
+            validation_results = validate_glue_connection_parameters_comprehensive(args)
+            
+            # Log validation summary
+            structured_logger.info(
+                "Glue Connection parameter validation completed successfully",
+                source_strategy=validation_results.get('source_config', {}).get('strategy') if validation_results.get('source_config') else None,
+                target_strategy=validation_results.get('target_config', {}).get('strategy') if validation_results.get('target_config') else None,
+                warnings_count=len(validation_results.get('validation_warnings', [])),
+                errors_count=len(validation_results.get('validation_errors', []))
+            )
+            
+            return validation_results
+            
+        except (GlueConnectionParameterError, GlueConnectionEngineCompatibilityError) as e:
+            structured_logger.error(
+                "Glue Connection parameter validation failed",
+                error_type=type(e).__name__,
+                error_message=str(e)
+            )
+            raise e
+        except Exception as e:
+            structured_logger.error(
+                "Unexpected error during Glue Connection parameter validation",
+                error=str(e)
+            )
+            raise GlueConnectionParameterError(
+                f"Validation failed due to unexpected error: {str(e)}"
+            )
+    
+    @classmethod
+    def validate_engine_specific_glue_connection_params(cls, args: Dict[str, str]) -> None:
+        """Validate Glue Connection parameters against engine types and log warnings for Iceberg.
+        
+        Args:
+            args: Parsed job arguments
+        """
+        source_engine = args.get('SOURCE_ENGINE_TYPE', '').lower()
+        target_engine = args.get('TARGET_ENGINE_TYPE', '').lower()
+        
+        # Check for Glue Connection parameters
+        glue_connection_params = [
+            ('createSourceConnection', 'source', source_engine),
+            ('createTargetConnection', 'target', target_engine),
+            ('useSourceConnection', 'source', source_engine),
+            ('useTargetConnection', 'target', target_engine)
+        ]
+        
+        for param_name, connection_type, engine_type in glue_connection_params:
+            param_value = args.get(param_name, '').strip()
+            
+            # If parameter is provided and engine is Iceberg, log warning
+            if param_value and DatabaseEngineManager.is_iceberg_engine(engine_type):
+                logger.warning(
+                    f"Glue Connection parameter '{param_name}' provided for {connection_type} "
+                    f"Iceberg engine '{engine_type}' will be ignored. "
+                    "Iceberg connections use existing connection mechanism."
+                )
+        
+        logger.info("Engine-specific Glue Connection parameter validation completed")
+    
+    @classmethod
+    def create_connection_config_with_glue_support(cls, args: Dict[str, str], 
+                                                  connection_type: str,
+                                                  network_config: Optional['NetworkConfig'],
+                                                  iceberg_config: Dict[str, Any]) -> 'ConnectionConfig':
+        """Create ConnectionConfig with Glue Connection support.
+        
+        Args:
+            args: Parsed job arguments
+            connection_type: 'SOURCE' or 'TARGET'
+            network_config: Network configuration (if any)
+            iceberg_config: Iceberg configuration (if Iceberg engine)
+            
+        Returns:
+            ConnectionConfig: Configured connection with Glue Connection support
+        """
+        from .job_config import ConnectionConfig
+        
+        engine_type = args[f'{connection_type}_ENGINE_TYPE'].lower()
+        
+        # Parse Glue Connection configuration
+        glue_connection_config = None
+        if not DatabaseEngineManager.is_iceberg_engine(engine_type):
+            # Only parse Glue Connection config for JDBC engines
+            glue_connection_config = cls.parse_glue_connection_params(args, connection_type)
+        
+        if DatabaseEngineManager.is_iceberg_engine(engine_type):
+            # For Iceberg engines, use Iceberg-specific parameters
+            return ConnectionConfig(
+                engine_type=engine_type,
+                connection_string='',  # Not used for Iceberg
+                database=iceberg_config['database_name'],
+                schema=iceberg_config['table_name'],  # Schema field reused for table name in Iceberg
+                username='',  # Not used for Iceberg
+                password='',  # Not used for Iceberg
+                jdbc_driver_path='',  # Not used for Iceberg
+                network_config=network_config,
+                iceberg_config=iceberg_config,
+                glue_connection_config=glue_connection_config  # Will be None for Iceberg
+            )
+        else:
+            # For JDBC engines, use traditional parameters
+            return ConnectionConfig(
+                engine_type=engine_type,
+                connection_string=args[f'{connection_type}_CONNECTION_STRING'],
+                database=args[f'{connection_type}_DATABASE'],
+                schema=args[f'{connection_type}_SCHEMA'],
+                username=args[f'{connection_type}_DB_USER'],
+                password=args[f'{connection_type}_DB_PASSWORD'],
+                jdbc_driver_path=args[f'{connection_type}_JDBC_DRIVER_S3_PATH'],
+                network_config=network_config,
+                glue_connection_config=glue_connection_config
+            )
+    
+    @classmethod
     def validate_iceberg_parameters(cls, args: Dict[str, str], connection_type: str) -> Dict[str, Any]:
         """Validate and extract Iceberg-specific parameters.
         
@@ -425,33 +662,10 @@ class JobConfigurationParser:
         Returns:
             ConnectionConfig: Configured connection
         """
-        engine_type = args[f'{connection_type}_ENGINE_TYPE'].lower()
-        
-        if DatabaseEngineManager.is_iceberg_engine(engine_type):
-            # For Iceberg engines, use Iceberg-specific parameters
-            return ConnectionConfig(
-                engine_type=engine_type,
-                connection_string='',  # Not used for Iceberg
-                database=iceberg_config['database_name'],
-                schema=iceberg_config['table_name'],  # Schema field reused for table name in Iceberg
-                username='',  # Not used for Iceberg
-                password='',  # Not used for Iceberg
-                jdbc_driver_path='',  # Not used for Iceberg
-                network_config=network_config,
-                iceberg_config=iceberg_config
-            )
-        else:
-            # For JDBC engines, use traditional parameters
-            return ConnectionConfig(
-                engine_type=engine_type,
-                connection_string=args[f'{connection_type}_CONNECTION_STRING'],
-                database=args[f'{connection_type}_DATABASE'],
-                schema=args[f'{connection_type}_SCHEMA'],
-                username=args[f'{connection_type}_DB_USER'],
-                password=args[f'{connection_type}_DB_PASSWORD'],
-                jdbc_driver_path=args[f'{connection_type}_JDBC_DRIVER_S3_PATH'],
-                network_config=network_config
-            )
+        # Use the enhanced method with Glue Connection support
+        return cls.create_connection_config_with_glue_support(
+            args, connection_type, network_config, iceberg_config
+        )
     
     @classmethod
     def parse_network_config(cls, args: Dict[str, str], prefix: str) -> Optional[NetworkConfig]:
@@ -490,6 +704,10 @@ class JobConfigurationParser:
     def create_job_config(cls, args: Dict[str, str]) -> JobConfig:
         """Create JobConfig from parsed arguments."""
         try:
+            # Validate Glue Connection parameters
+            cls.validate_glue_connection_params(args)
+            cls.validate_engine_specific_glue_connection_params(args)
+            
             # Parse table names (comma-separated)
             table_names = [table.strip() for table in args['TABLE_NAMES'].split(',') if table.strip()]
             

@@ -96,7 +96,82 @@ aws s3 cp jdbc-drivers/sqlserver/mssql-jdbc-12.2.0.jre11.jar s3://[your-bucket-n
 ```
 For more details, please check [Driver Download and Storage.](docs/DATABASE_CONFIGURATION_GUIDE.md#driver-download-and-storage).
 
-### 3. Configure Parameters
+### 3. Configure Glue Connections and AWS Secrets Manager (Optional)
+
+The solution supports AWS Glue Connections for enhanced security and centralized connection management. When using Glue Connections, database credentials are automatically stored in AWS Secrets Manager for enhanced security.
+
+#### Glue Connection Configuration Options
+
+**Option 1: Create New Glue Connections with Secrets Manager Integration**
+```json
+{
+  "ParameterKey": "CreateSourceConnection",
+  "ParameterValue": "true"
+},
+{
+  "ParameterKey": "CreateTargetConnection", 
+  "ParameterValue": "true"
+}
+```
+
+**Option 2: Use Existing Glue Connections**
+```json
+{
+  "ParameterKey": "UseSourceConnection",
+  "ParameterValue": "my-existing-oracle-connection"
+},
+{
+  "ParameterKey": "UseTargetConnection",
+  "ParameterValue": "my-existing-postgres-connection"
+}
+```
+
+**Option 3: Mixed Configuration**
+```json
+{
+  "ParameterKey": "CreateSourceConnection",
+  "ParameterValue": "true"
+},
+{
+  "ParameterKey": "UseTargetConnection",
+  "ParameterValue": "existing-target-connection"
+}
+```
+
+#### AWS Secrets Manager Integration
+
+When `CreateSourceConnection=true` or `CreateTargetConnection=true`, the system automatically:
+
+1. **Creates AWS Secrets Manager secrets** at `/aws-glue/{connection-name}`
+2. **Stores credentials securely** in JSON format: `{"username": "user", "password": "pass"}`
+3. **Configures Glue Connections** to reference secrets instead of storing credentials directly
+4. **Provides enhanced security** through encrypted credential storage and fine-grained access control
+
+#### Required IAM Permissions
+
+The CloudFormation template automatically includes the necessary IAM permissions for Secrets Manager operations:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "secretsmanager:CreateSecret",
+    "secretsmanager:GetSecretValue",
+    "secretsmanager:PutSecretValue", 
+    "secretsmanager:DescribeSecret"
+  ],
+  "Resource": "arn:aws:secretsmanager:*:*:secret:/aws-glue/*"
+}
+```
+
+#### Parameter Validation Rules
+
+- `CreateSourceConnection` and `UseSourceConnection` are mutually exclusive
+- `CreateTargetConnection` and `UseTargetConnection` are mutually exclusive  
+- Glue Connection parameters only apply to JDBC engines (`oracle`, `sqlserver`, `postgresql`, `db2`)
+- When source or target engine is `iceberg`, Glue Connection parameters are ignored with warnings
+
+### 4. Configure Parameters
 
 Update your parameter file (e.g., `examples/sqlserver-to-sqlserver-parameters.json`) with your specific values:
 
@@ -120,7 +195,7 @@ Update your parameter file (e.g., `examples/sqlserver-to-sqlserver-parameters.js
 **Note**: The `GlueJobScriptS3Path` parameter will be automatically updated by the deploy script to point to the correct S3 location (`s3://bucket/src/glue_job/main.py`).
 ```
 
-### 4. Deploy CloudFormation Stack
+### 5. Deploy CloudFormation Stack
 
 The enhanced deploy script handles the complete deployment process:
 
@@ -144,7 +219,7 @@ The enhanced deploy script handles the complete deployment process:
 ./deploy.sh -s your-stack -b your-bucket -p your-params.json --dry-run
 ```
 
-### 5. Verify Deployment
+### 6. Verify Deployment
 
 #### Check Stack Status:
 ```bash
@@ -213,6 +288,12 @@ Example security group rule for VPC endpoints:
 4. **IAM Permission Issues**:
    - Error: `User: ... is not authorized to perform: glue:GetConnection`
    - Solution: Verify IAM role has necessary Glue permissions
+
+5. **AWS Secrets Manager Permission Issues** (when using Glue Connections):
+   - Error: `User: ... is not authorized to perform: secretsmanager:CreateSecret`
+   - Solution: Ensure the Glue job execution role has AWS Secrets Manager permissions
+   - Required permissions: `secretsmanager:CreateSecret`, `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`, `secretsmanager:DescribeSecret`
+   - Note: These permissions are automatically included in the CloudFormation template when using `CreateSourceConnection=true` or `CreateTargetConnection=true`
 
 ### Monitoring
 
