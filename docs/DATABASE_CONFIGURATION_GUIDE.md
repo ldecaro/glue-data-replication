@@ -2,6 +2,30 @@
 
 This guide provides detailed information about supported database configurations, JDBC driver requirements, and connection setup for the AWS Glue Data Replication system.
 
+## Universal Glue Connections
+
+**NEW**: The system now creates **Universal Glue Connections** that work with both:
+- **Programmatic Glue Jobs**: Your existing job code continues to work unchanged
+- **Visual ETL**: Connections are discoverable and testable in Glue Studio
+
+### What Makes Connections Universal
+
+When you set `CreateSourceConnection: true` or `CreateTargetConnection: true`, the system automatically creates connections with:
+
+✅ **JDBC Connection URL**: Database connection string  
+✅ **Credentials**: Username and password  
+✅ **Network Configuration**: VPC, security groups, subnets  
+✅ **JDBC Driver Path**: S3 location of the JDBC driver JAR  
+✅ **Driver Class Name**: Automatically mapped based on engine type  
+
+### Benefits
+
+- **Single Connection**: One connection works everywhere
+- **No Code Changes**: Existing jobs continue working
+- **Visual ETL Ready**: Connections appear in Glue Studio
+- **Connection Testing**: Test connections in Glue Console
+- **Automatic Driver Mapping**: Driver class automatically selected based on engine type
+
 ## Supported Database Engines
 
 The system supports five major database engines with cross-database replication capabilities:
@@ -180,6 +204,23 @@ Warehouse Location: s3://{bucket}/{prefix}/
 - Optimized for analytical workloads and large-scale data processing
 
 ## JDBC Driver Management
+
+### Automatic Driver Class Mapping
+
+The system automatically maps database engine types to their corresponding JDBC driver classes:
+
+| Engine Type | Driver Class | JAR File Pattern |
+|-------------|--------------|------------------|
+| `oracle` | `oracle.jdbc.OracleDriver` | `ojdbc*.jar` |
+| `sqlserver` | `com.microsoft.sqlserver.jdbc.SQLServerDriver` | `mssql-jdbc-*.jar` |
+| `postgresql` | `org.postgresql.Driver` | `postgresql-*.jar` |
+| `db2` | `com.ibm.db2.jcc.DB2Driver` | `db2jcc*.jar` |
+
+**How It Works**:
+1. You specify the engine type in parameters (e.g., `SourceEngineType: sqlserver`)
+2. CloudFormation automatically sets the correct driver class name
+3. Your S3 driver path is included in the connection properties
+4. Both programmatic jobs and Visual ETL can use the connection
 
 ### Driver Download and Storage
 

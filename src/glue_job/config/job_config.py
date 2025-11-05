@@ -5,8 +5,59 @@ This module contains the core configuration dataclasses that define
 job parameters, network settings, and database connection configurations.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
+
+
+@dataclass
+class GlueConnectionConfig:
+    """Configuration for Glue Connection operations."""
+    create_connection: bool = False
+    use_existing_connection: Optional[str] = None
+    
+    @property
+    def connection_strategy(self) -> str:
+        """Determine the connection strategy based on configuration.
+        
+        Returns:
+            str: Connection strategy - 'create_glue', 'use_glue', or 'direct_jdbc'
+        """
+        if self.create_connection:
+            return "create_glue"
+        elif self.use_existing_connection:
+            return "use_glue"
+        else:
+            return "direct_jdbc"
+    
+    def uses_glue_connection(self) -> bool:
+        """Check if this configuration uses Glue Connection.
+        
+        Returns:
+            bool: True if using Glue Connection (create or use existing), False otherwise
+        """
+        return self.create_connection or bool(self.use_existing_connection)
+    
+    def validate(self) -> None:
+        """Validate Glue Connection configuration.
+        
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        # Check for mutually exclusive parameters
+        if self.create_connection and self.use_existing_connection:
+            raise ValueError("Cannot both create and use existing Glue Connection - parameters are mutually exclusive")
+        
+        # Validate use_existing_connection parameter
+        if self.use_existing_connection is not None:
+            if not isinstance(self.use_existing_connection, str):
+                raise ValueError("use_existing_connection must be a string")
+            if not self.use_existing_connection.strip():
+                raise ValueError("use_existing_connection cannot be empty when specified")
+        
+        # Validate create_connection parameter
+        if not isinstance(self.create_connection, bool):
+            raise ValueError("create_connection must be a boolean")
 
 
 @dataclass
@@ -48,6 +99,7 @@ class ConnectionConfig:
     jdbc_driver_path: str
     network_config: Optional[NetworkConfig] = None
     iceberg_config: Optional[Dict[str, Any]] = None
+    glue_connection_config: Optional[GlueConnectionConfig] = None
     
     def __post_init__(self):
         """Validate connection configuration after initialization."""
@@ -60,6 +112,19 @@ class ConnectionConfig:
         
         # Import here to avoid circular imports
         from .database_engines import DatabaseEngineManager
+        
+        # Validate Glue Connection configuration if present
+        if self.glue_connection_config:
+            self.glue_connection_config.validate()
+            
+            # Warn if Glue Connection parameters are provided for Iceberg engines
+            if DatabaseEngineManager.is_iceberg_engine(self.engine_type):
+                if self.glue_connection_config.uses_glue_connection():
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Glue Connection parameters provided for Iceberg engine '{self.engine_type}' "
+                        "will be ignored. Iceberg connections use existing connection mechanism."
+                    )
         
         # Skip JDBC validation for Iceberg engines
         if DatabaseEngineManager.is_iceberg_engine(self.engine_type):
@@ -83,18 +148,44 @@ class ConnectionConfig:
     
     def _validate_jdbc_config(self) -> None:
         """Validate JDBC-specific configuration."""
-        if not self.connection_string:
-            raise ValueError("Connection string cannot be empty")
+        # When using existing Glue Connection, some JDBC parameters may not be required
+        # as they will be retrieved from the Glue Connection metadata
+        using_existing_glue_connection = (
+            self.glue_connection_config and 
+            self.glue_connection_config.use_existing_connection
+        )
+        
+        # When creating a new Glue Connection, all JDBC parameters are required
+        creating_glue_connection = (
+            self.glue_connection_config and 
+            self.glue_connection_config.create_connection
+        )
+        
+        # These are always required regardless of connection strategy
         if not self.database:
             raise ValueError("Database name cannot be empty")
         if not self.schema:
             raise ValueError("Schema name cannot be empty")
-        if not self.username:
-            raise ValueError("Username cannot be empty")
-        if not self.password:
-            raise ValueError("Password cannot be empty")
-        if not self.jdbc_driver_path:
-            raise ValueError("JDBC driver path cannot be empty")
+        
+        # Additional validation for Glue Connection creation (check first for specific error messages)
+        if creating_glue_connection:
+            if not self.connection_string:
+                raise ValueError("Connection string is required when creating Glue Connection")
+            if not self.username:
+                raise ValueError("Username is required when creating Glue Connection")
+            if not self.password:
+                raise ValueError("Password is required when creating Glue Connection")
+        
+        # For direct JDBC or creating Glue Connection, validate all parameters
+        elif not using_existing_glue_connection:
+            if not self.connection_string:
+                raise ValueError("Connection string cannot be empty")
+            if not self.username:
+                raise ValueError("Username cannot be empty")
+            if not self.password:
+                raise ValueError("Password cannot be empty")
+            if not self.jdbc_driver_path:
+                raise ValueError("JDBC driver path cannot be empty")
     
     def is_iceberg_engine(self) -> bool:
         """Check if this connection uses Iceberg engine."""
@@ -112,6 +203,54 @@ class ConnectionConfig:
     def get_glue_connection_name(self) -> Optional[str]:
         """Get the Glue connection name if configured."""
         return self.network_config.glue_connection_name if self.network_config else None
+    
+    def uses_glue_connection(self) -> bool:
+        """Check if this connection uses Glue Connection.
+        
+        Returns:
+            bool: True if using Glue Connection (create or use existing), False otherwise
+        """
+        return (self.glue_connection_config and 
+                self.glue_connection_config.uses_glue_connection())
+    
+    def get_glue_connection_strategy(self) -> str:
+        """Get the Glue Connection strategy.
+        
+        Returns:
+            str: Connection strategy - 'create_glue', 'use_glue', or 'direct_jdbc'
+        """
+        if self.glue_connection_config:
+            return self.glue_connection_config.connection_strategy
+        return "direct_jdbc"
+    
+    def get_glue_connection_name_for_creation(self) -> Optional[str]:
+        """Get the Glue connection name for use with existing connections.
+        
+        Returns:
+            Optional[str]: Connection name if using existing connection, None otherwise
+        """
+        if (self.glue_connection_config and 
+            self.glue_connection_config.use_existing_connection):
+            return self.glue_connection_config.use_existing_connection
+        return None
+    
+    def should_create_glue_connection(self) -> bool:
+        """Check if a new Glue Connection should be created.
+        
+        Returns:
+            bool: True if should create new Glue Connection, False otherwise
+        """
+        return (self.glue_connection_config and 
+                self.glue_connection_config.create_connection)
+    
+    def should_use_existing_glue_connection(self) -> bool:
+        """Check if an existing Glue Connection should be used.
+        
+        Returns:
+            bool: True if should use existing Glue Connection, False otherwise
+        """
+        return (self.glue_connection_config and 
+                bool(self.glue_connection_config.use_existing_connection))
 
 
 @dataclass

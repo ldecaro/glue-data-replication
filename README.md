@@ -5,6 +5,7 @@ A comprehensive AWS Glue-based data replication solution that supports full-load
 ## Features
 
 - **Multi-Database Support**: Oracle, SQL Server, PostgreSQL, DB2, Apache Iceberg
+- **AWS Glue Connection Support**: Create new or use existing AWS Glue Connections for managed JDBC database connectivity with centralized credential management
 - **Cross-VPC Connectivity**: Secure database access across different VPCs
 - **Incremental Processing**: Uses Glue job bookmarks for efficient data synchronization with automatic incremental column detection and manual bookmark configuration ([details](docs/BOOKMARK_DETAILS.md))
 - **Comprehensive Monitoring**: CloudWatch metrics, dashboards, and alarms
@@ -24,10 +25,48 @@ A comprehensive AWS Glue-based data replication solution that supports full-load
                               │
                               ▼
                        ┌──────────────────┐
-                       │  VPC Endpoints   │
+                       │  AWS Services    │
                        │  - Glue API      │
+                       │  - Glue Connections │
                        │  - S3 (optional) │
                        └──────────────────┘
+```
+
+### Connection Strategy Architecture
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Parameter Processing Layer                    │
+├─────────────────────────────────────────────────────────────────┤
+│  JobConfigurationParser (Enhanced)                              │
+│  - Parse createSourceConnection/createTargetConnection          │
+│  - Parse useSourceConnection/useTargetConnection                │
+│  - Validate parameter combinations                              │
+│  - Route to appropriate connection strategy                     │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  Connection Management Layer                     │
+├─────────────────────────────────────────────────────────────────┤
+│  UnifiedConnectionManager (Enhanced)                            │
+│  ├─ GlueConnectionManager (Enhanced)                            │
+│  │  ├─ create_glue_connection()                                 │
+│  │  ├─ use_existing_glue_connection()                           │
+│  │  └─ setup_jdbc_with_connection() (existing)                  │
+│  ├─ JdbcConnectionManager (existing)                            │
+│  └─ IcebergConnectionHandler (unchanged)                       │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Database Access Layer                        │
+├─────────────────────────────────────────────────────────────────┤
+│  JDBC Databases          │         Iceberg Tables              │
+│  - Oracle                │         - Existing mechanism        │
+│  - SQL Server            │         - No changes required       │
+│  - PostgreSQL            │                                     │
+│  - DB2                   │                                     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Modular Code Architecture
@@ -56,6 +95,151 @@ src/glue_job/
 └── utils/                     # Utilities
     └── s3_utils.py            # S3 operations
 ```
+
+## AWS Glue Connections Support
+
+### Overview
+
+The solution supports three connection strategies for JDBC databases (Oracle, SQL Server, PostgreSQL, DB2):
+
+1. **Create New Glue Connections**: Automatically create AWS Glue Connections during job execution
+2. **Use Existing Glue Connections**: Leverage pre-configured AWS Glue Connections
+3. **Direct JDBC Connections**: Traditional direct database connections (existing behavior)
+
+**Note**: Iceberg connections continue using the existing connection mechanism and are not affected by Glue Connection parameters.
+
+### Connection Strategy Decision Matrix
+
+| Source Engine | Target Engine | Glue Connection Parameters | Strategy |
+|---------------|---------------|---------------------------|----------|
+| JDBC          | JDBC          | createConnection=true     | Create new Glue Connection |
+| JDBC          | JDBC          | useConnection=name        | Use existing Glue Connection |
+| JDBC          | JDBC          | No Glue parameters        | Direct JDBC (existing) |
+| JDBC          | Iceberg       | Any Glue parameters       | Source: Glue/JDBC, Target: Iceberg |
+| Iceberg       | JDBC          | Any Glue parameters       | Source: Iceberg, Target: Glue/JDBC |
+| Iceberg       | Iceberg       | Any Glue parameters       | Both: Iceberg (parameters ignored) |
+
+### Glue Connection Parameters
+
+#### Create New Connections
+```json
+{
+  "createSourceConnection": "true",
+  "createTargetConnection": "true"
+}
+```
+
+#### Use Existing Connections
+```json
+{
+  "useSourceConnection": "my-source-connection",
+  "useTargetConnection": "my-target-connection"
+}
+```
+
+#### Parameter Validation Rules
+- `createSourceConnection` and `useSourceConnection` are mutually exclusive
+- `createTargetConnection` and `useTargetConnection` are mutually exclusive
+- Glue Connection parameters are ignored for Iceberg engines (with warning)
+- When `createConnection=true`, all standard JDBC parameters must be present
+- When `useConnection=name`, only the connection name is required
+
+### Benefits of AWS Glue Connections
+
+#### Centralized Credential Management
+- Store database credentials securely in AWS Glue
+- Centralized management across multiple jobs
+- Integration with AWS Secrets Manager for enhanced security
+
+#### Network Configuration
+- Pre-configured VPC and security group settings
+- Simplified cross-VPC database access
+- Reusable network configurations
+
+#### Operational Efficiency
+- Reduced parameter complexity for jobs
+- Standardized connection configurations
+- Easier credential rotation and management
+
+### AWS Secrets Manager Integration
+
+When creating new Glue Connections (`createSourceConnection=true` or `createTargetConnection=true`), the system automatically integrates with AWS Secrets Manager for enhanced security:
+
+#### Automatic Secret Creation
+- Database credentials are stored in AWS Secrets Manager
+- Secret path: `/aws-glue/{connection-name}`
+- JSON format: `{"username": "db_user", "password": "db_password"}`
+- Glue Connection references the secret instead of storing credentials directly
+
+#### Security Benefits
+- **Encryption at Rest**: Credentials encrypted using AWS KMS
+- **Encryption in Transit**: Secure API calls to Secrets Manager
+- **Access Control**: Fine-grained IAM permissions for secret access
+- **Audit Trail**: CloudTrail logging for all secret operations
+- **Rotation Support**: Native AWS credential rotation capabilities
+
+#### Secret Management
+- **Automatic Cleanup**: Secrets are cleaned up if connection creation fails
+- **Unique Naming**: Timestamp-based naming prevents conflicts
+- **Centralized Storage**: All connection secrets stored under `/aws-glue/` prefix
+- **Cross-Job Reuse**: Secrets can be referenced by multiple Glue jobs
+
+#### Required IAM Permissions for Secrets Manager
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:DeleteSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:/aws-glue/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "arn:aws:kms:*:*:key/*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "secretsmanager.*.amazonaws.com"
+        }
+      }
+    }
+  ]
+}
+```
+
+#### Secret Structure Example
+```json
+{
+  "username": "mydbuser",
+  "password": "mydbpassword"
+}
+```
+
+#### Credential Rotation
+- Use AWS Secrets Manager automatic rotation features
+- Update Glue Connection to reference new secret versions
+- No job parameter changes required for rotation
+
+### Differences: Glue Connections vs Direct JDBC
+
+| Aspect | Glue Connections | Direct JDBC |
+|--------|------------------|-------------|
+| **Credential Storage** | AWS Glue/Secrets Manager | CloudFormation parameters |
+| **Network Configuration** | Pre-configured in connection | Specified per job |
+| **Parameter Complexity** | Minimal (connection name only) | Full JDBC details required |
+| **Reusability** | High (across multiple jobs) | Low (job-specific) |
+| **Security** | Centralized, encrypted | Parameter-based |
+| **Management** | AWS Console/API | CloudFormation templates |
+| **Credential Rotation** | Centralized process | Per-job update required |
 
 ## Quick Start
 
@@ -131,6 +315,7 @@ aws glue start-job-run --job-name my-job-name
 
 ### Operations and Monitoring
 - **[Error Handling Guide](docs/ERROR_HANDLING_GUIDE.md)**: Comprehensive error handling during data transfer
+- **[Glue Connections Troubleshooting Guide](docs/GLUE_CONNECTIONS_TROUBLESHOOTING_GUIDE.md)**: Comprehensive troubleshooting for Glue Connections and Secrets Manager
 - **[Observability Guide](docs/OBSERVABILITY_GUIDE.md)**: Monitoring and alerting setup
 - **[Testing Guide](docs/TESTING_GUIDE.md)**: Testing procedures and validation
 - **[DevOps Deployment Guide](docs/DEVOPS_DEPLOYMENT_GUIDE.md)**: CI/CD and automation
@@ -353,7 +538,123 @@ The solution includes comprehensive monitoring:
 3. **Mock Subnet Error**: Update to latest Glue script
 4. **Permission Denied**: Verify IAM role permissions
 
-See the [Deployment Guide](DEPLOYMENT_GUIDE.md) for detailed troubleshooting steps.
+### Glue Connection Issues
+
+#### Connection Creation Failures
+```
+Error: Failed to create Glue Connection 'my-connection'
+```
+**Solutions**:
+- Verify IAM permissions for `glue:CreateConnection`
+- Check VPC and subnet configurations
+- Ensure security group allows database access
+- Validate JDBC connection string format
+
+#### Connection Not Found
+```
+Error: Glue Connection 'my-connection' does not exist
+```
+**Solutions**:
+- Verify connection name spelling and case sensitivity
+- Check connection exists in the correct AWS region
+- Ensure IAM permissions for `glue:GetConnection`
+- Validate connection is in the same AWS account
+
+#### Parameter Validation Errors
+```
+Error: Cannot specify both createSourceConnection and useSourceConnection
+```
+**Solutions**:
+- Use only one connection strategy per source/target
+- Remove conflicting parameters from configuration
+- Review parameter validation rules in documentation
+
+#### Iceberg + Glue Connection Warnings
+```
+Warning: Glue Connection parameters ignored for Iceberg engine
+```
+**Expected Behavior**:
+- Iceberg connections use existing mechanism
+- Glue Connection parameters are safely ignored
+- No action required - this is normal behavior
+
+#### Network Connectivity Issues
+```
+Error: Connection timeout when using Glue Connection
+```
+**Solutions**:
+- Verify Glue Connection network configuration
+- Check security group rules allow database port access
+- Ensure VPC routing allows connectivity to database
+- Test connection using AWS Glue console
+
+#### Permission Issues
+```
+Error: Access denied when creating/using Glue Connection
+```
+**Required IAM Permissions**:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "glue:CreateConnection",
+        "glue:GetConnection",
+        "glue:GetConnections"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+### AWS Secrets Manager Issues
+
+#### Secret Creation Failures
+```
+Error: Failed to create AWS Secrets Manager secret for connection 'my-connection'
+```
+**Solutions**:
+- Verify IAM permissions for `secretsmanager:CreateSecret`
+- Check AWS Secrets Manager service availability in region
+- Ensure secret name doesn't already exist
+- Validate secret name follows AWS naming conventions
+
+#### Secret Access Denied
+```
+Error: Access denied when accessing secret '/aws-glue/my-connection'
+```
+**Required IAM Permissions**:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:/aws-glue/*"
+    }
+  ]
+}
+```
+
+#### Secret Cleanup Issues
+```
+Error: Failed to cleanup secret after connection creation failure
+```
+**Solutions**:
+- Check IAM permissions for `secretsmanager:DeleteSecret`
+- Manually delete orphaned secrets via AWS Console
+- Review CloudWatch logs for detailed error information
+- Ensure proper error handling in job configuration
+
+See the [Deployment Guide](DEPLOYMENT_GUIDE.md) for detailed troubleshooting steps and the [Glue Connections Troubleshooting Guide](docs/GLUE_CONNECTIONS_TROUBLESHOOTING_GUIDE.md) for specific Glue Connection and Secrets Manager issues.
 
 ## Examples
 
@@ -380,6 +681,56 @@ See the [Deployment Guide](DEPLOYMENT_GUIDE.md) for detailed troubleshooting ste
 # Iceberg as target (traditional database to Iceberg)
 # Configure target engine as "iceberg" with warehouse location
 # See examples/sqlserver-to-iceberg-parameters.json
+```
+
+### AWS Glue Connection Examples
+
+#### Create New Glue Connections
+```json
+{
+  "ParameterKey": "createSourceConnection",
+  "ParameterValue": "true"
+},
+{
+  "ParameterKey": "createTargetConnection", 
+  "ParameterValue": "true"
+},
+{
+  "ParameterKey": "SOURCE_CONNECTION_STRING",
+  "ParameterValue": "jdbc:oracle:thin:@source-host:1521:ORCL"
+},
+{
+  "ParameterKey": "TARGET_CONNECTION_STRING",
+  "ParameterValue": "jdbc:postgresql://target-host:5432/mydb"
+}
+```
+
+#### Use Existing Glue Connections
+```json
+{
+  "ParameterKey": "useSourceConnection",
+  "ParameterValue": "my-oracle-connection"
+},
+{
+  "ParameterKey": "useTargetConnection",
+  "ParameterValue": "my-postgres-connection"
+}
+```
+
+#### Mixed Connection Strategies
+```json
+{
+  "ParameterKey": "createSourceConnection",
+  "ParameterValue": "true"
+},
+{
+  "ParameterKey": "useTargetConnection",
+  "ParameterValue": "existing-target-connection"
+},
+{
+  "ParameterKey": "SOURCE_CONNECTION_STRING",
+  "ParameterValue": "jdbc:sqlserver://source-host:1433;databaseName=mydb"
+}
 ```
 
 ### Manual Bookmark Configuration

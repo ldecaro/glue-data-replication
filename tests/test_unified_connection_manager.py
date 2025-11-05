@@ -56,6 +56,28 @@ class MockNetworkConfig:
     def requires_glue_connection(self) -> bool:
         return self.has_network_config() and bool(self.glue_connection_name)
 
+# Mock Glue Connection configuration for testing
+@dataclass
+class MockGlueConnectionConfig:
+    create_connection: bool = False
+    use_existing_connection: Optional[str] = None
+    
+    @property
+    def connection_strategy(self) -> str:
+        if self.create_connection:
+            return "create_glue"
+        elif self.use_existing_connection:
+            return "use_glue"
+        else:
+            return "direct_jdbc"
+    
+    def uses_glue_connection(self) -> bool:
+        return self.create_connection or bool(self.use_existing_connection)
+    
+    def validate(self) -> None:
+        if self.create_connection and self.use_existing_connection:
+            raise ValueError("Cannot both create and use existing Glue Connection")
+
 @dataclass
 class MockConnectionConfig:
     engine_type: str
@@ -70,6 +92,7 @@ class MockConnectionConfig:
     catalog_id: Optional[str] = None
     table_name: str = ''
     format_version: str = '2'
+    glue_connection_config: Optional[MockGlueConnectionConfig] = None
     
     def validate(self):
         pass
@@ -87,6 +110,34 @@ class MockConnectionConfig:
             'catalog_id': self.catalog_id,
             'format_version': self.format_version
         }
+    
+    def uses_glue_connection(self) -> bool:
+        """Check if this connection uses Glue Connection."""
+        return (self.glue_connection_config and 
+                self.glue_connection_config.uses_glue_connection())
+    
+    def get_glue_connection_strategy(self) -> str:
+        """Get the Glue Connection strategy."""
+        if self.glue_connection_config:
+            return self.glue_connection_config.connection_strategy
+        return "direct_jdbc"
+    
+    def get_glue_connection_name_for_creation(self) -> Optional[str]:
+        """Get the Glue connection name for use with existing connections."""
+        if (self.glue_connection_config and 
+            self.glue_connection_config.use_existing_connection):
+            return self.glue_connection_config.use_existing_connection
+        return None
+    
+    def should_create_glue_connection(self) -> bool:
+        """Check if a new Glue Connection should be created."""
+        return (self.glue_connection_config and 
+                self.glue_connection_config.create_connection)
+    
+    def should_use_existing_glue_connection(self) -> bool:
+        """Check if an existing Glue Connection should be used."""
+        return (self.glue_connection_config and 
+                bool(self.glue_connection_config.use_existing_connection))
 
 # Import the class under test
 import sys
@@ -447,7 +498,83 @@ class TestUnifiedConnectionManager:
         """Test validation cache key generation for JDBC."""
         cache_key = unified_manager._get_validation_cache_key(jdbc_connection_config)
         
-        expected_key = "jdbc_postgresql_testdb_public_testuser"
+        expected_key = "jdbc_postgresql_testdb_public_testuser_direct_jdbc_"
+        assert cache_key == expected_key
+    
+    @pytest.fixture
+    def jdbc_connection_config_with_create_glue(self):
+        """Create JDBC connection configuration with create Glue Connection."""
+        glue_config = MockGlueConnectionConfig(create_connection=True)
+        return MockConnectionConfig(
+            engine_type='postgresql',
+            connection_string='jdbc:postgresql://localhost:5432/testdb',
+            database='testdb',
+            schema='public',
+            username='testuser',
+            password='testpass',
+            jdbc_driver_path='s3://bucket/postgresql.jar',
+            glue_connection_config=glue_config
+        )
+    
+    @pytest.fixture
+    def jdbc_connection_config_with_use_glue(self):
+        """Create JDBC connection configuration with use existing Glue Connection."""
+        glue_config = MockGlueConnectionConfig(use_existing_connection='my-glue-connection')
+        return MockConnectionConfig(
+            engine_type='postgresql',
+            connection_string='jdbc:postgresql://localhost:5432/testdb',
+            database='testdb',
+            schema='public',
+            username='testuser',
+            password='testpass',
+            jdbc_driver_path='s3://bucket/postgresql.jar',
+            glue_connection_config=glue_config
+        )
+    
+    def test_determine_connection_strategy_iceberg(self, unified_manager, iceberg_connection_config):
+        """Test connection strategy determination for Iceberg."""
+        strategy = unified_manager._determine_connection_strategy(iceberg_connection_config)
+        assert strategy == "iceberg"
+    
+    def test_determine_connection_strategy_direct_jdbc(self, unified_manager, jdbc_connection_config):
+        """Test connection strategy determination for direct JDBC."""
+        strategy = unified_manager._determine_connection_strategy(jdbc_connection_config)
+        assert strategy == "direct_jdbc"
+    
+    def test_determine_connection_strategy_create_glue(self, unified_manager, jdbc_connection_config_with_create_glue):
+        """Test connection strategy determination for create Glue Connection."""
+        strategy = unified_manager._determine_connection_strategy(jdbc_connection_config_with_create_glue)
+        assert strategy == "create_glue"
+    
+    def test_determine_connection_strategy_use_glue(self, unified_manager, jdbc_connection_config_with_use_glue):
+        """Test connection strategy determination for use existing Glue Connection."""
+        strategy = unified_manager._determine_connection_strategy(jdbc_connection_config_with_use_glue)
+        assert strategy == "use_glue"
+    
+    def test_create_connection_with_glue_strategy(self, unified_manager, jdbc_connection_config_with_create_glue):
+        """Test connection creation with Glue Connection strategy."""
+        mock_df_reader = Mock()
+        with patch.object(unified_manager, '_create_jdbc_connection_with_glue', 
+                         return_value=mock_df_reader) as mock_create:
+            result = unified_manager.create_connection(jdbc_connection_config_with_create_glue)
+            
+            assert result == mock_df_reader
+            mock_create.assert_called_once_with(jdbc_connection_config_with_create_glue)
+    
+    def test_validate_connection_with_glue_strategy(self, unified_manager, jdbc_connection_config_with_use_glue):
+        """Test connection validation with Glue Connection strategy."""
+        with patch.object(unified_manager, '_validate_jdbc_connection_with_glue_strategy', 
+                         return_value=True) as mock_validate:
+            result = unified_manager.validate_connection(jdbc_connection_config_with_use_glue)
+            
+            assert result is True
+            mock_validate.assert_called_once_with(jdbc_connection_config_with_use_glue, 30)
+    
+    def test_validation_cache_key_with_glue_strategy(self, unified_manager, jdbc_connection_config_with_use_glue):
+        """Test validation cache key generation with Glue Connection strategy."""
+        cache_key = unified_manager._get_validation_cache_key(jdbc_connection_config_with_use_glue)
+        
+        expected_key = "jdbc_postgresql_testdb_public_testuser_use_glue_my-glue-connection"
         assert cache_key == expected_key
 
 

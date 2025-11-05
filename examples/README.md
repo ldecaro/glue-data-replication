@@ -38,12 +38,141 @@ Apache Iceberg is supported as both source and target database engine. The follo
 ### SQL Server Examples
 - `sqlserver-to-postgresql-parameters.json` - SQL Server to PostgreSQL migration
 - `sqlserver-to-sqlserver-parameters.json` - SQL Server to SQL Server replication
+- `sqlserver-to-sqlserver-use-glue-connections-parameters.json` - SQL Server to SQL Server using existing Glue Connections
 
 ### PostgreSQL Examples
 - Various target configurations with PostgreSQL as destination
 
 ### DB2 Examples
 - `db2-to-postgresql-parameters.json` - DB2 to PostgreSQL migration
+
+## Glue Connection Configuration Examples
+
+AWS Glue Connections provide managed connection capabilities for JDBC databases, offering centralized connection management and enhanced security. These examples demonstrate different Glue Connection usage patterns.
+
+**Important Notes:**
+- Glue Connection parameters are only applicable to JDBC database engines (`oracle`, `sqlserver`, `postgresql`, `db2`)
+- When source or target engine is `iceberg`, Glue Connection parameters are ignored with warnings
+- `CreateSourceConnection` and `UseSourceConnection` are mutually exclusive
+- `CreateTargetConnection` and `UseTargetConnection` are mutually exclusive
+
+### Create New Glue Connections (with AWS Secrets Manager Integration)
+
+| File | Description | Use Case |
+|------|-------------|----------|
+| `sqlserver-to-oracle-enterprise-secrets-manager-parameters.json` | Enterprise-grade configuration with Secrets Manager, cross-VPC networking, and comprehensive monitoring | Production deployment with enhanced security and observability |
+
+**Configuration Pattern:**
+```json
+{
+  "CreateSourceConnection": "true",
+  "CreateTargetConnection": "true"
+}
+```
+
+**Requirements when creating connections:**
+- All standard JDBC parameters must be provided (connection string, credentials, driver paths)
+- Job execution role must have permissions to create Glue Connections
+- Job execution role must have AWS Secrets Manager permissions (`secretsmanager:CreateSecret`, `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`)
+- Network configuration must allow access to both databases
+
+**AWS Secrets Manager Integration:**
+When `CreateSourceConnection=true` or `CreateTargetConnection=true`, the system automatically:
+1. Creates AWS Secrets Manager secrets at `/aws-glue/{connection-name}` 
+2. Stores database credentials securely in JSON format: `{"username": "user", "password": "pass"}`
+3. Configures Glue Connections to reference these secrets instead of storing credentials directly
+4. Provides enhanced security through encrypted credential storage and fine-grained access control
+
+### Use Existing Glue Connections
+
+This section demonstrates how to use pre-configured Glue Connections for production environments with centralized connection management.
+
+**Configuration Pattern:**
+```json
+{
+  "UseSourceConnection": "production-sqlserver-connection",
+  "UseTargetConnection": "reporting-sqlserver-connection"
+}
+```
+
+**Requirements when using existing connections:**
+- Named Glue Connections must exist in the same AWS account and region
+- Job execution role must have permissions to access the connections
+- Database and schema names are still required for table operations
+
+### Mixed Connection Types
+
+This section demonstrates mixed connection scenarios where different connection strategies are used for source and target databases.
+
+**Configuration Patterns:**
+
+*Existing Source, New Target with Secrets Manager:*
+```json
+{
+  "UseSourceConnection": "production-postgresql-connection",
+  "CreateTargetConnection": "true"
+}
+```
+
+*New Source with Secrets Manager, Existing Target:*
+```json
+{
+  "CreateSourceConnection": "true", 
+  "UseTargetConnection": "reporting-sqlserver-connection"
+}
+```
+
+**Benefits of mixed approach:**
+- Allows gradual adoption of Glue Connections with Secrets Manager integration
+- Supports environments with different connection management strategies
+- Enables testing enhanced security features with minimal risk
+- Provides flexibility for different security requirements per environment
+
+### Glue Connection Parameter Validation
+
+The system enforces strict validation rules for Glue Connection parameters:
+
+#### Mutual Exclusivity Rules
+- **Source Connection**: Cannot specify both `CreateSourceConnection=true` and `UseSourceConnection=name`
+- **Target Connection**: Cannot specify both `CreateTargetConnection=true` and `UseTargetConnection=name`
+
+#### Engine Compatibility
+- **JDBC Engines**: `oracle`, `sqlserver`, `postgresql`, `db2` support Glue Connections
+- **Iceberg Engine**: Glue Connection parameters are ignored with warnings logged
+
+#### Parameter Requirements
+- **Create Strategy**: All JDBC parameters required (connection string, credentials, drivers)
+- **Use Strategy**: Connection must exist and be accessible by job execution role
+- **Direct JDBC**: Standard JDBC parameters required (existing behavior)
+
+#### AWS Secrets Manager IAM Requirements
+
+When using `CreateSourceConnection=true` or `CreateTargetConnection=true`, the Glue job execution role must include the following permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:GetSecretValue", 
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:/aws-glue/*"
+    }
+  ]
+}
+```
+
+**Security Benefits:**
+- Database credentials are encrypted at rest using AWS KMS
+- Fine-grained access control through IAM policies
+- Audit trail of all credential access via AWS CloudTrail
+- Support for credential rotation independent of Glue Connections
+- Credentials are not visible in Glue Connection metadata
 
 ## Manual Bookmark Configuration Examples
 
@@ -145,6 +274,18 @@ Manual bookmark configuration allows you to override automatic incremental colum
 - `TargetWarehouseLocation` - S3 warehouse location
 - `TargetCatalogId` - AWS account ID for cross-account access (optional)
 - `TargetFormatVersion` - Iceberg format version (recommended: "2")
+
+### Glue Connection Configuration (Optional for JDBC Databases)
+- `CreateSourceConnection` - Create new Glue Connection for source database (true/false)
+- `CreateTargetConnection` - Create new Glue Connection for target database (true/false)
+- `UseSourceConnection` - Name of existing Glue Connection for source database
+- `UseTargetConnection` - Name of existing Glue Connection for target database
+
+**Parameter Validation Rules:**
+- `CreateSourceConnection` and `UseSourceConnection` are mutually exclusive
+- `CreateTargetConnection` and `UseTargetConnection` are mutually exclusive
+- Only applicable to JDBC engines (oracle, sqlserver, postgresql, db2)
+- Ignored for Iceberg engines with warnings logged
 
 ### Bookmark Configuration
 - `BookmarkS3Bucket` - S3 bucket for storing job bookmarks

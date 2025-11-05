@@ -108,12 +108,14 @@ Errors that are likely to succeed on retry:
 - **Connection Issues**: `connection refused`, `connection reset`, `connection failed`
 - **Temporary Service Issues**: `service unavailable`, `throttling`, `rate limiting`
 - **Resource Constraints**: `too many connections`, `memory pressure`
+- **AWS Service Throttling**: `Throttling`, `ServiceUnavailable`, `InternalFailure`
 
 ```python
 # Example retryable error patterns
 RETRYABLE_PATTERNS = [
     'connection refused', 'connection timed out', 'connection reset',
-    'network unreachable', 'service unavailable', 'throttling'
+    'network unreachable', 'service unavailable', 'throttling',
+    'Throttling', 'ServiceUnavailable', 'InternalFailure'
 ]
 ```
 
@@ -124,12 +126,15 @@ Errors that require manual intervention:
 - **Authorization Issues**: `permission denied`, `insufficient privileges`, `forbidden`
 - **Configuration Errors**: `invalid connection string`, `missing parameters`
 - **Schema Mismatches**: `column not found`, `table not found`, `data type mismatch`
+- **Glue Connection Errors**: `connection not found`, `invalid connection type`, `connection validation failed`
+- **Parameter Validation**: `mutually exclusive parameters`, `invalid parameter combination`
 
 ```python
 # Example non-retryable error patterns
 NON_RETRYABLE_PATTERNS = [
     'authentication failed', 'permission denied', 'column not found',
-    'invalid credentials', 'table does not exist'
+    'invalid credentials', 'table does not exist', 'connection not found',
+    'invalid connection type', 'mutually exclusive parameters'
 ]
 ```
 
@@ -140,6 +145,36 @@ Errors related to data quality or format:
 - **Constraint Violations**: `duplicate key`, `foreign key violation`, `check constraint`
 - **Data Corruption**: `invalid data`, `corrupted record`, `parsing error`
 
+#### 4. Glue Connection Errors
+Errors specific to AWS Glue Connection operations:
+
+- **Connection Creation Failures**: `InvalidInputException`, `AlreadyExistsException`, `ResourceNumberLimitExceededException`
+- **Connection Retrieval Failures**: `EntityNotFoundException`, `GlueEncryptionException`
+- **Connection Validation Failures**: `connection test failed`, `network connectivity issues`
+- **Parameter Validation Errors**: `mutually exclusive parameters`, `missing required parameters for Glue Connection`
+
+```python
+# Glue Connection specific error patterns
+GLUE_CONNECTION_ERROR_PATTERNS = {
+    'creation_errors': [
+        'InvalidInputException', 'AlreadyExistsException', 
+        'ResourceNumberLimitExceededException', 'OperationTimeoutException'
+    ],
+    'retrieval_errors': [
+        'EntityNotFoundException', 'GlueEncryptionException',
+        'AccessDeniedException'
+    ],
+    'validation_errors': [
+        'connection test failed', 'network connectivity',
+        'invalid connection properties'
+    ],
+    'parameter_errors': [
+        'mutually exclusive parameters', 'createSourceConnection and useSourceConnection',
+        'createTargetConnection and useTargetConnection'
+    ]
+}
+```
+
 ### Error Classification Logic
 
 ```python
@@ -148,6 +183,11 @@ class ErrorClassifier:
     def classify_error(cls, error: Exception) -> str:
         error_message = str(error).lower()
         
+        # Check for Glue Connection specific errors first
+        if cls._is_glue_connection_error(error):
+            return cls._classify_glue_connection_error(error)
+        
+        # Standard error classification
         for category, patterns in cls.ERROR_PATTERNS.items():
             for pattern in patterns:
                 if pattern in error_message:
@@ -162,9 +202,411 @@ class ErrorClassifier:
             ErrorCategory.CONNECTION,
             ErrorCategory.NETWORK,
             ErrorCategory.TIMEOUT,
-            ErrorCategory.RESOURCE
+            ErrorCategory.RESOURCE,
+            ErrorCategory.GLUE_CONNECTION_TRANSIENT
         }
         return category in retryable_categories
+    
+    @classmethod
+    def _is_glue_connection_error(cls, error: Exception) -> bool:
+        """Check if error is related to Glue Connection operations"""
+        if hasattr(error, 'response') and 'Error' in error.response:
+            error_code = error.response['Error']['Code']
+            return error_code in [
+                'InvalidInputException', 'EntityNotFoundException', 
+                'AlreadyExistsException', 'Throttling', 'ServiceUnavailable'
+            ]
+        return isinstance(error, (GlueConnectionError, GlueConnectionCreationError, 
+                                GlueConnectionNotFoundError, GlueConnectionValidationError))
+    
+    @classmethod
+    def _classify_glue_connection_error(cls, error: Exception) -> str:
+        """Classify Glue Connection specific errors"""
+        if hasattr(error, 'response') and 'Error' in error.response:
+            error_code = error.response['Error']['Code']
+            
+            if error_code in ['Throttling', 'ServiceUnavailable', 'InternalFailure']:
+                return ErrorCategory.GLUE_CONNECTION_TRANSIENT
+            elif error_code in ['EntityNotFoundException']:
+                return ErrorCategory.GLUE_CONNECTION_NOT_FOUND
+            elif error_code in ['InvalidInputException', 'AlreadyExistsException']:
+                return ErrorCategory.GLUE_CONNECTION_CONFIGURATION
+            else:
+                return ErrorCategory.GLUE_CONNECTION_UNKNOWN
+        
+        # Handle custom Glue Connection exceptions
+        if isinstance(error, GlueConnectionNotFoundError):
+            return ErrorCategory.GLUE_CONNECTION_NOT_FOUND
+        elif isinstance(error, GlueConnectionCreationError):
+            return ErrorCategory.GLUE_CONNECTION_CREATION
+        elif isinstance(error, GlueConnectionValidationError):
+            return ErrorCategory.GLUE_CONNECTION_VALIDATION
+        
+        return ErrorCategory.GLUE_CONNECTION_UNKNOWN
+```
+
+## Glue Connection Error Handling
+
+### Glue Connection Error Categories
+
+The system implements specialized error handling for AWS Glue Connection operations, with specific strategies for different types of failures.
+
+#### Connection Creation Errors
+
+**Common Scenarios**:
+```python
+# Scenario 1: Invalid connection parameters
+try:
+    connection_name = glue_connection_manager.create_glue_connection(
+        connection_config, "my-connection"
+    )
+except GlueConnectionCreationError as e:
+    if "InvalidInputException" in str(e):
+        logger.error(f"Invalid Glue Connection parameters: {e}")
+        # Non-retryable - requires parameter correction
+        raise ConfigurationError(f"Fix connection parameters: {e}")
+    elif "AlreadyExistsException" in str(e):
+        logger.warning(f"Glue Connection already exists: {e}")
+        # Use existing connection instead
+        return glue_connection_manager.validate_glue_connection_exists(connection_name)
+
+# Scenario 2: Network configuration issues
+try:
+    connection_name = glue_connection_manager.create_glue_connection(
+        connection_config, "my-connection"
+    )
+except GlueConnectionCreationError as e:
+    if "network" in str(e).lower():
+        logger.error(f"Network configuration error: {e}")
+        # Check VPC, subnet, and security group settings
+        raise NetworkConfigurationError(f"Verify network settings: {e}")
+```
+
+**Error Handling Strategy**:
+```python
+class GlueConnectionCreationHandler:
+    def handle_creation_error(self, error: ClientError, connection_config: ConnectionConfig) -> ErrorResponse:
+        error_code = error.response['Error']['Code']
+        error_message = error.response['Error']['Message']
+        
+        if error_code == 'InvalidInputException':
+            return ErrorResponse(
+                category='configuration',
+                retryable=False,
+                action='fix_parameters',
+                message=f"Invalid Glue Connection parameters: {error_message}",
+                suggested_fix="Review connection string, credentials, and network configuration"
+            )
+        
+        elif error_code == 'AlreadyExistsException':
+            return ErrorResponse(
+                category='configuration',
+                retryable=False,
+                action='use_existing',
+                message=f"Glue Connection already exists: {error_message}",
+                suggested_fix="Use existing connection or choose different name"
+            )
+        
+        elif error_code == 'ResourceNumberLimitExceededException':
+            return ErrorResponse(
+                category='resource_limit',
+                retryable=False,
+                action='cleanup_connections',
+                message=f"Glue Connection limit exceeded: {error_message}",
+                suggested_fix="Delete unused connections or request limit increase"
+            )
+        
+        elif error_code in ['Throttling', 'ServiceUnavailable']:
+            return ErrorResponse(
+                category='transient',
+                retryable=True,
+                action='retry_with_backoff',
+                message=f"Temporary Glue service issue: {error_message}",
+                suggested_fix="Retry operation with exponential backoff"
+            )
+        
+        else:
+            return ErrorResponse(
+                category='unknown',
+                retryable=False,
+                action='manual_investigation',
+                message=f"Unknown Glue Connection creation error: {error_message}",
+                suggested_fix="Check AWS service status and contact support if needed"
+            )
+```
+
+#### Connection Retrieval Errors
+
+**Common Scenarios**:
+```python
+# Scenario 1: Connection not found
+try:
+    connection_exists = glue_connection_manager.validate_glue_connection_exists("my-connection")
+except GlueConnectionNotFoundError as e:
+    logger.error(f"Glue Connection not found: {e}")
+    # Check connection name, region, and account
+    raise ConfigurationError(f"Verify connection name and region: {e}")
+
+# Scenario 2: Permission issues
+try:
+    connection_properties = glue_connection_manager.get_glue_connection_properties("my-connection")
+except ClientError as e:
+    if e.response['Error']['Code'] == 'AccessDeniedException':
+        logger.error(f"Insufficient permissions for Glue Connection: {e}")
+        raise PermissionError(f"Add glue:GetConnection permission: {e}")
+```
+
+**Error Handling Strategy**:
+```python
+class GlueConnectionRetrievalHandler:
+    def handle_retrieval_error(self, error: Exception, connection_name: str) -> ErrorResponse:
+        if isinstance(error, ClientError):
+            error_code = error.response['Error']['Code']
+            
+            if error_code == 'EntityNotFoundException':
+                return ErrorResponse(
+                    category='not_found',
+                    retryable=False,
+                    action='verify_connection',
+                    message=f"Glue Connection '{connection_name}' not found",
+                    suggested_fix="Verify connection name, region, and AWS account"
+                )
+            
+            elif error_code == 'AccessDeniedException':
+                return ErrorResponse(
+                    category='permission',
+                    retryable=False,
+                    action='fix_permissions',
+                    message=f"Access denied for Glue Connection '{connection_name}'",
+                    suggested_fix="Add glue:GetConnection permission to IAM role"
+                )
+        
+        return ErrorResponse(
+            category='unknown',
+            retryable=False,
+            action='manual_investigation',
+            message=f"Unknown error retrieving Glue Connection '{connection_name}': {str(error)}",
+            suggested_fix="Check AWS service status and connection configuration"
+        )
+```
+
+#### Parameter Validation Errors
+
+**Common Scenarios**:
+```python
+# Scenario 1: Mutually exclusive parameters
+try:
+    glue_config = GlueConnectionConfig(
+        create_connection=True,
+        use_existing_connection="my-connection"
+    )
+    glue_config.validate()
+except ValueError as e:
+    logger.error(f"Invalid Glue Connection parameter combination: {e}")
+    raise ConfigurationError(f"Fix parameter configuration: {e}")
+
+# Scenario 2: Missing required parameters for creation
+try:
+    if connection_config.glue_connection_config.create_connection:
+        required_params = ['connection_string', 'username', 'password']
+        missing_params = [p for p in required_params if not getattr(connection_config, p)]
+        if missing_params:
+            raise ValueError(f"Missing required parameters for Glue Connection creation: {missing_params}")
+except ValueError as e:
+    logger.error(f"Missing Glue Connection parameters: {e}")
+    raise ConfigurationError(f"Provide all required parameters: {e}")
+```
+
+#### Iceberg Engine Compatibility Warnings
+
+**Handling Glue Connection Parameters with Iceberg**:
+```python
+class IcebergGlueConnectionHandler:
+    def handle_iceberg_glue_parameters(self, connection_config: ConnectionConfig) -> None:
+        """Handle Glue Connection parameters for Iceberg engines"""
+        if connection_config.engine_type == 'iceberg' and connection_config.uses_glue_connection():
+            warning_message = (
+                f"Glue Connection parameters ignored for Iceberg engine. "
+                f"Iceberg connections use existing connection mechanism. "
+                f"Parameters: createConnection={connection_config.glue_connection_config.create_connection}, "
+                f"useConnection={connection_config.glue_connection_config.use_existing_connection}"
+            )
+            
+            logger.warning(warning_message)
+            
+            # Publish warning metric
+            self.metrics_publisher.publish_metric(
+                'IcebergGlueConnectionParametersIgnored', 1, 'Count',
+                dimensions={'EngineType': 'iceberg'}
+            )
+            
+            # Reset Glue Connection config for Iceberg
+            connection_config.glue_connection_config = None
+```
+
+### Glue Connection Retry Mechanisms
+
+#### Specialized Retry Logic for Glue Operations
+
+```python
+class GlueConnectionRetryHandler:
+    def __init__(self):
+        self.max_retries = 3
+        self.base_delay = 2.0  # Longer base delay for AWS API calls
+        self.max_delay = 120.0  # Longer max delay for service issues
+        self.backoff_factor = 2.0
+        
+        # Glue-specific retryable error codes
+        self.retryable_error_codes = {
+            'Throttling', 'ServiceUnavailable', 'InternalFailure',
+            'OperationTimeoutException', 'ConcurrentModificationException'
+        }
+    
+    def execute_glue_operation_with_retry(self, operation: Callable, 
+                                        operation_name: str, **kwargs) -> Any:
+        """Execute Glue Connection operation with specialized retry logic"""
+        
+        for attempt in range(self.max_retries + 1):
+            try:
+                logger.info(f"Executing {operation_name}, attempt {attempt + 1}/{self.max_retries + 1}")
+                result = operation(**kwargs)
+                
+                if attempt > 0:
+                    logger.info(f"{operation_name} succeeded after {attempt + 1} attempts")
+                
+                return result
+                
+            except ClientError as e:
+                error_code = e.response['Error']['Code']
+                error_message = e.response['Error']['Message']
+                
+                if error_code not in self.retryable_error_codes:
+                    logger.error(f"{operation_name} failed with non-retryable error: {error_code} - {error_message}")
+                    raise GlueConnectionError(f"{operation_name} failed: {error_message}")
+                
+                if attempt < self.max_retries:
+                    delay = self._calculate_glue_backoff_delay(attempt, error_code)
+                    logger.warning(f"{operation_name} failed (attempt {attempt + 1}), retrying in {delay:.1f}s: {error_code}")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"{operation_name} failed after {self.max_retries + 1} attempts: {error_code} - {error_message}")
+                    raise GlueConnectionError(f"{operation_name} failed after retries: {error_message}")
+            
+            except Exception as e:
+                logger.error(f"{operation_name} failed with unexpected error: {str(e)}")
+                raise GlueConnectionError(f"{operation_name} failed: {str(e)}")
+    
+    def _calculate_glue_backoff_delay(self, attempt: int, error_code: str) -> float:
+        """Calculate backoff delay with error-code specific adjustments"""
+        base_delay = self.base_delay
+        
+        # Longer delays for throttling
+        if error_code == 'Throttling':
+            base_delay *= 2.0
+        
+        # Calculate exponential backoff
+        delay = min(base_delay * (self.backoff_factor ** attempt), self.max_delay)
+        
+        # Add jitter to prevent thundering herd
+        jitter_factor = random.uniform(0.8, 1.2)
+        delay *= jitter_factor
+        
+        return delay
+```
+
+### Glue Connection Monitoring and Alerting
+
+#### Specialized Metrics for Glue Connections
+
+```python
+class GlueConnectionMetricsPublisher:
+    def __init__(self, metrics_publisher: CloudWatchMetricsPublisher):
+        self.metrics_publisher = metrics_publisher
+        self.namespace = 'GlueJob/Connections'
+    
+    def publish_glue_connection_metrics(self, operation: str, success: bool, 
+                                      duration: float, connection_name: str = None):
+        """Publish Glue Connection specific metrics"""
+        
+        dimensions = {
+            'Operation': operation,
+            'ConnectionStrategy': 'glue_connection'
+        }
+        
+        if connection_name:
+            dimensions['ConnectionName'] = connection_name
+        
+        # Success/failure metrics
+        self.metrics_publisher.publish_metric(
+            f'GlueConnection{operation}Success' if success else f'GlueConnection{operation}Failure',
+            1, 'Count', dimensions=dimensions
+        )
+        
+        # Duration metrics
+        self.metrics_publisher.publish_metric(
+            f'GlueConnection{operation}Duration',
+            duration, 'Seconds', dimensions=dimensions
+        )
+        
+        # Overall success rate
+        self.metrics_publisher.publish_metric(
+            'GlueConnectionOperationSuccessRate',
+            100.0 if success else 0.0, 'Percent', dimensions=dimensions
+        )
+    
+    def publish_glue_connection_error_metrics(self, error_category: str, error_code: str = None):
+        """Publish error-specific metrics for Glue Connections"""
+        
+        dimensions = {
+            'ErrorCategory': error_category,
+            'ConnectionStrategy': 'glue_connection'
+        }
+        
+        if error_code:
+            dimensions['ErrorCode'] = error_code
+        
+        self.metrics_publisher.publish_metric(
+            'GlueConnectionErrors', 1, 'Count', dimensions=dimensions
+        )
+```
+
+#### CloudWatch Alarms for Glue Connection Issues
+
+```python
+def create_glue_connection_alarms(cloudwatch_client, job_name: str):
+    """Create CloudWatch alarms for Glue Connection monitoring"""
+    
+    alarms = [
+        {
+            'AlarmName': f'{job_name}-GlueConnectionCreationFailures',
+            'MetricName': 'GlueConnectionCreateConnectionFailure',
+            'Threshold': 3,
+            'ComparisonOperator': 'GreaterThanOrEqualToThreshold',
+            'EvaluationPeriods': 2,
+            'AlarmDescription': 'High number of Glue Connection creation failures'
+        },
+        {
+            'AlarmName': f'{job_name}-GlueConnectionNotFound',
+            'MetricName': 'GlueConnectionErrors',
+            'Dimensions': [{'Name': 'ErrorCategory', 'Value': 'not_found'}],
+            'Threshold': 1,
+            'ComparisonOperator': 'GreaterThanOrEqualToThreshold',
+            'EvaluationPeriods': 1,
+            'AlarmDescription': 'Glue Connection not found errors'
+        },
+        {
+            'AlarmName': f'{job_name}-GlueConnectionThrottling',
+            'MetricName': 'GlueConnectionErrors',
+            'Dimensions': [{'Name': 'ErrorCode', 'Value': 'Throttling'}],
+            'Threshold': 5,
+            'ComparisonOperator': 'GreaterThanOrEqualToThreshold',
+            'EvaluationPeriods': 3,
+            'AlarmDescription': 'High rate of Glue Connection throttling'
+        }
+    ]
+    
+    for alarm_config in alarms:
+        cloudwatch_client.put_metric_alarm(**alarm_config)
 ```
 
 ## Retry Mechanisms
