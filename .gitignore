@@ -3,3 +3,5 @@ dist/glue-job-modules.zip
 dist/main-standalone.py
 dist/main.py
 .DS_Store
+tests/*.class
+tests/test_data
