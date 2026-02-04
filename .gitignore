@@ -5,3 +5,16 @@ dist/main.py
 .DS_Store
 tests/*.class
 tests/test_data
+
+# Kerberos development/debug files
+krb5.conf
+*.keytab
+temp_desenv.txt
+KERBEROS_*.md
+QUICK_START_KERBEROS.md
+update-glue-job-kerberos-manual.md
+configure-glue-job-for-kerberos.sh
+generate-krb5-conf.py
+test_kerberos_*.py
+test_keytab_*.py
+validate_cloudformation.py

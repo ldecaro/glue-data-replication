@@ -1,0 +1,171 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "sqlserver-to-sqlserver-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "sqlserver"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "sqlserver"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "testdb"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "testdb-2"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "dbo"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "dbo"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "customers,inventory,order_items,orders,products"
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": "jdbc:sqlserver://database-1.crvpwxncbjrg.us-east-1.rds.amazonaws.com:1433;integratedSecurity=true;authenticationScheme=JavaKerberos;serverSpn=MSSQLSvc/database-1.decaro.com:1433"
+  },
+  {
+    "ParameterKey": "SourceDbUser",
+    "ParameterValue": "ldecaro"
+  },
+  {
+    "ParameterKey": "SourceDbPassword",
+    "ParameterValue": "3369852Lhrd!"
+  },
+  {
+    "ParameterKey": "SourceKerberosSPN",
+    "ParameterValue": "MSSQLSvc/database-1.decaro.com:1433"
+  },
+  {
+    "ParameterKey": "SourceKerberosDomain",
+    "ParameterValue": "DECARO.COM"
+  },
+  {
+    "ParameterKey": "SourceKerberosKDC",
+    "ParameterValue": "DECARO.COM"
+  },
+ 
+  {
+    "ParameterKey": "TargetKerberosSPN",
+    "ParameterValue": "MSSQLSvc/database-1.decaro.com:1433"
+  },
+  {
+    "ParameterKey": "TargetKerberosDomain",
+    "ParameterValue": "DECARO.COM"
+  },
+  {
+    "ParameterKey": "TargetKerberosKDC",
+    "ParameterValue": "DECARO.COM"
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": "ldecaro"
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": "3369852Lhrd!"
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": "jdbc:sqlserver://database-1.crvpwxncbjrg.us-east-1.rds.amazonaws.com:1433;integratedSecurity=true;authenticationScheme=JavaKerberos;serverSpn=MSSQLSvc/database-1.decaro.com:1433"
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": "s3://decaro-glue-replication/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar"
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": "s3://decaro-glue-replication/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://decaro-glue-replication/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "CreateSourceConnection",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "CreateTargetConnection",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "2880"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.1X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "SourceVpcId",
+    "ParameterValue": "vpc-04b6bfe08aa121cac"
+  },
+  {
+    "ParameterKey": "SourceSubnetIds",
+    "ParameterValue": "subnet-021c01d115624b098"
+  },
+  {
+    "ParameterKey": "SourceSecurityGroupIds",
+    "ParameterValue": "sg-06a0eb09a8f9ad863"
+  },
+  {
+    "ParameterKey": "CreateSourceGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "SourceAvailabilityZone",
+    "ParameterValue": "us-east-1a"
+  },
+  {
+    "ParameterKey": "CreateSourceS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "CreateTargetS3VpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "CreateTargetGlueVpcEndpoint",
+    "ParameterValue": "NO"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "ErrorLogRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  }
+]

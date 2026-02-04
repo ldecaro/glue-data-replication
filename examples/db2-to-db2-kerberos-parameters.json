@@ -1,0 +1,166 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "db2-to-db2-kerberos-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "db2"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "db2"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "PRODDB"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "TESTDB"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "PRODSCHEMA"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "TESTSCHEMA"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "EMPLOYEE,DEPARTMENT,PROJECT,ACT,EMPPROJACT"
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": "jdbc:db2://db2-mainframe.corp.example.com:50000/PRODDB"
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": "jdbc:db2://db2-test.corp.example.com:50000/TESTDB"
+  },
+  {
+    "ParameterKey": "SourceKerberosSPN",
+    "ParameterValue": "db2srv/db2-mainframe.corp.example.com@CORP.EXAMPLE.COM"
+  },
+  {
+    "ParameterKey": "SourceKerberosDomain",
+    "ParameterValue": "CORP.EXAMPLE.COM"
+  },
+  {
+    "ParameterKey": "SourceKerberosKDC",
+    "ParameterValue": "kdc.corp.example.com:88"
+  },
+  {
+    "ParameterKey": "TargetKerberosSPN",
+    "ParameterValue": "db2srv/db2-test.corp.example.com@CORP.EXAMPLE.COM"
+  },
+  {
+    "ParameterKey": "TargetKerberosDomain",
+    "ParameterValue": "CORP.EXAMPLE.COM"
+  },
+  {
+    "ParameterKey": "TargetKerberosKDC",
+    "ParameterValue": "kdc.corp.example.com:88"
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/db2/11.5.8.0/db2jcc4.jar"
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/db2/11.5.8.0/db2jcc4.jar"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://my-glue-assets/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "4320"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.4X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "5"
+  },
+  {
+    "ParameterKey": "SourceVpcId",
+    "ParameterValue": "vpc-0123456789abcdef0"
+  },
+  {
+    "ParameterKey": "SourceSubnetIds",
+    "ParameterValue": "subnet-0123456789abcdef0,subnet-0fedcba9876543210"
+  },
+  {
+    "ParameterKey": "SourceSecurityGroupIds",
+    "ParameterValue": "sg-0123456789abcdef0"
+  },
+  {
+    "ParameterKey": "TargetVpcId",
+    "ParameterValue": "vpc-0fedcba9876543210"
+  },
+  {
+    "ParameterKey": "TargetSubnetIds",
+    "ParameterValue": "subnet-0fedcba9876543210,subnet-0123456789abcdef0"
+  },
+  {
+    "ParameterKey": "TargetSecurityGroupIds",
+    "ParameterValue": "sg-0fedcba9876543210"
+  },
+  {
+    "ParameterKey": "CreateSourceGlueVpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "CreateTargetGlueVpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "CreateSourceS3VpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "CreateTargetS3VpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "SourceAvailabilityZone",
+    "ParameterValue": "us-east-1a"
+  },
+  {
+    "ParameterKey": "TargetAvailabilityZone",
+    "ParameterValue": "us-east-1b"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "60"
+  },
+  {
+    "ParameterKey": "ErrorLogRetentionDays",
+    "ParameterValue": "180"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "AlarmNotificationEmail",
+    "ParameterValue": "dba@corp.example.com"
+  }
+]

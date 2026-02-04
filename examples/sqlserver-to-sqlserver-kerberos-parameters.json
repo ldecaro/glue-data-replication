@@ -1,0 +1,174 @@
+[
+    {
+        "ParameterKey": "JobName",
+        "ParameterValue": "sqlserver-to-sqlserver-kerberos-replication"
+    },
+    {
+        "ParameterKey": "SourceEngineType",
+        "ParameterValue": "sqlserver"
+    },
+    {
+        "ParameterKey": "TargetEngineType",
+        "ParameterValue": "sqlserver"
+    },
+    {
+        "ParameterKey": "SourceDatabase",
+        "ParameterValue": "enterprise_db"
+    },
+    {
+        "ParameterKey": "TargetDatabase",
+        "ParameterValue": "reporting_db"
+    },
+    {
+        "ParameterKey": "SourceSchema",
+        "ParameterValue": "dbo"
+    },
+    {
+        "ParameterKey": "TargetSchema",
+        "ParameterValue": "dbo"
+    },
+    {
+        "ParameterKey": "TableNames",
+        "ParameterValue": "customers,orders,products,inventory"
+    },
+    {
+        "ParameterKey": "SourceConnectionString",
+        "ParameterValue": "jdbc:sqlserver://sqlserver-source.corp.example.com:1433;databaseName=enterprise_db;integratedSecurity=true;authenticationScheme=JavaKerberos"
+    },
+    {
+        "ParameterKey": "TargetConnectionString",
+        "ParameterValue": "jdbc:sqlserver://sqlserver-target.corp.example.com:1433;databaseName=reporting_db;integratedSecurity=true;authenticationScheme=JavaKerberos"
+    },
+    {
+        "ParameterKey": "SourceKerberosSPN",
+        "ParameterValue": "MSSQLSvc/sqlserver-source.corp.example.com:1433@CORP.EXAMPLE.COM"
+    },
+    {
+        "ParameterKey": "SourceKerberosDomain",
+        "ParameterValue": "CORP.EXAMPLE.COM"
+    },
+    {
+        "ParameterKey": "SourceKerberosKDC",
+        "ParameterValue": "kdc.corp.example.com:88"
+    },
+    {
+        "ParameterKey": "SourceKerberosKeytabS3Path",
+        "ParameterValue": "s3://decaro-glue-replication/keytabs/ldecaro.keytab"
+    },    
+    {
+        "ParameterKey": "TargetKerberosKeytabS3Path",
+        "ParameterValue": "s3://decaro-glue-replication/keytabs/ldecaro.keytab"
+    },    
+    {
+        "ParameterKey": "TargetKerberosSPN",
+        "ParameterValue": "MSSQLSvc/sqlserver-target.corp.example.com:1433@CORP.EXAMPLE.COM"
+    },
+    {
+        "ParameterKey": "TargetKerberosDomain",
+        "ParameterValue": "CORP.EXAMPLE.COM"
+    },
+    {
+        "ParameterKey": "TargetKerberosKDC",
+        "ParameterValue": "kdc.corp.example.com:88"
+    },
+    {
+        "ParameterKey": "SourceJdbcDriverS3Path",
+        "ParameterValue": "s3://my-glue-assets/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar"
+    },
+    {
+        "ParameterKey": "TargetJdbcDriverS3Path",
+        "ParameterValue": "s3://my-glue-assets/jdbc-drivers/sqlserver/12.2.0.jre11/mssql-jdbc-12.2.0.jre11.jar"
+    },
+    {
+        "ParameterKey": "GlueJobScriptS3Path",
+        "ParameterValue": "s3://my-glue-assets/src/glue_job/main.py"
+    },
+    {
+        "ParameterKey": "MaxRetries",
+        "ParameterValue": "1"
+    },
+    {
+        "ParameterKey": "Timeout",
+        "ParameterValue": "2880"
+    },
+    {
+        "ParameterKey": "MaxConcurrentRuns",
+        "ParameterValue": "1"
+    },
+    {
+        "ParameterKey": "WorkerType",
+        "ParameterValue": "G.2X"
+    },
+    {
+        "ParameterKey": "NumberOfWorkers",
+        "ParameterValue": "3"
+    },
+    {
+        "ParameterKey": "SourceVpcId",
+        "ParameterValue": "vpc-0123456789abcdef0"
+    },
+    {
+        "ParameterKey": "SourceSubnetIds",
+        "ParameterValue": "subnet-0123456789abcdef0,subnet-0fedcba9876543210"
+    },
+    {
+        "ParameterKey": "SourceSecurityGroupIds",
+        "ParameterValue": "sg-0123456789abcdef0"
+    },
+    {
+        "ParameterKey": "TargetVpcId",
+        "ParameterValue": "vpc-0fedcba9876543210"
+    },
+    {
+        "ParameterKey": "TargetSubnetIds",
+        "ParameterValue": "subnet-0fedcba9876543210,subnet-0123456789abcdef0"
+    },
+    {
+        "ParameterKey": "TargetSecurityGroupIds",
+        "ParameterValue": "sg-0fedcba9876543210"
+    },
+    {
+        "ParameterKey": "CreateSourceGlueVpcEndpoint",
+        "ParameterValue": "YES"
+    },
+    {
+        "ParameterKey": "CreateTargetGlueVpcEndpoint",
+        "ParameterValue": "YES"
+    },
+    {
+        "ParameterKey": "CreateSourceS3VpcEndpoint",
+        "ParameterValue": "YES"
+    },
+    {
+        "ParameterKey": "CreateTargetS3VpcEndpoint",
+        "ParameterValue": "YES"
+    },
+    {
+        "ParameterKey": "SourceAvailabilityZone",
+        "ParameterValue": "us-east-1a"
+    },
+    {
+        "ParameterKey": "TargetAvailabilityZone",
+        "ParameterValue": "us-east-1b"
+    },
+    {
+        "ParameterKey": "LogRetentionDays",
+        "ParameterValue": "30"
+    },
+    {
+        "ParameterKey": "ErrorLogRetentionDays",
+        "ParameterValue": "90"
+    },
+    {
+        "ParameterKey": "EnableCloudWatchDashboard",
+        "ParameterValue": "YES"
+    },
+    {
+        "ParameterKey": "EnableCloudWatchAlarms",
+        "ParameterValue": "YES"
+    },
+    {
+        "ParameterKey": "AlarmNotificationEmail",
+        "ParameterValue": "admin@corp.example.com"
+    }
+]

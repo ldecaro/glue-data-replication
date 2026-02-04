@@ -10,6 +10,14 @@ from .database_engines import DatabaseEngineManager, JdbcDriverLoader
 from .parsers import JobConfigurationParser, ConnectionStringBuilder
 from .secrets_manager_handler import SecretsManagerHandler, SecretsManagerError, SecretCreationError, SecretsManagerPermissionError, SecretsManagerRetryableError
 from .partitioned_read_config import PartitionedReadConfig, TablePartitionConfig
+from .kerberos_config import (
+    KerberosConfig, 
+    KerberosAuthenticationError, 
+    KerberosConfigurationError, 
+    KerberosConnectionError, 
+    KerberosEngineCompatibilityError
+)
+from .kerberos_connection_builder import KerberosConnectionBuilder, KerberosConnectionProperties
 
 __all__ = [
     'JobConfig',
@@ -26,5 +34,12 @@ __all__ = [
     'SecretsManagerPermissionError',
     'SecretsManagerRetryableError',
     'PartitionedReadConfig',
-    'TablePartitionConfig'
+    'TablePartitionConfig',
+    'KerberosConfig',
+    'KerberosAuthenticationError',
+    'KerberosConfigurationError',
+    'KerberosConnectionError',
+    'KerberosEngineCompatibilityError',
+    'KerberosConnectionBuilder',
+    'KerberosConnectionProperties'
 ]

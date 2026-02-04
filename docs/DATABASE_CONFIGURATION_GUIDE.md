@@ -86,8 +86,11 @@ jdbc:sqlserver://sqlserver-host:1433;databaseName=AdventureWorks
 # Named instance
 jdbc:sqlserver://sqlserver-host\\SQLEXPRESS:1433;databaseName=TestDB
 
-# Windows Authentication (requires additional configuration)
-jdbc:sqlserver://sqlserver-host:1433;databaseName=TestDB;integratedSecurity=true
+# With encryption (recommended)
+jdbc:sqlserver://sqlserver-host:1433;databaseName=TestDB;encrypt=true;trustServerCertificate=false
+
+# Kerberos/Windows Authentication (auto-configured when Kerberos parameters provided)
+jdbc:sqlserver://sqlserver-host:1433;databaseName=TestDB;integratedSecurity=true;authenticationScheme=JavaKerberos
 
 # Always Encrypted support
 jdbc:sqlserver://sqlserver-host:1433;databaseName=TestDB;columnEncryptionSetting=Enabled
@@ -97,7 +100,7 @@ jdbc:sqlserver://sqlserver-host:1433;databaseName=TestDB;columnEncryptionSetting
 - Default port: 1433
 - Supports named instances
 - Compatible with Always Encrypted features
-- Supports both SQL Server and Windows authentication
+- Supports Kerberos/Windows Authentication (see [Kerberos Authentication Guide](KERBEROS_AUTHENTICATION_GUIDE.md))
 
 ### PostgreSQL
 
@@ -617,108 +620,93 @@ jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=host)(PORT=2484))(C
 - Standard username/password via CloudFormation parameters
 - AWS Secrets Manager integration for secure credential storage
 - Regular credential rotation via Secrets Manager
+- **Kerberos authentication** for enterprise environments
 
 **Cloud Authentication** (Supported for RDS/Aurora):
 - AWS IAM database authentication (requires IAM-enabled RDS instances)
 
 **Not Supported in This Solution**:
-- Windows Authentication (SQL Server `integratedSecurity=true`)
-- Kerberos authentication
-- LDAP integration
-- Azure Active Directory
+- LDAP integration (use Kerberos with AD instead)
+- Azure Active Directory (use Kerberos with on-premises AD)
 
 ### Kerberos Authentication
 
-This section documents Kerberos authentication support status and alternatives for the AWS Glue Data Replication solution.
+This solution supports Kerberos authentication for enterprise databases that require secure, ticket-based authentication. For comprehensive setup instructions, see [KERBEROS_AUTHENTICATION_GUIDE.md](KERBEROS_AUTHENTICATION_GUIDE.md).
 
-#### Current Support Status
+#### Supported Authentication Methods
 
 | Authentication Method | Support Status | Notes |
 |----------------------|----------------|-------|
 | Username/Password | ✅ Supported | Primary authentication method |
 | AWS Secrets Manager | ✅ Supported | Automatic when `CreateSourceConnection=true` |
+| Kerberos/GSSAPI | ✅ Supported | Requires KDC connectivity from Glue VPC |
+| Windows Authentication | ✅ Supported | Via Kerberos with `integratedSecurity=true` |
 | AWS IAM Database Auth | ⚠️ Partial | Requires IAM-enabled RDS, manual token generation |
-| Kerberos/GSSAPI | ❌ Not Supported | AWS Glue lacks Kerberos infrastructure |
-| Windows Authentication | ❌ Not Supported | Requires `integratedSecurity=true` which needs Kerberos |
-| NTLM | ❌ Not Supported | Not available in AWS Glue runtime |
 
-#### Why Kerberos is Not Supported
+#### Kerberos Configuration Parameters
 
-AWS Glue JDBC connections cannot use Kerberos authentication because the managed runtime environment lacks:
+Six CloudFormation parameters enable Kerberos authentication:
 
-1. **Kerberos Configuration Files**: No access to deploy `krb5.conf` files
-2. **Keytab Files**: Cannot store or access Kerberos keytab files
-3. **KDC Connectivity**: Glue VPCs typically cannot reach Key Distribution Centers
-4. **Ticket Cache**: No mechanism to obtain or cache Kerberos tickets (TGT)
-5. **Environment Variables**: Cannot set `KRB5_CONFIG`, `KRB5CCNAME`, etc.
+| Parameter | Description |
+|-----------|-------------|
+| `SourceKerberosSPN` | Service Principal Name for source database |
+| `SourceKerberosDomain` | Kerberos domain/realm for source database |
+| `SourceKerberosKDC` | Key Distribution Center for source database |
+| `TargetKerberosSPN` | Service Principal Name for target database |
+| `TargetKerberosDomain` | Kerberos domain/realm for target database |
+| `TargetKerberosKDC` | Key Distribution Center for target database |
 
-#### JDBC Kerberos Parameters (Not Usable)
+#### Quick Start: Kerberos Configuration
 
-While JDBC drivers support these Kerberos parameters, they cannot be used in AWS Glue:
-
-**SQL Server**:
-```
-# NOT USABLE in AWS Glue - requires Kerberos infrastructure
-jdbc:sqlserver://host:1433;databaseName=db;integratedSecurity=true;authenticationScheme=JavaKerberos
-```
-
-**Oracle**:
-```
-# NOT USABLE in AWS Glue - requires krb5.conf and keytab
-jdbc:oracle:thin:@host:1521:db?oracle.net.authentication_services=(KERBEROS5)
-```
-
-**PostgreSQL**:
-```
-# NOT USABLE in AWS Glue - requires GSSAPI configuration
-jdbc:postgresql://host:5432/db?gsslib=gssapi
-```
-
-#### Recommended Authentication Approach
-
-Use username/password authentication with AWS Secrets Manager:
-
-**CloudFormation Parameters**:
+**CloudFormation Parameters for SQL Server with Kerberos**:
 ```json
 [
-  {"ParameterKey": "SourceDbUser", "ParameterValue": "glue_service_account"},
-  {"ParameterKey": "SourceDbPassword", "ParameterValue": "SecurePassword123!"},
+  {"ParameterKey": "SourceEngineType", "ParameterValue": "sqlserver"},
+  {"ParameterKey": "SourceConnectionString", "ParameterValue": "jdbc:sqlserver://sqlserver.company.com:1433;databaseName=SourceDB"},
+  {"ParameterKey": "SourceKerberosSPN", "ParameterValue": "MSSQLSvc/sqlserver.company.com:1433"},
+  {"ParameterKey": "SourceKerberosDomain", "ParameterValue": "COMPANY.COM"},
+  {"ParameterKey": "SourceKerberosKDC", "ParameterValue": "dc1.company.com"},
   {"ParameterKey": "CreateSourceConnection", "ParameterValue": "true"}
 ]
 ```
 
-When `CreateSourceConnection` is `true`, credentials are automatically stored in AWS Secrets Manager at `/aws-glue/{JobName}-source-jdbc-connection`.
+#### How Kerberos Works in This Solution
 
-#### Workarounds for Kerberos-Protected Databases
+1. **Auto-Detection**: When all three Kerberos parameters (SPN, Domain, KDC) are provided, the system automatically enables Kerberos authentication
+2. **Runtime Configuration**: The solution generates `krb5.conf` at runtime and configures Java system properties
+3. **JDBC Integration**: Connection strings are enhanced with Kerberos-specific parameters (e.g., `integratedSecurity=true` for SQL Server)
+4. **Fallback**: If Kerberos configuration is incomplete, the system falls back to username/password authentication
 
-If your source database requires Kerberos authentication:
+#### Mixed Authentication Modes
 
-**Option 1: Create a SQL Authentication Service Account**
+The solution supports different authentication methods for source and target:
 
-Create a dedicated service account with SQL authentication:
+| Source Auth | Target Auth | Supported |
+|-------------|-------------|-----------|
+| Kerberos | Kerberos | ✅ Yes |
+| Kerberos | Username/Password | ✅ Yes |
+| Username/Password | Kerberos | ✅ Yes |
+| Username/Password | Username/Password | ✅ Yes |
 
-```sql
--- SQL Server
-CREATE LOGIN glue_service WITH PASSWORD = 'StrongPassword123!';
-CREATE USER glue_service FOR LOGIN glue_service;
-GRANT SELECT ON SCHEMA::dbo TO glue_service;
+#### Network Requirements for Kerberos
 
--- Oracle
-CREATE USER glue_service IDENTIFIED BY "StrongPassword123!";
-GRANT CONNECT, RESOURCE, SELECT ANY TABLE TO glue_service;
+Ensure your Glue job's VPC has connectivity to:
+- **KDC Server**: Port 88 (TCP/UDP) for Kerberos authentication
+- **Database Server**: Standard database ports (1433, 1521, 5432, 50000)
+- **DNS Server**: For hostname resolution of KDC and database servers
 
--- PostgreSQL
-CREATE USER glue_service WITH PASSWORD 'StrongPassword123!';
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO glue_service;
-```
+#### Troubleshooting Kerberos
 
-**Option 2: Use AWS DMS for Kerberos Sources**
+Common issues and solutions:
 
-AWS Database Migration Service (DMS v3.5.3+) supports Kerberos authentication:
-1. Use DMS to replicate from Kerberos-protected source to an intermediate database
-2. Use this Glue solution to process data from the intermediate database
+| Issue | Solution |
+|-------|----------|
+| "Cannot locate default realm" | Verify `SourceKerberosDomain` is uppercase and matches KDC realm |
+| "Server not found in Kerberos database" | Check SPN is registered correctly in Active Directory |
+| "Clock skew too great" | Ensure NTP synchronization between Glue and KDC |
+| "KDC unreachable" | Verify VPC security groups allow port 88 to KDC |
 
-**Option 3: Deploy a Database Proxy**
+For detailed troubleshooting, see [KERBEROS_AUTHENTICATION_GUIDE.md](KERBEROS_AUTHENTICATION_GUIDE.md#troubleshooting).**Option 3: Deploy a Database Proxy**
 
 Deploy a proxy server that handles Kerberos authentication:
 ```

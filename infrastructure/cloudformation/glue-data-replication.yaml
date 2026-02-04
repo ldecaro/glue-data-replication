@@ -132,6 +132,72 @@ Parameters:
     MaxLength: 512
     AllowedPattern: '^(s3://[a-zA-Z0-9.-]+/.*\.jar)?$'
     ConstraintDescription: 'Must be empty or a valid S3 path ending with .jar (s3://bucket/path/driver.jar)'
+
+  # Kerberos Authentication Parameters (Optional)
+  SourceKerberosSPN:
+    Type: String
+    Description: 'Service Principal Name (SPN) for source database Kerberos authentication. Required for Kerberos authentication along with SourceKerberosDomain and SourceKerberosKDC. Supports Oracle, SQL Server, PostgreSQL, and DB2 engines only.'
+    Default: ''
+    MaxLength: 256
+    AllowedPattern: '^([a-zA-Z0-9._/:-]+(@[a-zA-Z0-9.-]+)?)?$'
+    ConstraintDescription: 'Must be empty or a valid SPN format (service/hostname, service/hostname:port, service/hostname@REALM, service/hostname:port@REALM, or service@REALM)'
+
+  SourceKerberosDomain:
+    Type: String
+    Description: 'Kerberos domain/realm for source database authentication. Required for Kerberos authentication along with SourceKerberosSPN and SourceKerberosKDC. Must be a valid Kerberos realm name.'
+    Default: ''
+    MaxLength: 128
+    AllowedPattern: '^([A-Z0-9.-]+)?$'
+    ConstraintDescription: 'Must be empty or a valid Kerberos realm name (uppercase letters, numbers, dots, and hyphens)'
+
+  SourceKerberosKDC:
+    Type: String
+    Description: 'Key Distribution Center (KDC) hostname or IP address for source database Kerberos authentication. Required for Kerberos authentication along with SourceKerberosSPN and SourceKerberosDomain. Can include optional port number.'
+    Default: ''
+    MaxLength: 256
+    AllowedPattern: '^([a-zA-Z0-9.-]+(:[0-9]+)?)?$'
+    ConstraintDescription: 'Must be empty or a valid hostname/IP address with optional port (hostname:port or ip:port)'
+
+  TargetKerberosSPN:
+    Type: String
+    Description: 'Service Principal Name (SPN) for target database Kerberos authentication. Required for Kerberos authentication along with TargetKerberosDomain and TargetKerberosKDC. Supports Oracle, SQL Server, PostgreSQL, and DB2 engines only.'
+    Default: ''
+    MaxLength: 256
+    AllowedPattern: '^([a-zA-Z0-9._/:-]+(@[a-zA-Z0-9.-]+)?)?$'
+    ConstraintDescription: 'Must be empty or a valid SPN format (service/hostname, service/hostname:port, service/hostname@REALM, service/hostname:port@REALM, or service@REALM)'
+
+  TargetKerberosDomain:
+    Type: String
+    Description: 'Kerberos domain/realm for target database authentication. Required for Kerberos authentication along with TargetKerberosSPN and TargetKerberosKDC. Must be a valid Kerberos realm name.'
+    Default: ''
+    MaxLength: 128
+    AllowedPattern: '^([A-Z0-9.-]+)?$'
+    ConstraintDescription: 'Must be empty or a valid Kerberos realm name (uppercase letters, numbers, dots, and hyphens)'
+
+  TargetKerberosKDC:
+    Type: String
+    Description: 'Key Distribution Center (KDC) hostname or IP address for target database Kerberos authentication. Required for Kerberos authentication along with TargetKerberosSPN and TargetKerberosDomain. Can include optional port number.'
+    Default: ''
+    MaxLength: 256
+    AllowedPattern: '^([a-zA-Z0-9.-]+(:[0-9]+)?)?$'
+    ConstraintDescription: 'Must be empty or a valid hostname/IP address with optional port (hostname:port or ip:port)'
+
+  # Kerberos Keytab Authentication Parameters (Optional - alternative to username/password)
+  SourceKerberosKeytabS3Path:
+    Type: String
+    Description: 'S3 path to keytab file for source database Kerberos authentication. Optional alternative to username/password authentication. If provided, takes precedence over username/password credentials.'
+    Default: ''
+    MaxLength: 512
+    AllowedPattern: '^(s3://[a-zA-Z0-9.-]+/.*\.keytab)?$'
+    ConstraintDescription: 'Must be empty or a valid S3 path ending with .keytab (s3://bucket/path/user.keytab)'
+
+  TargetKerberosKeytabS3Path:
+    Type: String
+    Description: 'S3 path to keytab file for target database Kerberos authentication. Optional alternative to username/password authentication. If provided, takes precedence over username/password credentials.'
+    Default: ''
+    MaxLength: 512
+    AllowedPattern: '^(s3://[a-zA-Z0-9.-]+/.*\.keytab)?$'
+    ConstraintDescription: 'Must be empty or a valid S3 path ending with .keytab (s3://bucket/path/user.keytab)'
   
   # Iceberg-specific parameters (required when using Iceberg engines)
   SourceWarehouseLocation:
@@ -541,15 +607,41 @@ Conditions:
   ShouldCreateSourceConnection: !And
     - !Not [!Condition IsSourceIceberg]
     - !Equals [!Ref CreateSourceConnection, 'true']
+    - !Not [!Condition HasSourceKerberos]
   ShouldCreateTargetConnection: !And
     - !Not [!Condition IsTargetIceberg]
     - !Equals [!Ref CreateTargetConnection, 'true']
+    - !Not [!Condition HasTargetKerberos]
   HasUseSourceConnection: !And
     - !Not [!Condition IsSourceIceberg]
     - !Not [!Equals [!Ref UseSourceConnection, '']]
   HasUseTargetConnection: !And
     - !Not [!Condition IsTargetIceberg]
     - !Not [!Equals [!Ref UseTargetConnection, '']]
+
+  # Kerberos Authentication Conditions
+  HasSourceKerberos: !And
+    - !Not [!Equals [!Ref SourceKerberosSPN, '']]
+    - !Not [!Equals [!Ref SourceKerberosDomain, '']]
+    - !Not [!Equals [!Ref SourceKerberosKDC, '']]
+  HasTargetKerberos: !And
+    - !Not [!Equals [!Ref TargetKerberosSPN, '']]
+    - !Not [!Equals [!Ref TargetKerberosDomain, '']]
+    - !Not [!Equals [!Ref TargetKerberosKDC, '']]
+  
+  # Keytab Authentication Conditions
+  HasSourceKeytab: !Not [!Equals [!Ref SourceKerberosKeytabS3Path, '']]
+  HasTargetKeytab: !Not [!Equals [!Ref TargetKerberosKeytabS3Path, '']]
+  
+  # Kerberos Connection Conditions
+  ShouldCreateSourceKerberosConnection: !And
+    - !Not [!Condition IsSourceIceberg]
+    - !Equals [!Ref CreateSourceConnection, 'true']
+    - !Condition HasSourceKerberos
+  ShouldCreateTargetKerberosConnection: !And
+    - !Not [!Condition IsTargetIceberg]
+    - !Equals [!Ref CreateTargetConnection, 'true']
+    - !Condition HasTargetKerberos
 
   # Database Engine Type Conditions for Driver Class Mapping
   IsSourceOracle: !Equals [!Ref SourceEngineType, 'oracle']

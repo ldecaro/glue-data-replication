@@ -100,6 +100,8 @@ class ConnectionConfig:
     network_config: Optional[NetworkConfig] = None
     iceberg_config: Optional[Dict[str, Any]] = None
     glue_connection_config: Optional[GlueConnectionConfig] = None
+    kerberos_config: Optional[Any] = None  # KerberosConfig from kerberos_config module
+    kerberos_keytab_s3_path: Optional[str] = None  # S3 path to keytab file for Kerberos authentication
     
     def __post_init__(self):
         """Validate connection configuration after initialization."""
@@ -251,6 +253,32 @@ class ConnectionConfig:
         """
         return (self.glue_connection_config and 
                 bool(self.glue_connection_config.use_existing_connection))
+    
+    def uses_kerberos_authentication(self) -> bool:
+        """Check if this connection uses Kerberos authentication.
+        
+        Returns:
+            bool: True if Kerberos configuration is complete, False otherwise
+        """
+        return self.kerberos_config is not None and self.kerberos_config.is_complete()
+    
+    def get_authentication_method(self) -> str:
+        """Get the authentication method for this connection.
+        
+        Returns:
+            str: Authentication method - 'kerberos' or 'username_password'
+        """
+        if self.uses_kerberos_authentication():
+            return "kerberos"
+        return "username_password"
+    
+    def get_kerberos_config(self):
+        """Get Kerberos configuration if available.
+        
+        Returns:
+            Optional[KerberosConfig]: Kerberos configuration or None
+        """
+        return self.kerberos_config if self.uses_kerberos_authentication() else None
 
 
 @dataclass

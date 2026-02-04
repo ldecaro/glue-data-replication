@@ -1,0 +1,138 @@
+[
+  {
+    "ParameterKey": "JobName",
+    "ParameterValue": "oracle-to-postgresql-mixed-auth-replication"
+  },
+  {
+    "ParameterKey": "SourceEngineType",
+    "ParameterValue": "oracle"
+  },
+  {
+    "ParameterKey": "TargetEngineType",
+    "ParameterValue": "postgresql"
+  },
+  {
+    "ParameterKey": "SourceDatabase",
+    "ParameterValue": "ORCL"
+  },
+  {
+    "ParameterKey": "TargetDatabase",
+    "ParameterValue": "modernized_db"
+  },
+  {
+    "ParameterKey": "SourceSchema",
+    "ParameterValue": "HR"
+  },
+  {
+    "ParameterKey": "TargetSchema",
+    "ParameterValue": "public"
+  },
+  {
+    "ParameterKey": "TableNames",
+    "ParameterValue": "employees,departments,locations,jobs,job_history"
+  },
+  {
+    "ParameterKey": "SourceConnectionString",
+    "ParameterValue": "jdbc:oracle:thin:@oracle-enterprise.corp.example.com:1521:ORCL"
+  },
+  {
+    "ParameterKey": "TargetConnectionString",
+    "ParameterValue": "jdbc:postgresql://postgresql-cloud.example.com:5432/modernized_db"
+  },
+  {
+    "ParameterKey": "SourceKerberosSPN",
+    "ParameterValue": "oracle/oracle-enterprise.corp.example.com@CORP.EXAMPLE.COM"
+  },
+  {
+    "ParameterKey": "SourceKerberosDomain",
+    "ParameterValue": "CORP.EXAMPLE.COM"
+  },
+  {
+    "ParameterKey": "SourceKerberosKDC",
+    "ParameterValue": "kdc.corp.example.com:88"
+  },
+  {
+    "ParameterKey": "TargetDbUser",
+    "ParameterValue": "postgres"
+  },
+  {
+    "ParameterKey": "TargetDbPassword",
+    "ParameterValue": "your-postgresql-password"
+  },
+  {
+    "ParameterKey": "SourceJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/oracle/21.7.0.0/ojdbc11.jar"
+  },
+  {
+    "ParameterKey": "TargetJdbcDriverS3Path",
+    "ParameterValue": "s3://my-glue-assets/jdbc-drivers/postgresql/42.6.0/postgresql-42.6.0.jar"
+  },
+  {
+    "ParameterKey": "GlueJobScriptS3Path",
+    "ParameterValue": "s3://my-glue-assets/src/glue_job/main.py"
+  },
+  {
+    "ParameterKey": "MaxRetries",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "Timeout",
+    "ParameterValue": "2880"
+  },
+  {
+    "ParameterKey": "MaxConcurrentRuns",
+    "ParameterValue": "1"
+  },
+  {
+    "ParameterKey": "WorkerType",
+    "ParameterValue": "G.2X"
+  },
+  {
+    "ParameterKey": "NumberOfWorkers",
+    "ParameterValue": "4"
+  },
+  {
+    "ParameterKey": "SourceVpcId",
+    "ParameterValue": "vpc-0123456789abcdef0"
+  },
+  {
+    "ParameterKey": "SourceSubnetIds",
+    "ParameterValue": "subnet-0123456789abcdef0"
+  },
+  {
+    "ParameterKey": "SourceSecurityGroupIds",
+    "ParameterValue": "sg-0123456789abcdef0"
+  },
+  {
+    "ParameterKey": "CreateSourceGlueVpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "CreateSourceS3VpcEndpoint",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "SourceAvailabilityZone",
+    "ParameterValue": "us-east-1a"
+  },
+  {
+    "ParameterKey": "LogRetentionDays",
+    "ParameterValue": "30"
+  },
+  {
+    "ParameterKey": "ErrorLogRetentionDays",
+    "ParameterValue": "90"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchDashboard",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "EnableCloudWatchAlarms",
+    "ParameterValue": "YES"
+  },
+  {
+    "ParameterKey": "AlarmNotificationEmail",
+    "ParameterValue": "admin@example.com"
+  }
+]

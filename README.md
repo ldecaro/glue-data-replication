@@ -56,6 +56,8 @@ cp examples/sqlserver-to-sqlserver-parameters.json my-parameters.json
 aws glue start-job-run --job-name my-job-name
 ```
 
+> **Note**: Replace placeholder values like `my-bucket-name` with your actual AWS resource names.
+
 For detailed setup instructions, see the [Quick Start Guide](docs/QUICK_START_GUIDE.md).
 
 ## Project Structure
@@ -133,10 +135,6 @@ The solution supports three connection strategies for JDBC databases:
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
----
-
-**Note**: Replace placeholder values like `my-bucket-name` with your actual AWS resource names.
 
 ---
 

@@ -841,6 +841,52 @@ def _perform_incremental_load_with_engine_support(incremental_migrator, config: 
             raise
 
 
+def _setup_kerberos_environment_if_needed(job_config: JobConfig) -> None:
+    """Set up Kerberos environment for source and/or target connections if configured.
+    
+    This MUST be called before any JDBC connections are made to ensure the krb5.conf
+    file exists and Java system properties are set for Kerberos authentication.
+    
+    Args:
+        job_config: Job configuration containing connection configs
+    """
+    from glue_job.config.kerberos_environment import KerberosEnvironmentManager
+    
+    kerberos_manager = KerberosEnvironmentManager()
+    
+    # Set up Kerberos for source connection if configured
+    if job_config.source_connection.uses_kerberos_authentication():
+        kerberos_config = job_config.source_connection.get_kerberos_config()
+        logger.info(f"Setting up Kerberos environment for SOURCE connection: domain={kerberos_config.domain}, kdc={kerberos_config.kdc}")
+        
+        kerberos_manager.setup_kerberos_environment(
+            kerberos_config=kerberos_config,
+            username=job_config.source_connection.username,
+            password=job_config.source_connection.password,
+            keytab_s3_path=job_config.source_connection.kerberos_keytab_s3_path
+        )
+        logger.info("✓ Kerberos environment setup completed for SOURCE connection")
+    
+    # Set up Kerberos for target connection if configured (and different from source)
+    if job_config.target_connection.uses_kerberos_authentication():
+        target_kerberos_config = job_config.target_connection.get_kerberos_config()
+        
+        # Check if target uses a different Kerberos realm than source
+        source_kerberos_config = job_config.source_connection.get_kerberos_config()
+        if source_kerberos_config is None or target_kerberos_config.domain != source_kerberos_config.domain:
+            logger.info(f"Setting up Kerberos environment for TARGET connection: domain={target_kerberos_config.domain}, kdc={target_kerberos_config.kdc}")
+            
+            kerberos_manager.setup_kerberos_environment(
+                kerberos_config=target_kerberos_config,
+                username=job_config.target_connection.username,
+                password=job_config.target_connection.password,
+                keytab_s3_path=job_config.target_connection.kerberos_keytab_s3_path
+            )
+            logger.info("✓ Kerberos environment setup completed for TARGET connection")
+        else:
+            logger.info("TARGET connection uses same Kerberos realm as SOURCE - reusing environment")
+
+
 def main() -> None:
     """Main entry point for Glue job execution with Iceberg support."""
     try:
@@ -851,6 +897,10 @@ def main() -> None:
         
         # Initialize Glue context and job
         glue_context, job = setup_glue_context(args)
+        
+        # CRITICAL: Set up Kerberos environment BEFORE any database connections
+        # This creates krb5.conf and sets Java system properties needed for Kerberos auth
+        _setup_kerberos_environment_if_needed(job_config)
         
         # Execute migration workflow with Iceberg support
         execute_migration_workflow(job_config, glue_context)

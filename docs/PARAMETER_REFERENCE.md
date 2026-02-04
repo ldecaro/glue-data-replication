@@ -8,6 +8,7 @@ This document provides a comprehensive reference for all parameters available in
 - [Optional Parameters](#optional-parameters)
 - [Iceberg Configuration](#iceberg-configuration)
 - [Glue Connection Configuration](#glue-connection-configuration)
+- [Kerberos Authentication](#kerberos-authentication)
 - [Network Configuration](#network-configuration)
 - [Performance Optimization](#performance-optimization)
 - [Observability Configuration](#observability-configuration)
@@ -180,6 +181,56 @@ When creating new Glue Connections (`Create*Connection=true`):
 - `CreateTargetConnection` and `UseTargetConnection` are **mutually exclusive**
 - Glue Connection parameters only apply to JDBC engines (`oracle`, `sqlserver`, `postgresql`, `db2`)
 - Parameters are **ignored** for Iceberg engines (with warnings logged)
+
+---
+
+## Kerberos Authentication
+
+Configure Kerberos authentication for enterprise database connections that require Active Directory or Kerberos-based authentication.
+
+### Kerberos Parameters
+
+| Parameter | Type | Description | Default | Example |
+|-----------|------|-------------|---------|---------|
+| `SourceKerberosSPN` | String | Service Principal Name for source database | `''` | `MSSQLSvc/sqlserver.domain.com:1433` |
+| `SourceKerberosDomain` | String | Kerberos realm/domain for source | `''` | `CORP.EXAMPLE.COM` |
+| `SourceKerberosKDC` | String | Key Distribution Center hostname for source | `''` | `dc01.corp.example.com` |
+| `TargetKerberosSPN` | String | Service Principal Name for target database | `''` | `MSSQLSvc/sqlserver2.domain.com:1433` |
+| `TargetKerberosDomain` | String | Kerberos realm/domain for target | `''` | `CORP.EXAMPLE.COM` |
+| `TargetKerberosKDC` | String | Key Distribution Center hostname for target | `''` | `dc01.corp.example.com` |
+
+### Keytab Authentication (Optional)
+
+| Parameter | Type | Description | Default | Example |
+|-----------|------|-------------|---------|---------|
+| `SourceKerberosKeytabS3Path` | String | S3 path to keytab file for source | `''` | `s3://bucket/keytabs/user.keytab` |
+| `TargetKerberosKeytabS3Path` | String | S3 path to keytab file for target | `''` | `s3://bucket/keytabs/user.keytab` |
+
+### Supported Engines
+
+Kerberos authentication is supported for:
+- **SQL Server** - Windows Integrated Authentication
+- **Oracle** - Kerberos authentication
+- **PostgreSQL** - GSSAPI authentication
+- **DB2** - Kerberos authentication
+
+**Note**: Kerberos is **not supported** for Iceberg engines.
+
+### Configuration Requirements
+
+All three Kerberos parameters (SPN, Domain, KDC) must be provided together:
+- If any parameter is missing, Kerberos authentication is disabled
+- Partial configuration generates a warning in logs
+
+### SPN Format Examples
+
+| Database | SPN Format | Example |
+|----------|------------|---------|
+| SQL Server | `MSSQLSvc/hostname:port` | `MSSQLSvc/sqlserver.corp.com:1433` |
+| Oracle | `oracle/hostname@REALM` | `oracle/oradb.corp.com@CORP.COM` |
+| PostgreSQL | `postgres/hostname@REALM` | `postgres/pgdb.corp.com@CORP.COM` |
+
+For detailed Kerberos setup instructions, see [KERBEROS_AUTHENTICATION_GUIDE.md](KERBEROS_AUTHENTICATION_GUIDE.md).
 
 ---
 

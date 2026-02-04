@@ -133,8 +133,20 @@ class JobConfigurationParser:
         'DEFAULT_FETCH_SIZE'
     ]
     
-    # All optional parameters (network + Iceberg + bookmark + Glue Connection + performance + partitioned reads)
-    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS + GLUE_CONNECTION_PARAMS + OPTIONAL_PERFORMANCE_PARAMS + OPTIONAL_PARTITIONED_READ_PARAMS
+    # Kerberos authentication parameters (optional)
+    KERBEROS_PARAMS = [
+        'SOURCE_KERBEROS_SPN',
+        'SOURCE_KERBEROS_DOMAIN', 
+        'SOURCE_KERBEROS_KDC',
+        'SOURCE_KERBEROS_KEYTAB_S3_PATH',
+        'TARGET_KERBEROS_SPN',
+        'TARGET_KERBEROS_DOMAIN',
+        'TARGET_KERBEROS_KDC',
+        'TARGET_KERBEROS_KEYTAB_S3_PATH'
+    ]
+    
+    # All optional parameters (network + Iceberg + bookmark + Glue Connection + performance + partitioned reads + Kerberos)
+    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS + GLUE_CONNECTION_PARAMS + OPTIONAL_PERFORMANCE_PARAMS + OPTIONAL_PARTITIONED_READ_PARAMS + KERBEROS_PARAMS
     
     @classmethod
     def get_required_params_for_engines(cls, source_engine: str, target_engine: str) -> List[str]:
@@ -586,6 +598,70 @@ class JobConfigurationParser:
         logger.info("Engine-specific Glue Connection parameter validation completed")
     
     @classmethod
+    def parse_kerberos_config(cls, args: Dict[str, str], connection_type: str) -> Optional[Any]:
+        """Parse Kerberos configuration for source or target connection.
+        
+        Args:
+            args: Parsed job arguments
+            connection_type: 'source' or 'target' to identify which connection to parse
+            
+        Returns:
+            KerberosConfig if all three Kerberos parameters are provided, None otherwise
+        """
+        from .kerberos_config import KerberosConfig
+        
+        # Extract Kerberos parameters (using CloudFormation parameter format with underscores)
+        prefix_upper = connection_type.upper()
+        spn = args.get(f'{prefix_upper}_KERBEROS_SPN', '').strip()
+        domain = args.get(f'{prefix_upper}_KERBEROS_DOMAIN', '').strip()
+        kdc = args.get(f'{prefix_upper}_KERBEROS_KDC', '').strip()
+        
+        # Debug logging for Kerberos parameter detection
+        logger.info(f"Parsing Kerberos parameters for {connection_type} connection:")
+        logger.info(f"  Found SPN: '{spn}' (length: {len(spn)})")
+        logger.info(f"  Found Domain: '{domain}' (length: {len(domain)})")
+        logger.info(f"  Found KDC: '{kdc}' (length: {len(kdc)})")
+        
+        # Only create config if all three parameters are provided
+        if spn and domain and kdc:
+            logger.info(f"✓ COMPLETE KERBEROS CONFIGURATION DETECTED for {connection_type} connection")
+            try:
+                kerberos_config = KerberosConfig(spn=spn, domain=domain, kdc=kdc)
+                logger.info(f"✓ KerberosConfig created successfully for {connection_type} connection")
+                return kerberos_config
+            except Exception as e:
+                logger.error(f"✗ Failed to create KerberosConfig for {connection_type}: {str(e)}")
+                raise
+        
+        # Log warning if partial configuration is detected
+        if spn or domain or kdc:
+            provided_params = []
+            missing_params = []
+            
+            if spn:
+                provided_params.append(f'{prefix_upper}_KERBEROS_SPN')
+            else:
+                missing_params.append(f'{prefix_upper}_KERBEROS_SPN')
+            
+            if domain:
+                provided_params.append(f'{prefix_upper}_KERBEROS_DOMAIN')
+            else:
+                missing_params.append(f'{prefix_upper}_KERBEROS_DOMAIN')
+            
+            if kdc:
+                provided_params.append(f'{prefix_upper}_KERBEROS_KDC')
+            else:
+                missing_params.append(f'{prefix_upper}_KERBEROS_KDC')
+            
+            logger.warning(
+                f"Partial Kerberos configuration detected for {connection_type} connection. "
+                f"Provided: {provided_params}, Missing: {missing_params}. "
+                "All three parameters (SPN, Domain, KDC) are required for Kerberos authentication."
+            )
+        
+        return None
+
+    @classmethod
     def create_connection_config_with_glue_support(cls, args: Dict[str, str], 
                                                   connection_type: str,
                                                   network_config: Optional['NetworkConfig'],
@@ -605,11 +681,37 @@ class JobConfigurationParser:
         
         engine_type = args[f'{connection_type}_ENGINE_TYPE'].lower()
         
+        # Parse Kerberos configuration
+        kerberos_config = cls.parse_kerberos_config(args, connection_type.lower())
+        
         # Parse Glue Connection configuration
         glue_connection_config = None
         if not DatabaseEngineManager.is_iceberg_engine(engine_type):
             # Only parse Glue Connection config for JDBC engines
             glue_connection_config = cls.parse_glue_connection_params(args, connection_type)
+            
+            # If Kerberos is configured and CreateConnection=true, override to use pre-created Kerberos connection
+            if kerberos_config and glue_connection_config and glue_connection_config.create_connection:
+                from .job_config import GlueConnectionConfig
+                # Get the pre-created Kerberos connection name from CloudFormation
+                kerberos_connection_name = args.get(f'{connection_type}_JDBC_CONNECTION_NAME', '').strip()
+                if kerberos_connection_name:
+                    logger.info(f"Overriding Glue Connection config to use pre-created Kerberos connection: {kerberos_connection_name}")
+                    glue_connection_config = GlueConnectionConfig(
+                        create_connection=False,
+                        use_existing_connection=kerberos_connection_name
+                    )
+        
+        # Log Kerberos configuration detection
+        if kerberos_config:
+            logger.info(f"✓ KERBEROS AUTHENTICATION CONFIGURED for {connection_type.lower()} connection")
+            logger.info(f"  Kerberos Config: SPN='{kerberos_config.spn}', Domain='{kerberos_config.domain}', KDC='{kerberos_config.kdc}'")
+        else:
+            logger.info(f"Standard username/password authentication will be used for {connection_type.lower()} connection")
+        
+        # Get keytab S3 path if available
+        keytab_s3_path = args.get(f'{connection_type}_KERBEROS_KEYTAB_S3_PATH', '').strip()
+        keytab_s3_path = keytab_s3_path if keytab_s3_path else None
         
         if DatabaseEngineManager.is_iceberg_engine(engine_type):
             # For Iceberg engines, use Iceberg-specific parameters
@@ -623,20 +725,30 @@ class JobConfigurationParser:
                 jdbc_driver_path='',  # Not used for Iceberg
                 network_config=network_config,
                 iceberg_config=iceberg_config,
-                glue_connection_config=glue_connection_config  # Will be None for Iceberg
+                glue_connection_config=glue_connection_config,  # Will be None for Iceberg
+                kerberos_config=kerberos_config,
+                kerberos_keytab_s3_path=keytab_s3_path
             )
         else:
             # For JDBC engines, use traditional parameters
+            # When using Glue connections, some parameters may be omitted
+            connection_string = args.get(f'{connection_type}_CONNECTION_STRING', '')
+            username = args.get(f'{connection_type}_DB_USER', '')
+            password = args.get(f'{connection_type}_DB_PASSWORD', '')
+            jdbc_driver_path = args.get(f'{connection_type}_JDBC_DRIVER_S3_PATH', '')
+            
             return ConnectionConfig(
                 engine_type=engine_type,
-                connection_string=args[f'{connection_type}_CONNECTION_STRING'],
+                connection_string=connection_string,
                 database=args[f'{connection_type}_DATABASE'],
                 schema=args[f'{connection_type}_SCHEMA'],
-                username=args[f'{connection_type}_DB_USER'],
-                password=args[f'{connection_type}_DB_PASSWORD'],
-                jdbc_driver_path=args[f'{connection_type}_JDBC_DRIVER_S3_PATH'],
+                username=username,
+                password=password,
+                jdbc_driver_path=jdbc_driver_path,
                 network_config=network_config,
-                glue_connection_config=glue_connection_config
+                glue_connection_config=glue_connection_config,
+                kerberos_config=kerberos_config,
+                kerberos_keytab_s3_path=keytab_s3_path
             )
     
     @classmethod
