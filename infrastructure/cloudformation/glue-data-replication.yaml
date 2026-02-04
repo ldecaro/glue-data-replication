@@ -2022,6 +2022,13 @@ Resources:
         '--PARTITIONED_READ_CONFIG': !Ref PartitionedReadConfig
         '--DEFAULT_NUM_PARTITIONS': !Ref DefaultNumPartitions
         '--DEFAULT_FETCH_SIZE': !Ref DefaultFetchSize
+        # Kerberos Authentication Parameters
+        '--SOURCE_KERBEROS_SPN': !Ref SourceKerberosSPN
+        '--SOURCE_KERBEROS_DOMAIN': !Ref SourceKerberosDomain
+        '--SOURCE_KERBEROS_KDC': !Ref SourceKerberosKDC
+        '--TARGET_KERBEROS_SPN': !Ref TargetKerberosSPN
+        '--TARGET_KERBEROS_DOMAIN': !Ref TargetKerberosDomain
+        '--TARGET_KERBEROS_KDC': !Ref TargetKerberosKDC
       ExecutionProperty:
         MaxConcurrentRuns: !Ref MaxConcurrentRuns
       MaxRetries: !Ref MaxRetries
