@@ -844,13 +844,14 @@ def _perform_incremental_load_with_engine_support(incremental_migrator, config: 
 def _setup_kerberos_environment_if_needed(job_config: JobConfig) -> None:
     """Set up Kerberos environment for source and/or target connections if configured.
     
-    This MUST be called before any JDBC connections are made to ensure the krb5.conf
-    file exists and Java system properties are set for Kerberos authentication.
+    This MUST be called BEFORE SparkContext/GlueContext is created because the JVM's
+    Kerberos subsystem reads java.security.krb5.conf at initialization time.
     
     Args:
         job_config: Job configuration containing connection configs
     """
     from glue_job.config.kerberos_environment import KerberosEnvironmentManager
+    import os
     
     kerberos_manager = KerberosEnvironmentManager()
     
@@ -859,13 +860,29 @@ def _setup_kerberos_environment_if_needed(job_config: JobConfig) -> None:
         kerberos_config = job_config.source_connection.get_kerberos_config()
         logger.info(f"Setting up Kerberos environment for SOURCE connection: domain={kerberos_config.domain}, kdc={kerberos_config.kdc}")
         
-        kerberos_manager.setup_kerberos_environment(
+        # This creates krb5.conf and sets environment variables
+        krb5_conf_path = kerberos_manager.setup_kerberos_environment(
             kerberos_config=kerberos_config,
             username=job_config.source_connection.username,
             password=job_config.source_connection.password,
             keytab_s3_path=job_config.source_connection.kerberos_keytab_s3_path
         )
-        logger.info("✓ Kerberos environment setup completed for SOURCE connection")
+        
+        # CRITICAL: Set Java options via environment variable for JVM startup
+        # These will be read when SparkContext creates the JVM
+        java_opts = os.environ.get('_JAVA_OPTIONS', '')
+        kerberos_java_opts = (
+            f'-Djava.security.krb5.conf={krb5_conf_path} '
+            f'-Djava.security.krb5.realm={kerberos_config.domain.upper()} '
+            f'-Djava.security.krb5.kdc={kerberos_config.kdc} '
+            f'-Djavax.security.auth.useSubjectCredsOnly=false '
+            f'-Dsun.security.krb5.debug=true'
+        )
+        os.environ['_JAVA_OPTIONS'] = f'{java_opts} {kerberos_java_opts}'.strip()
+        
+        logger.info(f"✓ Kerberos environment setup completed for SOURCE connection")
+        logger.info(f"  krb5.conf path: {krb5_conf_path}")
+        logger.info(f"  _JAVA_OPTIONS set for JVM startup")
     
     # Set up Kerberos for target connection if configured (and different from source)
     if job_config.target_connection.uses_kerberos_authentication():
@@ -890,17 +907,18 @@ def _setup_kerberos_environment_if_needed(job_config: JobConfig) -> None:
 def main() -> None:
     """Main entry point for Glue job execution with Iceberg support."""
     try:
-        # Parse job arguments
+        # Parse job arguments FIRST - this doesn't need SparkContext
         args = JobConfigurationParser.parse_job_arguments()
         job_config = JobConfigurationParser.create_job_config(args)
         JobConfigurationParser.validate_configuration(job_config)
         
-        # Initialize Glue context and job
-        glue_context, job = setup_glue_context(args)
-        
-        # CRITICAL: Set up Kerberos environment BEFORE any database connections
-        # This creates krb5.conf and sets Java system properties needed for Kerberos auth
+        # CRITICAL: Set up Kerberos environment BEFORE creating SparkContext/GlueContext
+        # The JVM's Kerberos subsystem reads java.security.krb5.conf at initialization time,
+        # so we must create krb5.conf and set environment variables BEFORE SparkContext starts
         _setup_kerberos_environment_if_needed(job_config)
+        
+        # NOW initialize Glue context and job (after Kerberos environment is ready)
+        glue_context, job = setup_glue_context(args)
         
         # Execute migration workflow with Iceberg support
         execute_migration_workflow(job_config, glue_context)
