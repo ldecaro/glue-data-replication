@@ -654,3 +654,305 @@ class StructuredLogger:
             fallback_action="automatic_detection",
             timestamp=datetime.now(timezone.utc).isoformat()
         )
+    
+    # Migration Operation Logging Methods (Task 11 - Requirements 5.1, 5.2, 5.3, 5.4, 5.5)
+    def log_migration_start(self, table_name: str, load_type: str, source_engine: str, 
+                          target_engine: str, counting_strategy: Optional[str] = None, 
+                          incremental_column: Optional[str] = None, 
+                          last_processed_value: Optional[Any] = None, **kwargs):
+        """
+        Log start of migration operation with engine types and configuration.
+        
+        Requirement 5.1: Log the start of each table migration with source engine, 
+        target engine, and table name.
+        
+        Args:
+            table_name: Name of the table being migrated
+            load_type: Type of load ('full' or 'incremental')
+            source_engine: Source database engine type
+            target_engine: Target database engine type
+            counting_strategy: Counting strategy for full loads (immediate, deferred, auto)
+            incremental_column: Column used for incremental loads
+            last_processed_value: Last processed value for incremental loads
+            **kwargs: Additional context fields
+        """
+        log_data = {
+            "table_name": table_name,
+            "load_type": load_type,
+            "source_engine": source_engine,
+            "target_engine": target_engine,
+            "migration_phase": "start",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        if counting_strategy:
+            log_data["counting_strategy"] = counting_strategy
+        
+        if incremental_column:
+            log_data["incremental_column"] = incremental_column
+        
+        if last_processed_value is not None:
+            log_data["last_processed_value"] = str(last_processed_value)
+        
+        log_data.update(kwargs)
+        
+        self.info(
+            f"Starting {load_type} load migration for table {table_name}",
+            **log_data
+        )
+    
+    def log_migration_progress(self, table_name: str, load_type: str, rows_processed: int, 
+                             total_rows: Optional[int] = None, elapsed_seconds: Optional[float] = None,
+                             rows_per_second: Optional[float] = None, **kwargs):
+        """
+        Log migration progress update.
+        
+        Requirement 5.2: Log progress updates every 100,000 rows processed during write operations.
+        
+        Args:
+            table_name: Name of the table being migrated
+            load_type: Type of load ('full' or 'incremental')
+            rows_processed: Number of rows processed so far
+            total_rows: Total rows to process (if known)
+            elapsed_seconds: Time elapsed since migration start
+            rows_per_second: Current processing rate
+            **kwargs: Additional context fields
+        """
+        log_data = {
+            "table_name": table_name,
+            "load_type": load_type,
+            "rows_processed": rows_processed,
+            "migration_phase": "in_progress",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        if total_rows is not None:
+            log_data["total_rows"] = total_rows
+            log_data["progress_percentage"] = round((rows_processed / total_rows * 100), 2) if total_rows > 0 else 0
+        
+        if elapsed_seconds is not None:
+            log_data["elapsed_seconds"] = round(elapsed_seconds, 2)
+        
+        if rows_per_second is not None:
+            log_data["rows_per_second"] = round(rows_per_second, 2)
+        
+        log_data.update(kwargs)
+        
+        self.info(
+            f"Migration progress for {table_name}: {rows_processed} rows processed",
+            **log_data
+        )
+    
+    def log_migration_completion(self, table_name: str, load_type: str, total_rows: int, 
+                                duration_seconds: float, rows_per_second: float,
+                                read_duration_seconds: Optional[float] = None,
+                                write_duration_seconds: Optional[float] = None,
+                                count_duration_seconds: Optional[float] = None,
+                                counting_strategy: Optional[str] = None,
+                                rows_counted_at: Optional[str] = None,
+                                source_engine: Optional[str] = None,
+                                target_engine: Optional[str] = None,
+                                incremental_column: Optional[str] = None,
+                                new_bookmark_value: Optional[Any] = None,
+                                **kwargs):
+        """
+        Log completion of migration operation with comprehensive metrics.
+        
+        Requirement 5.3: Log the completion of each table migration with total rows, 
+        duration, and transfer rate.
+        
+        Args:
+            table_name: Name of the table migrated
+            load_type: Type of load ('full' or 'incremental')
+            total_rows: Total number of rows processed
+            duration_seconds: Total migration duration
+            rows_per_second: Average processing rate
+            read_duration_seconds: Time spent reading from source
+            write_duration_seconds: Time spent writing to target
+            count_duration_seconds: Time spent counting rows
+            counting_strategy: Counting strategy used (for full loads)
+            rows_counted_at: When rows were counted (before_write, after_write)
+            source_engine: Source database engine type
+            target_engine: Target database engine type
+            incremental_column: Column used for incremental loads
+            new_bookmark_value: New bookmark value (for incremental loads)
+            **kwargs: Additional context fields
+        """
+        log_data = {
+            "table_name": table_name,
+            "load_type": load_type,
+            "total_rows": total_rows,
+            "duration_seconds": round(duration_seconds, 2),
+            "rows_per_second": round(rows_per_second, 2),
+            "migration_phase": "completed",
+            "status": "success",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        if read_duration_seconds is not None:
+            log_data["read_duration_seconds"] = round(read_duration_seconds, 2)
+        
+        if write_duration_seconds is not None:
+            log_data["write_duration_seconds"] = round(write_duration_seconds, 2)
+        
+        if count_duration_seconds is not None:
+            log_data["count_duration_seconds"] = round(count_duration_seconds, 2)
+        
+        if counting_strategy:
+            log_data["counting_strategy"] = counting_strategy
+        
+        if rows_counted_at:
+            log_data["rows_counted_at"] = rows_counted_at
+        
+        if source_engine:
+            log_data["source_engine"] = source_engine
+        
+        if target_engine:
+            log_data["target_engine"] = target_engine
+        
+        if incremental_column:
+            log_data["incremental_column"] = incremental_column
+        
+        if new_bookmark_value is not None:
+            log_data["new_bookmark_value"] = str(new_bookmark_value)
+        
+        log_data.update(kwargs)
+        
+        self.info(
+            f"Migration completed for {table_name}: {total_rows} rows in {round(duration_seconds, 2)}s",
+            **log_data
+        )
+    
+    def log_migration_error(self, table_name: str, load_type: str, error: str, 
+                          error_type: Optional[str] = None, operation: Optional[str] = None,
+                          duration_seconds: Optional[float] = None,
+                          rows_processed: Optional[int] = None,
+                          source_engine: Optional[str] = None,
+                          target_engine: Optional[str] = None,
+                          counting_strategy: Optional[str] = None,
+                          incremental_column: Optional[str] = None,
+                          last_processed_value: Optional[Any] = None,
+                          **kwargs):
+        """
+        Log migration error with full context.
+        
+        Requirement 5.4: When the Migration System encounters an error during migration, 
+        log the error with table name, operation type, and full error details.
+        
+        Args:
+            table_name: Name of the table being migrated
+            load_type: Type of load ('full' or 'incremental')
+            error: Error message
+            error_type: Type of error (e.g., IcebergEngineError, ConnectionError)
+            operation: Operation that failed (read, write, count)
+            duration_seconds: Time elapsed before error
+            rows_processed: Number of rows processed before error
+            source_engine: Source database engine type
+            target_engine: Target database engine type
+            counting_strategy: Counting strategy being used (for full loads)
+            incremental_column: Column used for incremental loads
+            last_processed_value: Last processed value before error
+            **kwargs: Additional context fields
+        """
+        log_data = {
+            "table_name": table_name,
+            "load_type": load_type,
+            "error": error,
+            "migration_phase": "failed",
+            "status": "error",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        if error_type:
+            log_data["error_type"] = error_type
+        
+        if operation:
+            log_data["failed_operation"] = operation
+        
+        if duration_seconds is not None:
+            log_data["duration_before_error_seconds"] = round(duration_seconds, 2)
+        
+        if rows_processed is not None:
+            log_data["rows_processed_before_error"] = rows_processed
+        
+        if source_engine:
+            log_data["source_engine"] = source_engine
+        
+        if target_engine:
+            log_data["target_engine"] = target_engine
+        
+        if counting_strategy:
+            log_data["counting_strategy"] = counting_strategy
+        
+        if incremental_column:
+            log_data["incremental_column"] = incremental_column
+        
+        if last_processed_value is not None:
+            log_data["last_processed_value"] = str(last_processed_value)
+        
+        log_data.update(kwargs)
+        
+        self.error(
+            f"Migration failed for {table_name}: {error}",
+            **log_data
+        )
+    
+    def log_migration_phase_start(self, table_name: str, phase: str, load_type: str, **kwargs):
+        """
+        Log start of a specific migration phase (read, write, count).
+        
+        Requirement 5.5: Ensure consistent structured logging format.
+        
+        Args:
+            table_name: Name of the table being migrated
+            phase: Phase name (read, write, count)
+            load_type: Type of load ('full' or 'incremental')
+            **kwargs: Additional context fields
+        """
+        log_data = {
+            "table_name": table_name,
+            "migration_phase": phase,
+            "load_type": load_type,
+            "phase_status": "started",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        log_data.update(kwargs)
+        
+        self.info(
+            f"Starting {phase} phase for {table_name}",
+            **log_data
+        )
+    
+    def log_migration_phase_complete(self, table_name: str, phase: str, load_type: str, 
+                                   duration_seconds: float, rows_count: Optional[int] = None, **kwargs):
+        """
+        Log completion of a specific migration phase (read, write, count).
+        
+        Requirement 5.5: Ensure consistent structured logging format.
+        
+        Args:
+            table_name: Name of the table being migrated
+            phase: Phase name (read, write, count)
+            load_type: Type of load ('full' or 'incremental')
+            duration_seconds: Phase duration
+            rows_count: Number of rows processed in this phase
+            **kwargs: Additional context fields
+        """
+        log_data = {
+            "table_name": table_name,
+            "migration_phase": phase,
+            "load_type": load_type,
+            "phase_status": "completed",
+            "duration_seconds": round(duration_seconds, 2),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        if rows_count is not None:
+            log_data["rows_count"] = rows_count
+        
+        log_data.update(kwargs)
+        
+        self.info(
+            f"Completed {phase} phase for {table_name} in {round(duration_seconds, 2)}s",
+            **log_data
+        )

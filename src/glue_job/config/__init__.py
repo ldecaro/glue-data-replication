@@ -9,6 +9,7 @@ from .job_config import JobConfig, NetworkConfig, ConnectionConfig, GlueConnecti
 from .database_engines import DatabaseEngineManager, JdbcDriverLoader
 from .parsers import JobConfigurationParser, ConnectionStringBuilder
 from .secrets_manager_handler import SecretsManagerHandler, SecretsManagerError, SecretCreationError, SecretsManagerPermissionError, SecretsManagerRetryableError
+from .partitioned_read_config import PartitionedReadConfig, TablePartitionConfig
 
 __all__ = [
     'JobConfig',
@@ -23,5 +24,7 @@ __all__ = [
     'SecretsManagerError',
     'SecretCreationError',
     'SecretsManagerPermissionError',
-    'SecretsManagerRetryableError'
+    'SecretsManagerRetryableError',
+    'PartitionedReadConfig',
+    'TablePartitionConfig'
 ]

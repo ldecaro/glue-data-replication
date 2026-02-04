@@ -67,6 +67,22 @@
     "ParameterKey": "GlueJobScriptS3Path",
     "ParameterValue": "s3://decaro-glue-replication/src/glue_job/main.py"
   },
+{
+  "ParameterKey": "EnablePartitionedReads",
+  "ParameterValue": "auto"
+},
+{
+  "ParameterKey": "PartitionedReadConfig",
+  "ParameterValue": "{\"order_items\": {\"partition_column\": \"order_item_id\", \"num_partitions\": 4}}"
+},  
+{
+  "ParameterKey": "CreateSourceConnection",
+  "ParameterValue": "true"
+},
+{
+  "ParameterKey": "CreateTargetConnection",
+  "ParameterValue": "true"
+},
   {
     "ParameterKey": "MaxRetries",
     "ParameterValue": "1"
@@ -85,7 +101,7 @@
   },
   {
     "ParameterKey": "NumberOfWorkers",
-    "ParameterValue": "2"
+    "ParameterValue": "3"
   },
   {
     "ParameterKey": "SourceVpcId",

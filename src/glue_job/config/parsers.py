@@ -70,13 +70,25 @@ class JobConfigurationParser:
         'TARGET_FORMAT_VERSION'
     ]
     
-    # Glue Connection parameters
+    # Glue Connection parameters (CloudFormation format)
     GLUE_CONNECTION_PARAMS = [
-        'createSourceConnection',
-        'createTargetConnection',
-        'useSourceConnection',
-        'useTargetConnection'
+        'CREATE_SOURCE_CONNECTION',
+        'CREATE_TARGET_CONNECTION',
+        'USE_SOURCE_CONNECTION',
+        'USE_TARGET_CONNECTION',
+        'SOURCE_JDBC_CONNECTION_NAME',
+        'TARGET_JDBC_CONNECTION_NAME',
+        'SOURCE_DATABASE_SECRET_ARN',
+        'TARGET_DATABASE_SECRET_ARN'
     ]
+    
+    # Mapping from CloudFormation parameter names to internal names
+    GLUE_CONNECTION_PARAM_MAPPING = {
+        'CREATE_SOURCE_CONNECTION': 'createSourceConnection',
+        'CREATE_TARGET_CONNECTION': 'createTargetConnection',
+        'USE_SOURCE_CONNECTION': 'useSourceConnection',
+        'USE_TARGET_CONNECTION': 'useTargetConnection'
+    }
     
     # Optional network configuration parameters
     OPTIONAL_NETWORK_PARAMS = [
@@ -99,8 +111,30 @@ class JobConfigurationParser:
         'MANUAL_BOOKMARK_CONFIG'
     ]
     
-    # All optional parameters (network + Iceberg + bookmark + Glue Connection)
-    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS + GLUE_CONNECTION_PARAMS
+    # Optional migration performance configuration parameters
+    OPTIONAL_PERFORMANCE_PARAMS = [
+        'COUNTING_STRATEGY',
+        'SIZE_THRESHOLD_ROWS',
+        'FORCE_IMMEDIATE_COUNTING',
+        'FORCE_DEFERRED_COUNTING',
+        'PROGRESS_UPDATE_INTERVAL_SECONDS',
+        'PROGRESS_BATCH_SIZE_ROWS',
+        'ENABLE_PROGRESS_TRACKING',
+        'ENABLE_PROGRESS_LOGGING',
+        'ENABLE_DETAILED_METRICS',
+        'METRICS_NAMESPACE'
+    ]
+    
+    # Optional partitioned read parameters (for large dataset optimization)
+    OPTIONAL_PARTITIONED_READ_PARAMS = [
+        'ENABLE_PARTITIONED_READS',
+        'PARTITIONED_READ_CONFIG',
+        'DEFAULT_NUM_PARTITIONS',
+        'DEFAULT_FETCH_SIZE'
+    ]
+    
+    # All optional parameters (network + Iceberg + bookmark + Glue Connection + performance + partitioned reads)
+    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS + GLUE_CONNECTION_PARAMS + OPTIONAL_PERFORMANCE_PARAMS + OPTIONAL_PARTITIONED_READ_PARAMS
     
     @classmethod
     def get_required_params_for_engines(cls, source_engine: str, target_engine: str) -> List[str]:
@@ -194,6 +228,9 @@ class JobConfigurationParser:
                 # Fallback to manual parsing if getResolvedOptions fails
                 args = cls._manual_parse_arguments(sys.argv)
             
+            # Map CloudFormation parameter names to internal names for Glue Connection params
+            cls._map_glue_connection_params(args)
+            
             # Validate that all required parameters are present based on engine types
             cls.validate_required_parameters(args)
             
@@ -212,6 +249,44 @@ class JobConfigurationParser:
             logger.error(f"CRITICAL: Failed to parse job arguments: {str(e)}")
             logger.error(f"Command line arguments: {sys.argv}")
             raise RuntimeError(f"Job argument parsing failed: {str(e)}")
+    
+    @classmethod
+    def _map_glue_connection_params(cls, args: Dict[str, str]) -> None:
+        """Map CloudFormation parameter names to internal camelCase names.
+        
+        This ensures compatibility between CloudFormation parameters (uppercase with underscores)
+        and internal code that expects camelCase parameter names.
+        
+        Args:
+            args: Parsed job arguments (modified in place)
+        """
+        for cf_name, internal_name in cls.GLUE_CONNECTION_PARAM_MAPPING.items():
+            if cf_name in args and args[cf_name]:
+                args[internal_name] = args[cf_name]
+                logger.debug(f"Mapped Glue Connection parameter: {cf_name} -> {internal_name} = {args[cf_name]}")
+        
+        # When CloudFormation creates a connection and passes its name via SOURCE_JDBC_CONNECTION_NAME,
+        # the job should USE that connection, not create a new one.
+        # CloudFormation handles creation; the job only uses existing connections.
+        if args.get('SOURCE_JDBC_CONNECTION_NAME'):
+            if not args.get('useSourceConnection'):
+                args['useSourceConnection'] = args['SOURCE_JDBC_CONNECTION_NAME']
+                logger.info(f"Auto-mapped SOURCE_JDBC_CONNECTION_NAME to useSourceConnection: {args['SOURCE_JDBC_CONNECTION_NAME']}")
+            # Disable runtime creation since CloudFormation already created the connection
+            # Use string 'false' to maintain type consistency (validator expects strings)
+            if args.get('createSourceConnection'):
+                args['createSourceConnection'] = 'false'
+                logger.info("Disabled createSourceConnection - connection already created by CloudFormation")
+        
+        if args.get('TARGET_JDBC_CONNECTION_NAME'):
+            if not args.get('useTargetConnection'):
+                args['useTargetConnection'] = args['TARGET_JDBC_CONNECTION_NAME']
+                logger.info(f"Auto-mapped TARGET_JDBC_CONNECTION_NAME to useTargetConnection: {args['TARGET_JDBC_CONNECTION_NAME']}")
+            # Disable runtime creation since CloudFormation already created the connection
+            # Use string 'false' to maintain type consistency (validator expects strings)
+            if args.get('createTargetConnection'):
+                args['createTargetConnection'] = 'false'
+                logger.info("Disabled createTargetConnection - connection already created by CloudFormation")
     
     @classmethod
     def _manual_parse_arguments(cls, argv: List[str]) -> Dict[str, str]:
@@ -668,6 +743,114 @@ class JobConfigurationParser:
         )
     
     @classmethod
+    def parse_migration_performance_config(cls, args: Dict[str, str]) -> 'MigrationPerformanceConfig':
+        """Parse migration performance configuration from CloudFormation parameters.
+        
+        Args:
+            args: Parsed job arguments
+            
+        Returns:
+            MigrationPerformanceConfig with parsed values or defaults
+        """
+        from .job_config import MigrationPerformanceConfig
+        
+        # Parse counting strategy parameters
+        counting_strategy = args.get('COUNTING_STRATEGY', 'auto').strip().lower()
+        if counting_strategy not in ['immediate', 'deferred', 'auto']:
+            logger.warning(f"Invalid counting_strategy '{counting_strategy}', defaulting to 'auto'")
+            counting_strategy = 'auto'
+        
+        size_threshold_rows = int(args.get('SIZE_THRESHOLD_ROWS', '1000000'))
+        
+        force_immediate_str = args.get('FORCE_IMMEDIATE_COUNTING', 'false').strip().lower()
+        force_immediate_counting = force_immediate_str in ['true', '1', 'yes']
+        
+        force_deferred_str = args.get('FORCE_DEFERRED_COUNTING', 'false').strip().lower()
+        force_deferred_counting = force_deferred_str in ['true', '1', 'yes']
+        
+        # Parse progress tracking parameters
+        progress_update_interval_seconds = int(args.get('PROGRESS_UPDATE_INTERVAL_SECONDS', '60'))
+        progress_batch_size_rows = int(args.get('PROGRESS_BATCH_SIZE_ROWS', '100000'))
+        
+        enable_progress_tracking_str = args.get('ENABLE_PROGRESS_TRACKING', 'true').strip().lower()
+        enable_progress_tracking = enable_progress_tracking_str in ['true', '1', 'yes']
+        
+        enable_progress_logging_str = args.get('ENABLE_PROGRESS_LOGGING', 'true').strip().lower()
+        enable_progress_logging = enable_progress_logging_str in ['true', '1', 'yes']
+        
+        # Parse metrics parameters
+        enable_detailed_metrics_str = args.get('ENABLE_DETAILED_METRICS', 'true').strip().lower()
+        enable_detailed_metrics = enable_detailed_metrics_str in ['true', '1', 'yes']
+        
+        metrics_namespace = args.get('METRICS_NAMESPACE', 'AWS/Glue/DataReplication').strip()
+        
+        # Create configuration
+        config = MigrationPerformanceConfig(
+            counting_strategy=counting_strategy,
+            size_threshold_rows=size_threshold_rows,
+            force_immediate_counting=force_immediate_counting,
+            force_deferred_counting=force_deferred_counting,
+            progress_update_interval_seconds=progress_update_interval_seconds,
+            progress_batch_size_rows=progress_batch_size_rows,
+            enable_progress_tracking=enable_progress_tracking,
+            enable_progress_logging=enable_progress_logging,
+            enable_detailed_metrics=enable_detailed_metrics,
+            metrics_namespace=metrics_namespace
+        )
+        
+        # Validate configuration
+        try:
+            config.validate()
+            logger.info(f"Migration performance configuration parsed successfully: strategy={counting_strategy}, "
+                       f"progress_tracking={enable_progress_tracking}, detailed_metrics={enable_detailed_metrics}")
+        except ValueError as e:
+            logger.error(f"Invalid migration performance configuration: {str(e)}")
+            raise
+        
+        return config
+    
+    @classmethod
+    def parse_partitioned_read_config(cls, args: Dict[str, str]) -> Optional['PartitionedReadConfig']:
+        """Parse partitioned read configuration from CloudFormation parameters.
+        
+        Args:
+            args: Parsed job arguments
+            
+        Returns:
+            PartitionedReadConfig if enabled, None otherwise
+        """
+        from .partitioned_read_config import PartitionedReadConfig
+        
+        enable_partitioned_reads = args.get('ENABLE_PARTITIONED_READS', 'auto').strip().lower()
+        
+        # If disabled, return None
+        if enable_partitioned_reads == 'disabled':
+            logger.info("Partitioned JDBC reads disabled by configuration")
+            return None
+        
+        # Parse configuration JSON
+        partitioned_read_config_json = args.get('PARTITIONED_READ_CONFIG', '').strip()
+        
+        # Parse default values
+        default_num_partitions = int(args.get('DEFAULT_NUM_PARTITIONS', '0'))
+        default_fetch_size = int(args.get('DEFAULT_FETCH_SIZE', '10000'))
+        
+        # Create configuration
+        config = PartitionedReadConfig.from_args(
+            enable_partitioned_reads=enable_partitioned_reads,
+            partitioned_read_config_json=partitioned_read_config_json,
+            default_num_partitions=default_num_partitions,
+            default_fetch_size=default_fetch_size
+        )
+        
+        logger.info(f"Partitioned read configuration parsed: enabled={config.enabled}, "
+                   f"default_partitions={config.default_num_partitions}, "
+                   f"default_fetch_size={config.default_fetch_size}, "
+                   f"table_configs={len(config.table_configs)}")
+        
+        return config
+    
+    @classmethod
     def parse_network_config(cls, args: Dict[str, str], prefix: str) -> Optional[NetworkConfig]:
         """Parse network configuration from CloudFormation parameters.
         
@@ -737,6 +920,12 @@ class JobConfigurationParser:
             manual_bookmark_config = args.get('MANUAL_BOOKMARK_CONFIG', '').strip()
             manual_bookmark_config = manual_bookmark_config if manual_bookmark_config else None
             
+            # Parse migration performance configuration
+            migration_performance_config = cls.parse_migration_performance_config(args)
+            
+            # Parse partitioned read configuration
+            partitioned_read_config = cls.parse_partitioned_read_config(args)
+            
             # Create job config
             job_config = JobConfig(
                 job_name=args['JOB_NAME'],
@@ -745,7 +934,9 @@ class JobConfigurationParser:
                 tables=table_names,
                 validate_connections=validate_connections,
                 connection_timeout_seconds=connection_timeout_seconds,
-                manual_bookmark_config=manual_bookmark_config
+                manual_bookmark_config=manual_bookmark_config,
+                migration_performance_config=migration_performance_config,
+                partitioned_read_config=partitioned_read_config
             )
             
             logger.info(f"Created job configuration for: {job_config.job_name}")
@@ -756,6 +947,10 @@ class JobConfigurationParser:
                 logger.info(f"Cross-VPC network configuration detected: {network_summary}")
             else:
                 logger.info("Using same-VPC connectivity (no cross-VPC configuration)")
+            
+            # Log performance configuration summary
+            performance_summary = job_config.get_performance_summary()
+            logger.info(f"Migration performance configuration: {performance_summary}")
             
             return job_config
             

@@ -12,9 +12,10 @@ A comprehensive AWS Glue-based data replication solution that supports full-load
 
 ### Key Features
 - **Incremental Processing**: Automatic incremental column detection and manual bookmark configuration
+- **Parallel Reads & Writes**: Partitioned JDBC reads using multiple parallel connections for optimized performance. Auto-detects partition columns or allows manual configuration. Writes are automatically parallelized based on data volume.
 - **Network Security**: VPC endpoints for private subnet access to AWS services
 - **Error Handling**: Robust error recovery and retry mechanisms with table-level isolation
-- **Performance Optimization**: Configurable worker types and parallel processing
+- **Performance Optimization**: Configurable worker types, parallel processing, and large dataset optimization
 - **Modular Architecture**: Clean separation of concerns with focused, maintainable modules
 - **Comprehensive Monitoring**: CloudWatch metrics, dashboards, and alarms
 

@@ -423,6 +423,74 @@ Parameters:
     MaxValue: 2880
     ConstraintDescription: 'Must be between 5 and 2880 minutes'
 
+  # Performance Optimization Parameters (Optional)
+  CountingStrategy:
+    Type: String
+    Description: 'Strategy for counting rows during migration: auto (recommended - uses fast SQL COUNT for all sizes), immediate (explicit SQL COUNT before write), or deferred (count after write from target - fallback only)'
+    Default: 'auto'
+    AllowedValues:
+      - 'immediate'
+      - 'deferred'
+      - 'auto'
+    ConstraintDescription: 'Must be one of: immediate, deferred, auto'
+
+  ProgressUpdateInterval:
+    Type: Number
+    Description: 'Interval in seconds for emitting progress updates during data transfer operations'
+    Default: 60
+    MinValue: 10
+    MaxValue: 600
+    ConstraintDescription: 'Must be between 10 and 600 seconds'
+
+  BatchSizeThreshold:
+    Type: Number
+    Description: 'Row count threshold for automatic counting strategy selection (datasets larger than this use deferred counting)'
+    Default: 1000000
+    MinValue: 100000
+    MaxValue: 10000000
+    ConstraintDescription: 'Must be between 100,000 and 10,000,000 rows'
+
+  EnableDetailedMetrics:
+    Type: String
+    Description: 'Enable detailed CloudWatch metrics for migration progress, counting strategy, and phase-specific performance'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    ConstraintDescription: 'Must be true or false'
+
+  # Partitioned Read Parameters (Optional - for large dataset optimization)
+  EnablePartitionedReads:
+    Type: String
+    Description: 'Enable parallel JDBC reads for large datasets. auto=detect partition column from PK/indexes or use PartitionedReadConfig, disabled=single-threaded reads (default)'
+    Default: 'disabled'
+    AllowedValues:
+      - 'auto'
+      - 'disabled'
+    ConstraintDescription: 'Must be auto or disabled'
+
+  PartitionedReadConfig:
+    Type: String
+    Description: 'JSON configuration to override partition settings per table. Format: {"table_name": {"partition_column": "id", "num_partitions": 20, "fetch_size": 10000}}. Only used when EnablePartitionedReads=auto.'
+    Default: ''
+    MaxLength: 4096
+
+  DefaultNumPartitions:
+    Type: Number
+    Description: 'Default number of parallel read partitions when auto-detecting. 0 = calculate based on row count (~500K rows per partition).'
+    Default: 0
+    MinValue: 0
+    MaxValue: 200
+    ConstraintDescription: 'Must be between 0 (auto) and 200'
+
+  DefaultFetchSize:
+    Type: Number
+    Description: 'Default number of rows to fetch per JDBC round-trip. Higher values = faster reads but more memory.'
+    Default: 10000
+    MinValue: 100
+    MaxValue: 100000
+    ConstraintDescription: 'Must be between 100 and 100,000'
+
 Conditions:
   IsStandardWorker: !Equals [!Ref WorkerType, 'Standard']
   HasGlueJobModules: !Not [!Equals [!Ref GlueJobModulesS3Path, '']]
@@ -668,13 +736,19 @@ Resources:
                   - cloudwatch:PutMetricData
                   - cloudwatch:GetMetricStatistics
                   - cloudwatch:ListMetrics
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace':
+                      - 'AWS/Glue'
+                      - 'AWS/Glue/DataReplication'
+              # CloudWatch Dashboard permissions
+              - Effect: Allow
+                Action:
                   - cloudwatch:PutDashboard
                   - cloudwatch:GetDashboard
                   - cloudwatch:ListDashboards
                 Resource: '*'
-                Condition:
-                  StringEquals:
-                    'cloudwatch:namespace': 'AWS/Glue'
               # CloudWatch Insights permissions
               - Effect: Allow
                 Action:
@@ -866,12 +940,17 @@ Resources:
               # AWS Secrets Manager permissions for Glue Connection credential storage
               - Effect: Allow
                 Action:
+                  - secretsmanager:ListSecrets
+                Resource: '*'
+              - Effect: Allow
+                Action:
                   - secretsmanager:CreateSecret
                   - secretsmanager:GetSecretValue
                   - secretsmanager:PutSecretValue
                   - secretsmanager:DescribeSecret
                   - secretsmanager:UpdateSecret
                   - secretsmanager:DeleteSecret
+                  - secretsmanager:TagResource
                 Resource:
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/aws-glue/*'
               # KMS permissions for Secrets Manager encryption (using default key)
@@ -1421,9 +1500,160 @@ Resources:
               "height": 6,
               "properties": {
                 "metrics": [
-                  [ "AWS/Glue", "glue.driver.aggregate.numCompletedTasks", "JobName", "${JobName}" ],
-                  [ ".", "glue.driver.aggregate.numFailedTasks", ".", "." ],
-                  [ ".", "glue.driver.aggregate.numKilledTasks", ".", "." ]
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType} MetricName=\"MigrationRowsProcessed\" JobName=\"${JobName}\"', 'Sum', 300)", "id": "m1", "label": "Migration Rows" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Migration - Rows Processed",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Rows"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType} MetricName=\"MigrationRowsPerSecond\" JobName=\"${JobName}\"', 'Average', 300)", "id": "m1", "label": "Rows/Second" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Migration - Throughput (Rows/Second)",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Rows/Second"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType} MetricName=\"MigrationSuccess\" JobName=\"${JobName}\"', 'Sum', 300)", "id": "m1", "label": "Success", "color": "#2ca02c" } ],
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType} MetricName=\"MigrationFailed\" JobName=\"${JobName}\"', 'Sum', 300)", "id": "m2", "label": "Failed", "color": "#d62728" } ],
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType} MetricName=\"MigrationInProgress\" JobName=\"${JobName}\"', 'Sum', 300)", "id": "m3", "label": "In Progress", "color": "#ff7f0e" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}",
+                "title": "Migration - Status by Table",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8,
+              "y": 6,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType} MetricName=\"MigrationProgressPercentage\" JobName=\"${JobName}\"', 'Average', 60)", "id": "m1", "label": "Progress %" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Migration - Progress Percentage",
+                "period": 60,
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100,
+                    "label": "Percent"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16,
+              "y": 6,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType,Phase} MetricName=\"MigrationReadDuration\" JobName=\"${JobName}\"', 'Average', 300)", "id": "m1", "label": "Read Duration" } ],
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType,Phase} MetricName=\"MigrationWriteDuration\" JobName=\"${JobName}\"', 'Average', 300)", "id": "m2", "label": "Write Duration" } ],
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,TableName,LoadType,Phase} MetricName=\"MigrationCountDuration\" JobName=\"${JobName}\"', 'Average', 300)", "id": "m3", "label": "Count Duration" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Migration - Phase Durations",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Seconds"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,StrategyType} MetricName=\"CountingStrategyUsed\" JobName=\"${JobName}\" StrategyType=\"immediate\"', 'Sum', 300)", "id": "m1", "label": "Immediate Count" } ],
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName,StrategyType} MetricName=\"CountingStrategyUsed\" JobName=\"${JobName}\" StrategyType=\"deferred\"', 'Sum', 300)", "id": "m2", "label": "Deferred Count" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}",
+                "title": "Counting Strategy Usage",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 12,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SEARCH('{AWS/Glue/DataReplication,JobName} MetricName=\"ErrorOccurred\" JobName=\"${JobName}\"', 'Sum', 300)", "id": "m1", "label": "Errors" } ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Error Count",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 18,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ { "expression": "SEARCH('{Glue,JobName,JobRunId,Type} MetricName=\"glue.driver.aggregate.numCompletedTasks\" JobName=\"${JobName}\"', 'Sum', 300)", "id": "m1" } ],
+                  [ { "expression": "SEARCH('{Glue,JobName,JobRunId,Type} MetricName=\"glue.driver.aggregate.numFailedTasks\" JobName=\"${JobName}\"', 'Sum', 300)", "id": "m2" } ],
+                  [ { "expression": "SEARCH('{Glue,JobName,JobRunId,Type} MetricName=\"glue.driver.aggregate.numKilledTasks\" JobName=\"${JobName}\"', 'Sum', 300)", "id": "m3" } ]
                 ],
                 "view": "timeSeries",
                 "stacked": false,
@@ -1435,14 +1665,15 @@ Resources:
             {
               "type": "metric",
               "x": 12,
-              "y": 0,
+              "y": 18,
               "width": 12,
               "height": 6,
               "properties": {
                 "metrics": [
-                  [ "AWS/Glue", "glue.driver.jvm.heap.usage", "JobName", "${JobName}" ],
-                  [ ".", "glue.driver.jvm.heap.used", ".", "." ],
-                  [ ".", "glue.driver.system.cpuUtilization", ".", "." ]
+                  [ { "expression": "SEARCH('{Glue,ObservabilityGroup,JobRunId,JobName,Type} MetricName=\"glue.driver.memory.non-heap.used\" JobName=\"${JobName}\"', 'Average', 300)", "id": "m1" } ],
+                  [ { "expression": "SEARCH('{Glue,ObservabilityGroup,JobRunId,JobName,Type} MetricName=\"glue.ALL.memory.non-heap.used\" JobName=\"${JobName}\"', 'Average', 300)", "id": "m2" } ],
+                  [ { "expression": "SEARCH('{Glue,ObservabilityGroup,JobRunId,JobName,Type} MetricName=\"glue.driver.jvm.heap.used\" JobName=\"${JobName}\"', 'Average', 300)", "id": "m3" } ],
+                  [ { "expression": "SEARCH('{Glue,ObservabilityGroup,JobRunId,JobName,Type} MetricName=\"glue.ALL.jvm.heap.used\" JobName=\"${JobName}\"', 'Average', 300)", "id": "m4" } ]
                 ],
                 "view": "timeSeries",
                 "stacked": false,
@@ -1452,34 +1683,15 @@ Resources:
               }
             },
             {
-              "type": "metric",
-              "x": 0,
-              "y": 6,
-              "width": 12,
-              "height": 6,
-              "properties": {
-                "metrics": [
-                  [ "AWS/Glue", "glue.driver.BlockManager.disk.diskSpaceUsed_MB", "JobName", "${JobName}" ],
-                  [ ".", "glue.driver.s3.filesystem.read_bytes", ".", "." ],
-                  [ ".", "glue.driver.s3.filesystem.write_bytes", ".", "." ]
-                ],
-                "view": "timeSeries",
-                "stacked": false,
-                "region": "${AWS::Region}",
-                "title": "Glue Job I/O Metrics",
-                "period": 300
-              }
-            },
-            {
               "type": "log",
-              "x": 12,
-              "y": 6,
-              "width": 12,
+              "x": 0,
+              "y": 24,
+              "width": 24,
               "height": 6,
               "properties": {
-                "query": "SOURCE '/aws-glue/jobs/${JobName}'\n| fields @timestamp, @message\n| filter @message like /ERROR/\n| sort @timestamp desc\n| limit 100",
+                "query": "SOURCE '/aws-glue/jobs/${JobName}'\n| fields @timestamp, @message\n| filter @message like /ERROR/ or @message like /Migration completed/\n| sort @timestamp desc\n| limit 100",
                 "region": "${AWS::Region}",
-                "title": "Recent Errors",
+                "title": "Recent Errors and Completions",
                 "view": "table"
               }
             }
@@ -1636,6 +1848,7 @@ Resources:
       DefaultArguments:
         '--job-bookmark-option': 'job-bookmark-enable'
         '--enable-metrics': 'true'
+        '--enable-observability-metrics': 'true'
         '--enable-continuous-cloudwatch-log': 'true'
         '--enable-spark-ui': 'true'
         '--spark-event-logs-path': !Sub 's3://aws-glue-assets-${AWS::AccountId}-${AWS::Region}/sparkHistoryLogs/'
@@ -1651,8 +1864,8 @@ Resources:
           - !Ref 'AWS::NoValue'
         '--conf': !If
           - IsIcebergJob
-          - 'spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true --conf spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO'
-          - 'spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=true'
+          - 'spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=false --conf spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO'
+          - 'spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=false'
         '--extra-jars': !If
           - HasSourceJdbcDriver
           - !If
@@ -1709,6 +1922,14 @@ Resources:
         '--VALIDATE_CONNECTIONS': 'true'
         '--CONNECTION_TIMEOUT_SECONDS': '30'
         '--MANUAL_BOOKMARK_CONFIG': !Ref ManualBookmarkConfig
+        '--COUNTING_STRATEGY': !Ref CountingStrategy
+        '--PROGRESS_UPDATE_INTERVAL': !Ref ProgressUpdateInterval
+        '--BATCH_SIZE_THRESHOLD': !Ref BatchSizeThreshold
+        '--ENABLE_DETAILED_METRICS': !Ref EnableDetailedMetrics
+        '--ENABLE_PARTITIONED_READS': !Ref EnablePartitionedReads
+        '--PARTITIONED_READ_CONFIG': !Ref PartitionedReadConfig
+        '--DEFAULT_NUM_PARTITIONS': !Ref DefaultNumPartitions
+        '--DEFAULT_FETCH_SIZE': !Ref DefaultFetchSize
       ExecutionProperty:
         MaxConcurrentRuns: !Ref MaxConcurrentRuns
       MaxRetries: !Ref MaxRetries

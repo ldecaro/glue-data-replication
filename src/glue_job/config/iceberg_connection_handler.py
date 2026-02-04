@@ -441,7 +441,8 @@ class IcebergConnectionHandler:
         try:
             print(f"=== ICEBERG HANDLER WRITE_TABLE CALLED FOR {database}.{table} ===")
             logger.info(f"Starting write operation to Iceberg table: {database}.{table} (mode: {mode})")
-            logger.info(f"DataFrame row count: {dataframe.count()}")
+            # Note: Removed dataframe.count() here to avoid unnecessary full scan
+            # Row count is obtained via SQL COUNT(*) in the migration layer
             
             # Validate mode
             valid_modes = ['create', 'append', 'overwrite']
@@ -538,6 +539,15 @@ class IcebergConnectionHandler:
             temp_view_name = f"temp_{database}_{table}_{mode}"
             dataframe.createOrReplaceTempView(temp_view_name)
             
+            # Set write.distribution-mode to 'none' to preserve DataFrame partitioning
+            # This allows parallel writes across all DataFrame partitions instead of
+            # Spark's default hash-based redistribution which can consolidate to fewer tasks
+            try:
+                self.spark.conf.set("spark.sql.iceberg.distribution-mode", "none")
+                logger.info(f"Set Iceberg distribution mode to 'none' for parallel writes")
+            except Exception as conf_error:
+                logger.warning(f"Failed to set distribution mode: {str(conf_error)}")
+            
             # Write using Spark SQL based on mode
             if mode == "create":
                 if table_exists:
@@ -551,6 +561,7 @@ class IcebergConnectionHandler:
                 
                 # Set Iceberg-specific properties
                 writer.tableProperty("format-version", "2")
+                writer.tableProperty("write.distribution-mode", "none")  # Preserve partitioning
                 if iceberg_config:
                     writer.tableProperty("write.update.mode", "merge-on-read")
                     writer.tableProperty("write.delete.mode", "merge-on-read")
@@ -558,9 +569,18 @@ class IcebergConnectionHandler:
                 writer.create()
                 
             elif mode == "append":
-                # Use INSERT INTO for append operations
-                insert_sql = f"INSERT INTO {full_table_name} SELECT * FROM {temp_view_name}"
-                self.spark.sql(insert_sql)
+                # Use DataFrame writeTo API for append to preserve partitioning
+                # This ensures parallel writes across all DataFrame partitions
+                logger.info(f"Using DataFrame writeTo API for append to {full_table_name}")
+                try:
+                    # Use option to set distribution mode to none for parallel writes
+                    dataframe.writeTo(full_table_name).option("distribution-mode", "none").append()
+                    logger.info(f"Successfully appended to {full_table_name} using writeTo API with distribution-mode=none")
+                except Exception as append_error:
+                    # Fallback to SQL if writeTo fails
+                    logger.warning(f"writeTo append failed, falling back to SQL: {str(append_error)}")
+                    insert_sql = f"INSERT INTO {full_table_name} SELECT * FROM {temp_view_name}"
+                    self.spark.sql(insert_sql)
                 
             elif mode == "overwrite":
                 print(f"=== OVERWRITE MODE FOR {full_table_name} ===")
@@ -576,52 +596,79 @@ class IcebergConnectionHandler:
                 
                 # If table doesn't exist, create it first using DataFrame operations
                 if not table_exists_check:
-                    logger.info(f"Table {full_table_name} doesn't exist, creating it using DataFrame operations")
+                    logger.info(f"Table {full_table_name} doesn't exist, creating empty table then appending with parallel writes")
                     try:
-                        # Use DataFrame.write.saveAsTable() instead of SQL
-                        dataframe.write \
-                            .format("iceberg") \
-                            .option("path", f"{iceberg_config.warehouse_location if iceberg_config else ''}/{database}/{table}") \
-                            .saveAsTable(full_table_name)
+                        # Step 1: Create empty table structure using CTAS with LIMIT 0
+                        create_sql = f"""
+                        CREATE TABLE {full_table_name}
+                        USING iceberg
+                        TBLPROPERTIES (
+                            'format-version'='2',
+                            'write.distribution-mode'='none',
+                            'write.update.mode'='merge-on-read',
+                            'write.delete.mode'='merge-on-read'
+                        )
+                        AS SELECT * FROM {temp_view_name} LIMIT 0
+                        """
                         
-                        logger.info(f"Successfully created table {full_table_name} using DataFrame operations")
+                        logger.info(f"Creating empty table with SQL: {create_sql}")
+                        self.spark.sql(create_sql)
+                        logger.info(f"Successfully created empty table {full_table_name}")
+                        
+                        # Step 2: Append data using parallel writes
+                        logger.info(f"Appending data to {full_table_name} with parallel writes (partitions: {dataframe.rdd.getNumPartitions()})")
+                        
+                        # Set distribution mode to none to preserve DataFrame partitioning
+                        try:
+                            self.spark.conf.set("spark.sql.iceberg.distribution-mode", "none")
+                        except Exception as conf_error:
+                            logger.warning(f"Failed to set distribution mode: {str(conf_error)}")
+                        
+                        # Use writeTo with distribution-mode=none for parallel append
+                        dataframe.writeTo(full_table_name).option("distribution-mode", "none").append()
+                        
+                        logger.info(f"Successfully created and populated table {full_table_name} using parallel writes")
                         
                     except Exception as df_create_error:
-                        logger.error(f"DataFrame table creation failed: {str(df_create_error)}")
+                        logger.error(f"Parallel table creation failed: {str(df_create_error)}")
                         
-                        # Fallback to SQL approach
+                        # Fallback to saveAsTable (may not preserve partitioning)
                         try:
-                            logger.info("Falling back to SQL table creation")
-                            create_sql = f"""
-                            CREATE TABLE {full_table_name}
-                            USING iceberg
-                            TBLPROPERTIES (
-                                'format-version'='2',
-                                'write.update.mode'='merge-on-read',
-                                'write.delete.mode'='merge-on-read'
-                            )
-                            AS SELECT * FROM {temp_view_name} LIMIT 0
-                            """
+                            logger.info("Falling back to saveAsTable")
+                            dataframe.write \
+                                .format("iceberg") \
+                                .option("path", f"{iceberg_config.warehouse_location if iceberg_config else ''}/{database}/{table}") \
+                                .saveAsTable(full_table_name)
                             
-                            logger.info(f"Creating table with SQL: {create_sql}")
-                            self.spark.sql(create_sql)
+                            logger.info(f"Successfully created table {full_table_name} using saveAsTable fallback")
                             
-                            # Now write the actual data
-                            logger.info(f"Writing data to newly created table")
-                            overwrite_sql = f"INSERT OVERWRITE {full_table_name} SELECT * FROM {temp_view_name}"
-                            self.spark.sql(overwrite_sql)
-                            
-                        except Exception as sql_fallback_error:
-                            logger.error(f"SQL fallback also failed: {str(sql_fallback_error)}")
+                        except Exception as save_error:
+                            logger.error(f"saveAsTable fallback also failed: {str(save_error)}")
                             raise IcebergConnectionError(
-                                f"Both DataFrame and SQL approaches failed for {full_table_name}: {str(sql_fallback_error)}",
-                                spark_error=sql_fallback_error
+                                f"All table creation approaches failed for {full_table_name}: {str(save_error)}",
+                                spark_error=save_error
                             )
                 else:
-                    # Table exists, use INSERT OVERWRITE
-                    logger.info(f"Table {full_table_name} exists, using INSERT OVERWRITE")
-                    overwrite_sql = f"INSERT OVERWRITE {full_table_name} SELECT * FROM {temp_view_name}"
-                    self.spark.sql(overwrite_sql)
+                    # Table exists - use DELETE + parallel append for better performance
+                    # overwritePartitions() consolidates to 1 task, so we use DELETE + append instead
+                    logger.info(f"Table {full_table_name} exists, using DELETE + parallel append for overwrite")
+                    logger.info(f"DataFrame partitions before write: {dataframe.rdd.getNumPartitions()}")
+                    try:
+                        # Step 1: Delete all existing data from the table
+                        delete_sql = f"DELETE FROM {full_table_name}"
+                        logger.info(f"Executing DELETE: {delete_sql}")
+                        self.spark.sql(delete_sql)
+                        logger.info(f"Successfully deleted existing data from {full_table_name}")
+                        
+                        # Step 2: Append new data using parallel writes with distribution-mode=none
+                        logger.info(f"Appending data to {full_table_name} with parallel writes (partitions: {dataframe.rdd.getNumPartitions()})")
+                        dataframe.writeTo(full_table_name).option("distribution-mode", "none").append()
+                        logger.info(f"Successfully overwrote {full_table_name} using DELETE + parallel append")
+                    except Exception as overwrite_error:
+                        # Fallback to INSERT OVERWRITE if DELETE + append fails
+                        logger.warning(f"DELETE + append failed, falling back to INSERT OVERWRITE: {str(overwrite_error)}")
+                        overwrite_sql = f"INSERT OVERWRITE {full_table_name} SELECT * FROM {temp_view_name}"
+                        self.spark.sql(overwrite_sql)
             
             logger.info(f"Successfully wrote to Iceberg table: {database}.{table}")
             
@@ -1045,67 +1092,81 @@ class IcebergConnectionHandler:
             # Validate Spark configuration before attempting table creation
             self._validate_catalog_configuration()
             
-            # Try multiple approaches for table creation
+            # Strategy: Create empty table first, then append data with parallel writes
+            # This ensures DataFrame partitioning is preserved during the write phase
             creation_successful = False
             
-            # Approach 1: Use writeTo API
+            # Step 1: Create empty table structure using CTAS with LIMIT 0
             try:
-                logger.info(f"Attempting table creation using writeTo API for {full_table_name}")
-                writer = dataframe.writeTo(full_table_name)
+                logger.info(f"Creating empty table structure for {full_table_name}")
                 
-                # Set Iceberg-specific properties
-                writer.tableProperty("format-version", "2")
-                writer.tableProperty("write.update.mode", "merge-on-read")
-                writer.tableProperty("write.delete.mode", "merge-on-read")
+                # Create a temporary view from the DataFrame
+                temp_view_name = f"temp_schema_{database}_{table}"
+                dataframe.createOrReplaceTempView(temp_view_name)
                 
-                # Create the table (this will create an empty table with the DataFrame's schema)
-                writer.create()
-                creation_successful = True
-                logger.info(f"Successfully created table using writeTo API: {database}.{table}")
+                # Create table using CTAS with LIMIT 0 to get schema without data
+                create_sql = f"""
+                CREATE TABLE {full_table_name}
+                USING iceberg
+                TBLPROPERTIES (
+                    'format-version'='2',
+                    'write.distribution-mode'='none',
+                    'write.update.mode'='merge-on-read',
+                    'write.delete.mode'='merge-on-read'
+                )
+                AS SELECT * FROM {temp_view_name} LIMIT 0
+                """
                 
-            except Exception as writeto_error:
-                logger.warning(f"writeTo API failed for {database}.{table}: {str(writeto_error)}")
-                logger.warning(f"writeTo error type: {type(writeto_error).__name__}")
-                logger.warning(f"writeTo error details: {str(writeto_error)}")
+                logger.info(f"Executing CTAS SQL for empty table: {create_sql}")
+                self.spark.sql(create_sql)
+                logger.info(f"Successfully created empty table structure: {database}.{table}")
                 
-                # Approach 2: Use CREATE TABLE AS SELECT with LIMIT 0
+                # Clean up temporary view
                 try:
-                    logger.info(f"Attempting table creation using CTAS with LIMIT 0 for {full_table_name}")
+                    self.spark.sql(f"DROP VIEW IF EXISTS {temp_view_name}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to clean up temp view {temp_view_name}: {cleanup_error}")
+                
+                # Step 2: Append data using parallel writes
+                logger.info(f"Appending data to {full_table_name} with parallel writes (partitions: {dataframe.rdd.getNumPartitions()})")
+                
+                # Set distribution mode to none to preserve DataFrame partitioning
+                try:
+                    self.spark.conf.set("spark.sql.iceberg.distribution-mode", "none")
+                except Exception as conf_error:
+                    logger.warning(f"Failed to set distribution mode: {str(conf_error)}")
+                
+                # Use writeTo with distribution-mode=none for parallel append
+                dataframe.writeTo(full_table_name).option("distribution-mode", "none").append()
+                
+                creation_successful = True
+                logger.info(f"Successfully created and populated table using parallel writes: {database}.{table}")
                     
-                    # Create a temporary view from the DataFrame
-                    temp_view_name = f"temp_schema_{database}_{table}"
-                    dataframe.createOrReplaceTempView(temp_view_name)
+            except Exception as ctas_error:
+                logger.warning(f"CTAS approach failed for {database}.{table}: {str(ctas_error)}")
+                
+                # Fallback: Use writeTo API (may not preserve partitioning)
+                try:
+                    logger.info(f"Falling back to writeTo API for {full_table_name}")
+                    writer = dataframe.writeTo(full_table_name)
                     
-                    # Create table using CTAS with LIMIT 0 to get schema without data
-                    create_sql = f"""
-                    CREATE TABLE {full_table_name}
-                    USING iceberg
-                    TBLPROPERTIES (
-                        'format-version'='2',
-                        'write.update.mode'='merge-on-read',
-                        'write.delete.mode'='merge-on-read'
-                    )
-                    AS SELECT * FROM {temp_view_name} LIMIT 0
-                    """
+                    # Set Iceberg-specific properties
+                    writer.tableProperty("format-version", "2")
+                    writer.tableProperty("write.distribution-mode", "none")
+                    writer.tableProperty("write.update.mode", "merge-on-read")
+                    writer.tableProperty("write.delete.mode", "merge-on-read")
                     
-                    logger.info(f"Executing CTAS SQL: {create_sql}")
-                    self.spark.sql(create_sql)
+                    writer.create()
                     creation_successful = True
-                    logger.info(f"Successfully created table using CTAS: {database}.{table}")
+                    logger.info(f"Successfully created table using writeTo API fallback: {database}.{table}")
                     
-                    # Clean up temporary view
-                    try:
-                        self.spark.sql(f"DROP VIEW IF EXISTS {temp_view_name}")
-                    except Exception as cleanup_error:
-                        logger.warning(f"Failed to clean up temp view {temp_view_name}: {cleanup_error}")
-                        
-                except Exception as ctas_error:
-                    logger.error(f"CTAS approach also failed for {database}.{table}: {str(ctas_error)}")
+                except Exception as writeto_error:
+                    logger.error(f"Both CTAS and writeTo approaches failed for {database}.{table}")
                     raise IcebergConnectionError(
-                        f"Both writeTo API and CTAS approaches failed for table {database}.{table}. "
-                        f"writeTo error: {str(writeto_error)}. CTAS error: {str(ctas_error)}",
+                        f"Table creation failed for {database}.{table}. "
+                        f"CTAS error: {str(ctas_error)}. writeTo error: {str(writeto_error)}",
                         warehouse_location=iceberg_config.warehouse_location if iceberg_config else None,
-                        spark_error=ctas_error
+                        spark_error=writeto_error
                     )
             
             if creation_successful:

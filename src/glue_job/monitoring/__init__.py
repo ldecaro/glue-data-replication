@@ -8,6 +8,7 @@ performance monitoring, and progress tracking capabilities.
 from .logging import StructuredLogger
 from .metrics import CloudWatchMetricsPublisher, estimate_dataframe_size
 from .progress import ProcessingMetrics, FullLoadProgress, IncrementalLoadProgress
+from .streaming_progress_tracker import StreamingProgressTracker, StreamingProgressConfig
 
 __all__ = [
     'StructuredLogger',
@@ -15,5 +16,7 @@ __all__ = [
     'estimate_dataframe_size',
     'ProcessingMetrics',
     'FullLoadProgress',
-    'IncrementalLoadProgress'
+    'IncrementalLoadProgress',
+    'StreamingProgressTracker',
+    'StreamingProgressConfig'
 ]

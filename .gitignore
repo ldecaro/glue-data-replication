@@ -2,3 +2,4 @@ dist/DEPLOYMENT_INSTRUCTIONS.md
 dist/glue-job-modules.zip
 dist/main-standalone.py
 dist/main.py
+.DS_Store

@@ -613,20 +613,128 @@ jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=host)(PORT=2484))(C
 
 #### Authentication Methods
 
-**Database Authentication**:
-- Standard username/password
-- Encrypted password storage recommended
-- Regular credential rotation
+**Database Authentication** (Supported):
+- Standard username/password via CloudFormation parameters
+- AWS Secrets Manager integration for secure credential storage
+- Regular credential rotation via Secrets Manager
 
-**Integrated Authentication**:
-- Windows Authentication (SQL Server)
+**Cloud Authentication** (Supported for RDS/Aurora):
+- AWS IAM database authentication (requires IAM-enabled RDS instances)
+
+**Not Supported in This Solution**:
+- Windows Authentication (SQL Server `integratedSecurity=true`)
 - Kerberos authentication
 - LDAP integration
-
-**Cloud Authentication**:
-- AWS IAM database authentication
 - Azure Active Directory
-- Google Cloud IAM
+
+### Kerberos Authentication
+
+This section documents Kerberos authentication support status and alternatives for the AWS Glue Data Replication solution.
+
+#### Current Support Status
+
+| Authentication Method | Support Status | Notes |
+|----------------------|----------------|-------|
+| Username/Password | ✅ Supported | Primary authentication method |
+| AWS Secrets Manager | ✅ Supported | Automatic when `CreateSourceConnection=true` |
+| AWS IAM Database Auth | ⚠️ Partial | Requires IAM-enabled RDS, manual token generation |
+| Kerberos/GSSAPI | ❌ Not Supported | AWS Glue lacks Kerberos infrastructure |
+| Windows Authentication | ❌ Not Supported | Requires `integratedSecurity=true` which needs Kerberos |
+| NTLM | ❌ Not Supported | Not available in AWS Glue runtime |
+
+#### Why Kerberos is Not Supported
+
+AWS Glue JDBC connections cannot use Kerberos authentication because the managed runtime environment lacks:
+
+1. **Kerberos Configuration Files**: No access to deploy `krb5.conf` files
+2. **Keytab Files**: Cannot store or access Kerberos keytab files
+3. **KDC Connectivity**: Glue VPCs typically cannot reach Key Distribution Centers
+4. **Ticket Cache**: No mechanism to obtain or cache Kerberos tickets (TGT)
+5. **Environment Variables**: Cannot set `KRB5_CONFIG`, `KRB5CCNAME`, etc.
+
+#### JDBC Kerberos Parameters (Not Usable)
+
+While JDBC drivers support these Kerberos parameters, they cannot be used in AWS Glue:
+
+**SQL Server**:
+```
+# NOT USABLE in AWS Glue - requires Kerberos infrastructure
+jdbc:sqlserver://host:1433;databaseName=db;integratedSecurity=true;authenticationScheme=JavaKerberos
+```
+
+**Oracle**:
+```
+# NOT USABLE in AWS Glue - requires krb5.conf and keytab
+jdbc:oracle:thin:@host:1521:db?oracle.net.authentication_services=(KERBEROS5)
+```
+
+**PostgreSQL**:
+```
+# NOT USABLE in AWS Glue - requires GSSAPI configuration
+jdbc:postgresql://host:5432/db?gsslib=gssapi
+```
+
+#### Recommended Authentication Approach
+
+Use username/password authentication with AWS Secrets Manager:
+
+**CloudFormation Parameters**:
+```json
+[
+  {"ParameterKey": "SourceDbUser", "ParameterValue": "glue_service_account"},
+  {"ParameterKey": "SourceDbPassword", "ParameterValue": "SecurePassword123!"},
+  {"ParameterKey": "CreateSourceConnection", "ParameterValue": "true"}
+]
+```
+
+When `CreateSourceConnection` is `true`, credentials are automatically stored in AWS Secrets Manager at `/aws-glue/{JobName}-source-jdbc-connection`.
+
+#### Workarounds for Kerberos-Protected Databases
+
+If your source database requires Kerberos authentication:
+
+**Option 1: Create a SQL Authentication Service Account**
+
+Create a dedicated service account with SQL authentication:
+
+```sql
+-- SQL Server
+CREATE LOGIN glue_service WITH PASSWORD = 'StrongPassword123!';
+CREATE USER glue_service FOR LOGIN glue_service;
+GRANT SELECT ON SCHEMA::dbo TO glue_service;
+
+-- Oracle
+CREATE USER glue_service IDENTIFIED BY "StrongPassword123!";
+GRANT CONNECT, RESOURCE, SELECT ANY TABLE TO glue_service;
+
+-- PostgreSQL
+CREATE USER glue_service WITH PASSWORD 'StrongPassword123!';
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO glue_service;
+```
+
+**Option 2: Use AWS DMS for Kerberos Sources**
+
+AWS Database Migration Service (DMS v3.5.3+) supports Kerberos authentication:
+1. Use DMS to replicate from Kerberos-protected source to an intermediate database
+2. Use this Glue solution to process data from the intermediate database
+
+**Option 3: Deploy a Database Proxy**
+
+Deploy a proxy server that handles Kerberos authentication:
+```
+[AWS Glue] --SQL Auth--> [Proxy Server] --Kerberos--> [Database]
+```
+
+#### Security Best Practices Without Kerberos
+
+Since Kerberos is not available, implement these security measures:
+
+1. **Use AWS Secrets Manager**: Enable `CreateSourceConnection=true` for automatic credential management
+2. **Enable Encryption in Transit**: Use SSL/TLS in connection strings (`encrypt=true`, `ssl=true`)
+3. **Rotate Credentials**: Implement regular password rotation via Secrets Manager
+4. **Restrict Network Access**: Use VPC security groups to limit database access
+5. **Use Least Privilege**: Grant only SELECT permissions to service accounts
+6. **Enable Audit Logging**: Track database access for compliance
 
 ### Connection Pooling
 

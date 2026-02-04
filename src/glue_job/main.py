@@ -199,8 +199,14 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
         logger.error(f"Engine configuration validation failed: {str(e)}")
         raise
     
-    # Initialize managers with engine-aware configuration
-    connection_manager = UnifiedConnectionManager(spark, glue_context)
+    # Set connection roles for Glue Connection naming ({job_name}-source/target)
+    if config.source_connection.glue_connection_config:
+        config.source_connection.glue_connection_config.connection_role = "source"
+    if config.target_connection.glue_connection_config:
+        config.target_connection.glue_connection_config.connection_role = "target"
+    
+    # Initialize managers with engine-aware configuration and job_name for connection naming
+    connection_manager = UnifiedConnectionManager(spark, glue_context, job_name=config.job_name)
     
     # Initialize bookmark manager with engine-aware JDBC paths
     # Iceberg engines don't use JDBC drivers, so set paths to None
@@ -226,9 +232,85 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
     else:
         logger.info("No manual_bookmark_configs attribute found on bookmark_manager")
     
-    # Initialize migrators with enhanced error handling for Iceberg
-    full_migrator = FullLoadDataMigrator(spark, connection_manager)
-    incremental_migrator = IncrementalDataMigrator(spark, connection_manager, bookmark_manager)
+    # Get migration performance configuration
+    perf_config = config.migration_performance_config
+    
+    # Initialize CloudWatch metrics publisher if detailed metrics are enabled
+    from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
+    metrics_publisher = None
+    
+    logger.info(f"Performance config - enable_detailed_metrics: {perf_config.enable_detailed_metrics}, "
+               f"metrics_namespace: {perf_config.metrics_namespace}")
+    
+    if perf_config.enable_detailed_metrics:
+        try:
+            logger.info(f"Attempting to initialize CloudWatch metrics publisher for job: {config.job_name}")
+            metrics_publisher = CloudWatchMetricsPublisher(
+                job_name=config.job_name,
+                namespace=perf_config.metrics_namespace
+            )
+            logger.info(f"✓ Successfully initialized CloudWatch metrics publisher with namespace: {perf_config.metrics_namespace}")
+        except Exception as e:
+            logger.error(f"✗ Failed to initialize CloudWatch metrics publisher: {str(e)}", exc_info=True)
+            logger.warning("Continuing without metrics publishing")
+            metrics_publisher = None
+    else:
+        logger.info("CloudWatch metrics publishing disabled by configuration")
+    
+    # Initialize counting strategy with configuration and metrics publisher
+    from glue_job.database.counting_strategy import CountingStrategy
+    counting_strategy = CountingStrategy(
+        config=perf_config.get_counting_strategy_config(),
+        metrics_publisher=metrics_publisher
+    )
+    
+    # Initialize streaming progress configuration
+    streaming_progress_config = perf_config.get_streaming_progress_config()
+    
+    # Log performance configuration being used
+    logger.info(f"Using migration performance configuration: counting_strategy={perf_config.counting_strategy}, "
+               f"progress_tracking={perf_config.enable_progress_tracking}, "
+               f"detailed_metrics={perf_config.enable_detailed_metrics}")
+    
+    # Initialize partitioned read configuration for large dataset optimization
+    from glue_job.config.partitioned_read_config import PartitionedReadConfig
+    partitioned_read_config = config.partitioned_read_config
+    
+    if partitioned_read_config and partitioned_read_config.enabled:
+        table_config_count = len(partitioned_read_config.table_configs)
+        if table_config_count > 0:
+            logger.info(f"Parallel JDBC reads ENABLED with explicit table configurations: "
+                       f"tables_configured={list(partitioned_read_config.table_configs.keys())}, "
+                       f"default_partitions={partitioned_read_config.default_num_partitions}, "
+                       f"default_fetch_size={partitioned_read_config.default_fetch_size}")
+        else:
+            logger.info(f"Parallel JDBC reads ENABLED with auto-detection: "
+                       f"default_partitions={partitioned_read_config.default_num_partitions} (0=auto-calculate), "
+                       f"default_fetch_size={partitioned_read_config.default_fetch_size}. "
+                       f"Partition columns will be auto-detected from primary keys or indexes.")
+    else:
+        logger.info("Parallel JDBC reads DISABLED (default). Using single-connection reads. "
+                   "To enable parallel reads for large datasets, set EnablePartitionedReads=auto and optionally "
+                   "configure PartitionedReadConfig. See docs/PARAMETER_REFERENCE.md for details.")
+    
+    # Initialize migrators with enhanced error handling for Iceberg and performance configuration
+    full_migrator = FullLoadDataMigrator(
+        spark, 
+        connection_manager,
+        counting_strategy=counting_strategy,
+        metrics_publisher=metrics_publisher,
+        streaming_progress_config=streaming_progress_config,
+        partitioned_read_config=partitioned_read_config
+    )
+    incremental_migrator = IncrementalDataMigrator(
+        spark, 
+        connection_manager, 
+        bookmark_manager,
+        counting_strategy=counting_strategy,
+        metrics_publisher=metrics_publisher,
+        streaming_progress_config=streaming_progress_config,
+        partitioned_read_config=partitioned_read_config
+    )
     
     successful_tables = 0
     failed_tables = 0
@@ -259,9 +341,12 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
             # Initialize or use pre-loaded bookmark state with manual configuration support
             try:
                 if table_name in bookmark_states and bookmark_states[table_name] is not None:
+                    logger.info(f"Using pre-loaded bookmark state for {table_name} from parallel S3 read")
                     bookmark_state = JobBookmarkState.from_s3_dict(bookmark_states[table_name])
+                    logger.info(f"Pre-loaded bookmark for {table_name}: is_first_run={bookmark_state.is_first_run}, last_processed_value={bookmark_state.last_processed_value}")
                     bookmark_manager.bookmark_states[table_name] = bookmark_state
                 else:
+                    logger.info(f"No pre-loaded bookmark for {table_name}, will read from S3 via initialize_bookmark_state")
                     # Use the new auto-detection method that considers manual configuration
                     if source_is_iceberg:
                         # For Iceberg tables, use Iceberg-specific initialization
@@ -314,6 +399,9 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
                                 database=config.source_connection.database,
                                 engine_type=config.source_connection.engine_type
                             )
+                    
+                    # Log the bookmark state after initialization
+                    logger.info(f"Bookmark state after initialize_bookmark_state for {table_name}: is_first_run={bookmark_state.is_first_run}, last_processed_value={bookmark_state.last_processed_value}")
             except Exception as e:
                 logger.error(f"Bookmark state initialization failed for {table_name}: {str(e)}")
                 failed_tables += 1
@@ -390,6 +478,15 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
         logger.warning(f"Failed to log bookmark detection summary: {e}")
     
     logger.info(f"Job completed: {successful_tables} successful, {failed_tables} failed")
+    
+    # Flush all buffered metrics to CloudWatch before job completion
+    if metrics_publisher is not None:
+        try:
+            logger.info("Flushing buffered metrics to CloudWatch...")
+            metrics_publisher.flush_metrics()
+            logger.info("✓ Successfully flushed all metrics to CloudWatch")
+        except Exception as e:
+            logger.error(f"✗ Failed to flush metrics to CloudWatch: {str(e)}", exc_info=True)
     
     # Fail the job if no tables were successfully processed due to errors
     if successful_tables == 0 and failed_tables > 0:
@@ -608,24 +705,54 @@ def _get_max_incremental_value_after_full_load(connection_manager, target_config
         target_is_iceberg: Whether target engine is Iceberg
         
     Returns:
-        Maximum value of the incremental column from the target database
+        Maximum value of the incremental column from the target database (as string with full precision)
     """
     try:
-        from pyspark.sql.functions import max as spark_max, col
-        
         if target_is_iceberg:
-            # For Iceberg targets, read the table and get max value
-            df = connection_manager.read_table(
-                connection_config=target_config,
-                table_name=table_name
-            )
-            max_value_row = df.agg(spark_max(col(incremental_column)).alias("max_value")).collect()[0]
-            max_value = max_value_row["max_value"]
+            # For Iceberg targets, use Spark SQL to get max value with full timestamp precision
+            # This avoids the warehousePath issue with read_table()
+            iceberg_config = target_config.get_iceberg_config()
+            if iceberg_config:
+                database = iceberg_config.get('database_name', target_config.database)
+                catalog_name = iceberg_config.get('catalog_name', 'glue_catalog')
+                full_table_name = f"{catalog_name}.{database}.{table_name}"
+                
+                # Use CAST to string to preserve full timestamp precision
+                query = f"SELECT CAST(MAX({incremental_column}) AS STRING) as max_value FROM {full_table_name}"
+                logger.info(f"Executing Iceberg max value query: {query}")
+                
+                spark = connection_manager.spark
+                result_df = spark.sql(query)
+                max_value = result_df.collect()[0]["max_value"]
+            else:
+                # Fallback if no Iceberg config - this shouldn't happen
+                logger.warning(f"No Iceberg config found for {table_name}, returning None")
+                return None
         else:
             # For traditional databases, use SQL query to get max value from target
-            query = f"SELECT MAX({incremental_column}) as max_value FROM {target_config.schema}.{table_name}"
+            # Cast to string to preserve full timestamp precision
+            engine_type = target_config.engine_type.lower()
+            
+            if engine_type == 'sqlserver':
+                # SQL Server: Use CONVERT to get full precision string
+                query = f"SELECT CONVERT(VARCHAR(30), MAX({incremental_column}), 121) as max_value FROM {target_config.schema}.{table_name}"
+            elif engine_type == 'oracle':
+                # Oracle: Use TO_CHAR for full precision
+                query = f"SELECT TO_CHAR(MAX({incremental_column}), 'YYYY-MM-DD HH24:MI:SS.FF6') as max_value FROM {target_config.schema}.{table_name}"
+            elif engine_type == 'postgresql':
+                # PostgreSQL: Cast to text
+                query = f"SELECT MAX({incremental_column})::text as max_value FROM {target_config.schema}.{table_name}"
+            else:
+                # Default: standard MAX query
+                query = f"SELECT MAX({incremental_column}) as max_value FROM {target_config.schema}.{table_name}"
+            
+            logger.info(f"Executing max value query: {query}")
             result_df = connection_manager.read_table_data(target_config, table_name, query=query)
             max_value = result_df.collect()[0]["max_value"]
+            
+            # Ensure it's a string
+            if max_value is not None and not isinstance(max_value, str):
+                max_value = str(max_value)
         
         logger.info(f"Retrieved max incremental value from target {table_name}.{incremental_column}: {max_value}")
         return max_value

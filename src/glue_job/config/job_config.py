@@ -6,7 +6,7 @@ job parameters, network settings, and database connection configurations.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
 
@@ -254,6 +254,122 @@ class ConnectionConfig:
 
 
 @dataclass
+class MigrationPerformanceConfig:
+    """Configuration for migration performance optimizations.
+    
+    This configuration controls counting strategies, progress tracking,
+    and metrics publishing for large-scale data migrations.
+    """
+    
+    # Counting strategy configuration
+    counting_strategy: str = "auto"  # Options: "immediate", "deferred", "auto"
+    size_threshold_rows: int = 1_000_000  # Threshold for auto strategy selection
+    force_immediate_counting: bool = False
+    force_deferred_counting: bool = False
+    
+    # Progress tracking configuration
+    progress_update_interval_seconds: int = 60
+    progress_batch_size_rows: int = 100_000
+    enable_progress_tracking: bool = True
+    enable_progress_logging: bool = True
+    
+    # Metrics configuration
+    enable_detailed_metrics: bool = True
+    metrics_namespace: str = "AWS/Glue/DataReplication"
+    
+    def validate(self):
+        """Validate all configuration parameters.
+        
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        # Validate counting strategy
+        valid_strategies = ["immediate", "deferred", "auto"]
+        if self.counting_strategy not in valid_strategies:
+            raise ValueError(
+                f"Invalid counting_strategy '{self.counting_strategy}'. "
+                f"Must be one of: {', '.join(valid_strategies)}"
+            )
+        
+        # Validate mutually exclusive force flags
+        if self.force_immediate_counting and self.force_deferred_counting:
+            raise ValueError(
+                "Cannot force both immediate and deferred counting strategies. "
+                "Only one force flag can be True."
+            )
+        
+        # Validate size threshold
+        if self.size_threshold_rows <= 0:
+            raise ValueError(
+                f"size_threshold_rows must be positive, got {self.size_threshold_rows}"
+            )
+        
+        # Validate progress tracking intervals
+        if self.progress_update_interval_seconds <= 0:
+            raise ValueError(
+                f"progress_update_interval_seconds must be positive, "
+                f"got {self.progress_update_interval_seconds}"
+            )
+        
+        if self.progress_batch_size_rows <= 0:
+            raise ValueError(
+                f"progress_batch_size_rows must be positive, "
+                f"got {self.progress_batch_size_rows}"
+            )
+        
+        # Validate metrics namespace
+        if not self.metrics_namespace or not self.metrics_namespace.strip():
+            raise ValueError("metrics_namespace cannot be empty")
+        
+        # Warn if progress tracking is disabled but detailed metrics are enabled
+        if self.enable_detailed_metrics and not self.enable_progress_tracking:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Detailed metrics are enabled but progress tracking is disabled. "
+                "Some metrics may not be available."
+            )
+    
+    def get_counting_strategy_config(self):
+        """Get CountingStrategyConfig from this configuration.
+        
+        Returns:
+            CountingStrategyConfig instance
+        """
+        # Import here to avoid circular imports
+        from ..database.counting_strategy import CountingStrategyConfig, CountingStrategyType
+        
+        # Map string strategy to enum
+        strategy_map = {
+            "immediate": CountingStrategyType.IMMEDIATE,
+            "deferred": CountingStrategyType.DEFERRED,
+            "auto": CountingStrategyType.AUTO
+        }
+        
+        return CountingStrategyConfig(
+            strategy_type=strategy_map[self.counting_strategy],
+            size_threshold_rows=self.size_threshold_rows,
+            force_immediate=self.force_immediate_counting,
+            force_deferred=self.force_deferred_counting
+        )
+    
+    def get_streaming_progress_config(self):
+        """Get StreamingProgressConfig from this configuration.
+        
+        Returns:
+            StreamingProgressConfig instance
+        """
+        # Import here to avoid circular imports
+        from ..monitoring.streaming_progress_tracker import StreamingProgressConfig
+        
+        return StreamingProgressConfig(
+            update_interval_seconds=self.progress_update_interval_seconds,
+            batch_size_rows=self.progress_batch_size_rows,
+            enable_metrics=self.enable_detailed_metrics,
+            enable_logging=self.enable_progress_logging
+        )
+
+
+@dataclass
 class JobConfig:
     """Main job configuration containing all parameters."""
     job_name: str
@@ -263,6 +379,10 @@ class JobConfig:
     validate_connections: bool = True
     connection_timeout_seconds: int = 30
     manual_bookmark_config: Optional[str] = None
+    migration_performance_config: MigrationPerformanceConfig = field(
+        default_factory=MigrationPerformanceConfig
+    )
+    partitioned_read_config: Optional[Any] = None  # PartitionedReadConfig, imported dynamically
     
     def __post_init__(self):
         """Validate job configuration after initialization."""
@@ -278,6 +398,9 @@ class JobConfig:
         # Validate connection configurations
         self.source_connection.validate()
         self.target_connection.validate()
+        
+        # Validate migration performance configuration
+        self.migration_performance_config.validate()
     
     def has_cross_vpc_connections(self) -> bool:
         """Check if any connections require cross-VPC connectivity."""
@@ -293,4 +416,19 @@ class JobConfig:
             'target_glue_connection': self.target_connection.get_glue_connection_name(),
             'validate_connections': self.validate_connections,
             'connection_timeout': self.connection_timeout_seconds
+        }
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """Get summary of migration performance configuration.
+        
+        Returns:
+            Dictionary containing performance configuration summary
+        """
+        return {
+            'counting_strategy': self.migration_performance_config.counting_strategy,
+            'size_threshold_rows': self.migration_performance_config.size_threshold_rows,
+            'progress_tracking_enabled': self.migration_performance_config.enable_progress_tracking,
+            'progress_update_interval': self.migration_performance_config.progress_update_interval_seconds,
+            'detailed_metrics_enabled': self.migration_performance_config.enable_detailed_metrics,
+            'metrics_namespace': self.migration_performance_config.metrics_namespace
         }

@@ -61,26 +61,46 @@ config/
 docs/
 ├── API_REFERENCE.md                   # Module API documentation
 ├── ARCHITECTURE.md                    # Technical architecture
-├── DATABASE_CONFIGURATION_GUIDE.md   # Database setup guide
+├── BOOKMARK_DETAILS.md                # Job bookmark system details
+├── DATABASE_CONFIGURATION_GUIDE.md    # Database setup guide
 ├── DEPLOYMENT_GUIDE.md                # Deployment instructions
+├── DEVOPS_DEPLOYMENT_GUIDE.md         # CI/CD and automation
 ├── ERROR_HANDLING_GUIDE.md            # Error handling patterns
+├── GENERATE_TEST_TABLES_EXAMPLES.md   # Test table generation guide
+├── GLUE_CONNECTIONS_TROUBLESHOOTING_GUIDE.md  # Glue connection troubleshooting
 ├── ICEBERG_USAGE_GUIDE.md             # Iceberg-specific guide
+├── IMPLEMENTATION_HISTORY.md          # Implementation changelog
+├── JDBC_DATA_TYPE_MAPPING_REFERENCE.md # JDBC data type mappings
+├── MANUAL_BOOKMARK_CONFIGURATION.md   # Manual bookmark setup
 ├── NETWORK_CONFIGURATION_GUIDE.md     # VPC and networking
 ├── OBSERVABILITY_GUIDE.md             # Monitoring and logging
 ├── PARAMETER_REFERENCE.md             # CloudFormation parameters
-└── TESTING_GUIDE.md                   # Testing procedures
+├── PERFORMANCE_MONITORING_GUIDE.md    # Performance monitoring setup
+├── PROGRESS_TRACKING_GUIDE.md         # Real-time progress tracking
+├── QUICK_START_GUIDE.md               # Quick start walkthrough
+├── TESTING_GUIDE.md                   # Testing procedures
+└── TEST_EXECUTION_GUIDE.md            # Test execution details
 ```
 
 ### Examples (`examples/`)
 ```
 examples/
-├── README.md                          # Example configurations overview
 ├── oracle-to-postgresql-parameters.json
 ├── sqlserver-to-sqlserver-parameters.json
+├── sqlserver-to-iceberg-parameters.json
 ├── iceberg-source-basic-parameters.json
 ├── iceberg-to-iceberg-parameters.json
+├── iceberg-cross-account-source-parameters.json
+├── iceberg-cross-account-target-parameters.json
+├── iceberg-multi-region-parameters.json
+├── db2-to-postgresql-parameters.json
+├── large-dataset-partitioned-reads-parameters.json
+├── large-dataset-deferred-counting-parameters.json
+├── custom-progress-tracking-parameters.json
 └── [various other parameter examples]
 ```
+
+Note: Parameter documentation is consolidated in `docs/PARAMETER_REFERENCE.md`
 
 ### Testing (`tests/`)
 ```

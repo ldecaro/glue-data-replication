@@ -56,7 +56,7 @@ class ProcessingMetrics:
 
 @dataclass
 class FullLoadProgress:
-    """Tracks progress of full-load operations."""
+    """Tracks progress of full-load operations with streaming support."""
     table_name: str
     total_rows: int = 0
     processed_rows: int = 0
@@ -64,6 +64,17 @@ class FullLoadProgress:
     end_time: Optional[float] = None
     status: str = 'pending'  # pending, in_progress, completed, failed
     error_message: Optional[str] = None
+    
+    # Streaming progress fields
+    counting_strategy: str = 'auto'  # immediate, deferred, auto
+    rows_counted_at: str = 'unknown'  # before_write, after_write, unknown
+    last_progress_update: float = 0.0
+    progress_updates_count: int = 0
+    
+    # Performance metrics - phase-specific duration fields
+    read_duration_seconds: float = 0.0
+    write_duration_seconds: float = 0.0
+    count_duration_seconds: float = 0.0
     
     @property
     def progress_percentage(self) -> float:
@@ -81,12 +92,24 @@ class FullLoadProgress:
         return end_time - self.start_time
     
     @property
+    def total_duration_seconds(self) -> float:
+        """Total operation duration including all phases."""
+        return self.read_duration_seconds + self.write_duration_seconds + self.count_duration_seconds
+    
+    @property
     def rows_per_second(self) -> float:
         """Calculate processing rate in rows per second."""
         duration = self.duration_seconds
         if duration == 0.0:
             return 0.0
         return self.processed_rows / duration
+    
+    @property
+    def effective_rows_per_second(self) -> float:
+        """Effective throughput excluding counting overhead."""
+        if self.write_duration_seconds == 0.0:
+            return 0.0
+        return self.processed_rows / self.write_duration_seconds
 
 
 @dataclass
