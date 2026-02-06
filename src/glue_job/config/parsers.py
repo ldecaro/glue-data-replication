@@ -409,14 +409,24 @@ class JobConfigurationParser:
                 logger.info(f"Iceberg parameter validation passed for {connection_type} engine")
             else:
                 # JDBC required parameters
+                # Check if keytab authentication is being used
+                keytab_s3_path = args.get(f'{connection_type}_KERBEROS_KEYTAB_S3_PATH', '').strip()
+                has_keytab = bool(keytab_s3_path)
+                
+                # Base required parameters (always needed for JDBC)
                 required_jdbc = [
                     f'{connection_type}_DATABASE',
                     f'{connection_type}_SCHEMA',
                     f'{connection_type}_DB_USER',
-                    f'{connection_type}_DB_PASSWORD',
                     f'{connection_type}_JDBC_DRIVER_S3_PATH',
                     f'{connection_type}_CONNECTION_STRING'
                 ]
+                
+                # Password is only required if NOT using keytab authentication
+                if not has_keytab:
+                    required_jdbc.append(f'{connection_type}_DB_PASSWORD')
+                else:
+                    logger.info(f"Keytab authentication detected for {connection_type} - password not required")
                 
                 missing_jdbc = [param for param in required_jdbc 
                               if param not in args or not args[param].strip()]

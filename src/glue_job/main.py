@@ -841,67 +841,189 @@ def _perform_incremental_load_with_engine_support(incremental_migrator, config: 
             raise
 
 
-def _setup_kerberos_environment_if_needed(job_config: JobConfig) -> None:
+def _setup_kerberos_environment_if_needed(job_config: JobConfig, spark_context=None) -> None:
     """Set up Kerberos environment for source and/or target connections if configured.
     
-    This MUST be called BEFORE SparkContext/GlueContext is created because the JVM's
-    Kerberos subsystem reads java.security.krb5.conf at initialization time.
+    In AWS Glue, the JVM is ALREADY RUNNING before our Python code executes.
+    We cannot use _JAVA_OPTIONS or environment variables to configure the JVM.
+    
+    This function is called TWICE:
+    1. First call (spark_context=None): Create krb5.conf, jaas.conf, download keytab
+    2. Second call (spark_context provided): Set JVM properties on running JVM
     
     Args:
         job_config: Job configuration containing connection configs
+        spark_context: SparkContext with access to JVM (None for first call, provided for second)
     """
     from glue_job.config.kerberos_environment import KerberosEnvironmentManager
     import os
     
-    kerberos_manager = KerberosEnvironmentManager()
+    # Check if any Kerberos authentication is configured
+    source_uses_kerberos = job_config.source_connection.uses_kerberos_authentication()
+    target_uses_kerberos = job_config.target_connection.uses_kerberos_authentication()
     
-    # Set up Kerberos for source connection if configured
-    if job_config.source_connection.uses_kerberos_authentication():
+    if not source_uses_kerberos and not target_uses_kerberos:
+        return
+    
+    kerberos_manager = KerberosEnvironmentManager()
+    kerberos_config = None
+    krb5_conf_path = None
+    jaas_conf_path = None
+    
+    # Determine which Kerberos config to use (source takes precedence)
+    if source_uses_kerberos:
         kerberos_config = job_config.source_connection.get_kerberos_config()
-        logger.info(f"Setting up Kerberos environment for SOURCE connection: domain={kerberos_config.domain}, kdc={kerberos_config.kdc}")
+        username = job_config.source_connection.username
+        keytab_s3_path = job_config.source_connection.kerberos_keytab_s3_path
+        connection_type = "SOURCE"
+    elif target_uses_kerberos:
+        kerberos_config = job_config.target_connection.get_kerberos_config()
+        username = job_config.target_connection.username
+        keytab_s3_path = job_config.target_connection.kerberos_keytab_s3_path
+        connection_type = "TARGET"
+    
+    # PHASE 1: Create Kerberos files (when spark_context is None)
+    if spark_context is None:
+        logger.info(f"Phase 1: Creating Kerberos files for {connection_type} connection")
+        logger.info(f"  Domain: {kerberos_config.domain}, KDC: {kerberos_config.kdc}")
+        logger.info(f"  Username: {username}, Keytab S3: {keytab_s3_path}")
         
-        # This creates krb5.conf and sets environment variables
+        # Create krb5.conf, jaas.conf, download keytab
         krb5_conf_path = kerberos_manager.setup_kerberos_environment(
             kerberos_config=kerberos_config,
-            username=job_config.source_connection.username,
-            password=job_config.source_connection.password,
-            keytab_s3_path=job_config.source_connection.kerberos_keytab_s3_path
+            username=username,
+            password=None,  # Not needed for keytab auth
+            keytab_s3_path=keytab_s3_path
         )
         
-        # CRITICAL: Set Java options via environment variable for JVM startup
-        # These will be read when SparkContext creates the JVM
-        java_opts = os.environ.get('_JAVA_OPTIONS', '')
-        kerberos_java_opts = (
-            f'-Djava.security.krb5.conf={krb5_conf_path} '
-            f'-Djava.security.krb5.realm={kerberos_config.domain.upper()} '
-            f'-Djava.security.krb5.kdc={kerberos_config.kdc} '
-            f'-Djavax.security.auth.useSubjectCredsOnly=false '
-            f'-Dsun.security.krb5.debug=true'
-        )
-        os.environ['_JAVA_OPTIONS'] = f'{java_opts} {kerberos_java_opts}'.strip()
-        
-        logger.info(f"✓ Kerberos environment setup completed for SOURCE connection")
-        logger.info(f"  krb5.conf path: {krb5_conf_path}")
-        logger.info(f"  _JAVA_OPTIONS set for JVM startup")
+        logger.info(f"✓ Kerberos files created:")
+        logger.info(f"  krb5.conf: {krb5_conf_path}")
+        logger.info(f"  jaas.conf: {kerberos_manager._jaas_conf_path}")
+        logger.info(f"  keytab: {kerberos_manager._keytab_path}")
+        return
     
-    # Set up Kerberos for target connection if configured (and different from source)
-    if job_config.target_connection.uses_kerberos_authentication():
-        target_kerberos_config = job_config.target_connection.get_kerberos_config()
+    # PHASE 2: Set JVM properties on running JVM (when spark_context is provided)
+    logger.info(f"Phase 2: Setting JVM Kerberos properties for {connection_type} connection")
+    
+    # Get paths from environment (set during Phase 1)
+    krb5_conf_path = os.environ.get('KRB5_CONFIG', '/tmp/krb5.conf')
+    jaas_conf_path = '/tmp/jaas.conf'
+    
+    _set_jvm_kerberos_properties(spark_context, kerberos_config, krb5_conf_path, jaas_conf_path)
+
+
+def _set_jvm_kerberos_properties(spark_context, kerberos_config, krb5_conf_path: str, jaas_conf_path: str = None) -> None:
+    """Set Kerberos properties directly on the running JVM.
+    
+    In AWS Glue, the JVM is already running before our code executes.
+    We must set Java system properties directly using SparkContext._jvm.
+    
+    Args:
+        spark_context: SparkContext with JVM access
+        kerberos_config: Kerberos configuration (domain, KDC)
+        krb5_conf_path: Path to krb5.conf file
+        jaas_conf_path: Path to jaas.conf file (optional)
+    """
+    import os
+    
+    try:
+        if spark_context is None or spark_context._jvm is None:
+            logger.error("SparkContext or JVM not available - cannot set Kerberos properties")
+            return
         
-        # Check if target uses a different Kerberos realm than source
-        source_kerberos_config = job_config.source_connection.get_kerberos_config()
-        if source_kerberos_config is None or target_kerberos_config.domain != source_kerberos_config.domain:
-            logger.info(f"Setting up Kerberos environment for TARGET connection: domain={target_kerberos_config.domain}, kdc={target_kerberos_config.kdc}")
-            
-            kerberos_manager.setup_kerberos_environment(
-                kerberos_config=target_kerberos_config,
-                username=job_config.target_connection.username,
-                password=job_config.target_connection.password,
-                keytab_s3_path=job_config.target_connection.kerberos_keytab_s3_path
-            )
-            logger.info("✓ Kerberos environment setup completed for TARGET connection")
+        # Log krb5.conf content for debugging
+        logger.info(f"=== krb5.conf content ({krb5_conf_path}) ===")
+        try:
+            with open(krb5_conf_path, 'r') as f:
+                for line in f:
+                    logger.info(f"  {line.rstrip()}")
+        except Exception as e:
+            logger.error(f"Could not read krb5.conf: {e}")
+        
+        # Log jaas.conf content for debugging
+        if jaas_conf_path and os.path.exists(jaas_conf_path):
+            logger.info(f"=== jaas.conf content ({jaas_conf_path}) ===")
+            try:
+                with open(jaas_conf_path, 'r') as f:
+                    for line in f:
+                        logger.info(f"  {line.rstrip()}")
+            except Exception as e:
+                logger.error(f"Could not read jaas.conf: {e}")
+        
+        # Verify keytab exists
+        keytab_path = '/tmp/krb5.keytab'
+        if os.path.exists(keytab_path):
+            keytab_size = os.path.getsize(keytab_path)
+            logger.info(f"Keytab file exists: {keytab_path} ({keytab_size} bytes)")
         else:
-            logger.info("TARGET connection uses same Kerberos realm as SOURCE - reusing environment")
+            logger.error(f"KEYTAB FILE NOT FOUND: {keytab_path}")
+        
+        java_system = spark_context._jvm.java.lang.System
+        
+        # Set Kerberos configuration properties
+        java_system.setProperty('java.security.krb5.conf', krb5_conf_path)
+        java_system.setProperty('java.security.krb5.realm', kerberos_config.domain.upper())
+        java_system.setProperty('java.security.krb5.kdc', kerberos_config.kdc)
+        java_system.setProperty('javax.security.auth.useSubjectCredsOnly', 'false')
+        
+        # Set JAAS configuration if available
+        if jaas_conf_path:
+            java_system.setProperty('java.security.auth.login.config', jaas_conf_path)
+        
+        # CRITICAL: Refresh the Kerberos configuration cache
+        # Without this, the JVM uses cached (empty) configuration
+        try:
+            spark_context._jvm.sun.security.krb5.Config.refresh()
+            logger.info("✓ Refreshed Kerberos configuration cache")
+        except Exception as e:
+            logger.warning(f"Could not refresh Kerberos config cache: {e}")
+        
+        # Verify properties were set by reading them back
+        logger.info("=== JVM Kerberos properties verification ===")
+        logger.info(f"  java.security.krb5.conf = {java_system.getProperty('java.security.krb5.conf')}")
+        logger.info(f"  java.security.krb5.realm = {java_system.getProperty('java.security.krb5.realm')}")
+        logger.info(f"  java.security.krb5.kdc = {java_system.getProperty('java.security.krb5.kdc')}")
+        logger.info(f"  java.security.auth.login.config = {java_system.getProperty('java.security.auth.login.config')}")
+        logger.info(f"  javax.security.auth.useSubjectCredsOnly = {java_system.getProperty('javax.security.auth.useSubjectCredsOnly')}")
+        
+        # Try to verify the Kerberos config was loaded correctly
+        try:
+            krb5_config = spark_context._jvm.sun.security.krb5.Config.getInstance()
+            default_realm = krb5_config.getDefaultRealm()
+            logger.info(f"✓ Kerberos default realm from JVM: {default_realm}")
+        except Exception as e:
+            logger.error(f"✗ Could not get default realm from JVM Config: {e}")
+        
+    except Exception as e:
+        logger.error(f"Failed to set JVM Kerberos properties: {e}")
+        raise
+
+
+def _distribute_kerberos_to_executors(glue_context) -> None:
+    """Distribute Kerberos configuration files to all Spark executors.
+    
+    Executors run in separate JVMs on different nodes. Each executor needs:
+    - /tmp/krb5.conf (Kerberos realm configuration)
+    - /tmp/jaas.conf (JAAS login configuration)
+    - /tmp/krb5.keytab (Kerberos credentials)
+    - JVM system properties set
+    
+    This function runs a Spark job that downloads these files from S3 to each executor.
+    """
+    from glue_job.config.kerberos_environment import KerberosEnvironmentManager
+    
+    logger.info("Distributing Kerberos configuration to executors...")
+    
+    kerberos_manager = KerberosEnvironmentManager()
+    sc = glue_context.spark_session.sparkContext
+    spark_session = glue_context.spark_session
+    
+    success = kerberos_manager.distribute_kerberos_to_executors(sc, spark_session)
+    
+    if success:
+        logger.info("✓ Kerberos configuration distributed to executors")
+    else:
+        logger.warning("⚠ Failed to distribute Kerberos to some executors - writes may fail")
 
 
 def main() -> None:
@@ -912,15 +1034,25 @@ def main() -> None:
         job_config = JobConfigurationParser.create_job_config(args)
         JobConfigurationParser.validate_configuration(job_config)
         
-        # CRITICAL: Set up Kerberos environment BEFORE creating SparkContext/GlueContext
-        # The JVM's Kerberos subsystem reads java.security.krb5.conf at initialization time,
-        # so we must create krb5.conf and set environment variables BEFORE SparkContext starts
-        _setup_kerberos_environment_if_needed(job_config)
+        # Step 1: Create Kerberos files (krb5.conf, jaas.conf, download keytab)
+        # This prepares the files but doesn't set JVM properties yet
+        _setup_kerberos_environment_if_needed(job_config, spark_context=None)
         
-        # NOW initialize Glue context and job (after Kerberos environment is ready)
+        # Step 2: Initialize Glue context and job (creates SparkContext/JVM)
         glue_context, job = setup_glue_context(args)
         
-        # Execute migration workflow with Iceberg support
+        # Step 3: CRITICAL - Set JVM Kerberos properties on the RUNNING JVM
+        # Must be done AFTER SparkContext exists but BEFORE any JDBC connections
+        if job_config.source_connection.uses_kerberos_authentication() or \
+           job_config.target_connection.uses_kerberos_authentication():
+            sc = glue_context.spark_session.sparkContext
+            _setup_kerberos_environment_if_needed(job_config, spark_context=sc)
+            
+            # Step 3b: Distribute Kerberos config to executors
+            # Executors run in separate JVMs and need their own Kerberos setup
+            _distribute_kerberos_to_executors(glue_context)
+        
+        # Step 4: Execute migration workflow with Iceberg support
         execute_migration_workflow(job_config, glue_context)
         
         # Commit job bookmark

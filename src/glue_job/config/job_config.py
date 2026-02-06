@@ -157,6 +157,9 @@ class ConnectionConfig:
             self.glue_connection_config.use_existing_connection
         )
         
+        # Check if using keytab authentication (password not required)
+        using_keytab_auth = bool(self.kerberos_keytab_s3_path)
+        
         # When creating a new Glue Connection, all JDBC parameters are required
         creating_glue_connection = (
             self.glue_connection_config and 
@@ -175,8 +178,9 @@ class ConnectionConfig:
                 raise ValueError("Connection string is required when creating Glue Connection")
             if not self.username:
                 raise ValueError("Username is required when creating Glue Connection")
-            if not self.password:
-                raise ValueError("Password is required when creating Glue Connection")
+            # Password only required if NOT using keytab authentication
+            if not self.password and not using_keytab_auth:
+                raise ValueError("Password is required when creating Glue Connection (unless using keytab)")
         
         # For direct JDBC or creating Glue Connection, validate all parameters
         elif not using_existing_glue_connection:
@@ -184,8 +188,9 @@ class ConnectionConfig:
                 raise ValueError("Connection string cannot be empty")
             if not self.username:
                 raise ValueError("Username cannot be empty")
-            if not self.password:
-                raise ValueError("Password cannot be empty")
+            # Password only required if NOT using keytab authentication
+            if not self.password and not using_keytab_auth:
+                raise ValueError("Password cannot be empty (unless using keytab authentication)")
             if not self.jdbc_driver_path:
                 raise ValueError("JDBC driver path cannot be empty")
     

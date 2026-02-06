@@ -1958,6 +1958,10 @@ Resources:
           - IsIcebergJob
           - 'spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=false --conf spark.sql.catalog.glue_catalog=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.glue_catalog.catalog-impl=org.apache.iceberg.aws.glue.GlueCatalog --conf spark.sql.catalog.glue_catalog.io-impl=org.apache.iceberg.aws.s3.S3FileIO'
           - 'spark.serializer=org.apache.spark.serializer.KryoSerializer --conf spark.sql.adaptive.enabled=true --conf spark.sql.adaptive.coalescePartitions.enabled=false'
+        '--java-options': !If
+          - HasSourceKerberos
+          - '-Djava.security.krb5.conf=/tmp/krb5.conf -Djava.security.auth.login.config=/tmp/jaas.conf -Djavax.security.auth.useSubjectCredsOnly=false'
+          - !Ref 'AWS::NoValue'
         '--extra-jars': !If
           - HasSourceJdbcDriver
           - !If
@@ -2026,9 +2030,11 @@ Resources:
         '--SOURCE_KERBEROS_SPN': !Ref SourceKerberosSPN
         '--SOURCE_KERBEROS_DOMAIN': !Ref SourceKerberosDomain
         '--SOURCE_KERBEROS_KDC': !Ref SourceKerberosKDC
+        '--SOURCE_KERBEROS_KEYTAB_S3_PATH': !Ref SourceKerberosKeytabS3Path
         '--TARGET_KERBEROS_SPN': !Ref TargetKerberosSPN
         '--TARGET_KERBEROS_DOMAIN': !Ref TargetKerberosDomain
         '--TARGET_KERBEROS_KDC': !Ref TargetKerberosKDC
+        '--TARGET_KERBEROS_KEYTAB_S3_PATH': !Ref TargetKerberosKeytabS3Path
       ExecutionProperty:
         MaxConcurrentRuns: !Ref MaxConcurrentRuns
       MaxRetries: !Ref MaxRetries
