@@ -33,7 +33,7 @@
   },
   {
     "ParameterKey": "SourceConnectionString",
-    "ParameterValue": "jdbc:sqlserver://database-1.crvpwxncbjrg.us-east-1.rds.amazonaws.com:1433;integratedSecurity=true;authenticationScheme=JavaKerberos;serverSpn=MSSQLSvc/database-1.decaro.com:1433"
+    "ParameterValue": "jdbc:sqlserver://database-1.crvpwxncbjrg.us-east-1.rds.amazonaws.com:1433;databaseName=testdb;integratedSecurity=true;authenticationScheme=JavaKerberos;serverSpn=MSSQLSvc/database-1.decaro.com:1433"
   },
   {
     "ParameterKey": "SourceDbUser",
@@ -85,7 +85,7 @@
   },
   {
     "ParameterKey": "TargetConnectionString",
-    "ParameterValue": "jdbc:sqlserver://database-1.crvpwxncbjrg.us-east-1.rds.amazonaws.com:1433;integratedSecurity=true;authenticationScheme=JavaKerberos;serverSpn=MSSQLSvc/database-1.decaro.com:1433"
+    "ParameterValue": "jdbc:sqlserver://database-1.crvpwxncbjrg.us-east-1.rds.amazonaws.com:1433;databaseName=testdb-2;integratedSecurity=true;authenticationScheme=JavaKerberos;serverSpn=MSSQLSvc/database-1.decaro.com:1433"
   },
   {
     "ParameterKey": "SourceJdbcDriverS3Path",
