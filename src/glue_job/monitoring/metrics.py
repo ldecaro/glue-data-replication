@@ -343,6 +343,179 @@ class CloudWatchMetricsPublisher:
         self.structured_logger.debug("Published bookmark corruption metrics", 
                                    table_name=table_name, corruption_type=corruption_type, 
                                    cleanup_success=cleanup_success)
+    
+    def publish_migration_progress_metrics(self, table_name: str, load_type: str,
+                                          rows_processed: int, total_rows: Optional[int],
+                                          rows_per_second: float, progress_percentage: float):
+        """
+        Publish real-time migration progress metrics.
+        
+        Args:
+            table_name: Name of the table being migrated
+            load_type: Type of load operation ('full' or 'incremental')
+            rows_processed: Number of rows processed so far
+            total_rows: Total rows (if known)
+            rows_per_second: Current processing rate
+            progress_percentage: Progress percentage (0-100)
+        """
+        dimensions = {
+            'TableName': table_name,
+            'LoadType': load_type
+        }
+        
+        # Progress metrics
+        self.put_metric('MigrationRowsProcessed', rows_processed, 'Count', dimensions)
+        self.put_metric('MigrationRowsPerSecond', rows_per_second, 'Count/Second', dimensions)
+        self.put_metric('MigrationProgressPercentage', progress_percentage, 'Percent', dimensions)
+        
+        if total_rows is not None:
+            self.put_metric('MigrationTotalRows', total_rows, 'Count', dimensions)
+        
+        self.structured_logger.debug("Published migration progress metrics", 
+                                   table_name=table_name, load_type=load_type,
+                                   rows_processed=rows_processed, 
+                                   rows_per_second=round(rows_per_second, 2),
+                                   progress_percentage=round(progress_percentage, 2))
+    
+    def publish_counting_strategy_metrics(self, table_name: str, strategy_type: str,
+                                         count_duration_seconds: float, row_count: int):
+        """
+        Publish metrics about counting strategy execution.
+        
+        Args:
+            table_name: Name of the table
+            strategy_type: Type of strategy used (immediate/deferred)
+            count_duration_seconds: Time taken to count
+            row_count: Number of rows counted
+        """
+        dimensions = {
+            'TableName': table_name,
+            'StrategyType': strategy_type
+        }
+        
+        # Strategy execution metrics
+        self.put_metric('CountingStrategyUsed', 1, 'Count', dimensions)
+        self.put_metric('CountingDurationSeconds', count_duration_seconds, 'Seconds', dimensions)
+        self.put_metric('CountingRowCount', row_count, 'Count', dimensions)
+        
+        self.structured_logger.debug("Published counting strategy metrics", 
+                                   table_name=table_name, 
+                                   strategy_type=strategy_type,
+                                   count_duration_seconds=round(count_duration_seconds, 2),
+                                   row_count=row_count)
+    
+    def publish_migration_phase_metrics(self, table_name: str, phase: str, load_type: str,
+                                       duration_seconds: float, rows_count: Optional[int] = None,
+                                       migration_status: Optional[str] = None):
+        """
+        Publish metrics for individual migration phases.
+        
+        Args:
+            table_name: Name of the table
+            phase: Phase name (read, write, count)
+            load_type: Type of load operation ('full' or 'incremental')
+            duration_seconds: Phase duration
+            rows_count: Number of rows (if applicable)
+            migration_status: Migration status (success, failed, in_progress) for status metrics
+        """
+        dimensions = {
+            'TableName': table_name,
+            'Phase': phase,
+            'LoadType': load_type
+        }
+        
+        # Phase duration metrics
+        if phase == 'read':
+            self.put_metric('MigrationReadDuration', duration_seconds, 'Seconds', dimensions)
+        elif phase == 'write':
+            self.put_metric('MigrationWriteDuration', duration_seconds, 'Seconds', dimensions)
+        elif phase == 'count':
+            self.put_metric('MigrationCountDuration', duration_seconds, 'Seconds', dimensions)
+        
+        # Row count for the phase if provided
+        if rows_count is not None:
+            self.put_metric('MigrationPhaseRowCount', rows_count, 'Count', dimensions)
+        
+        # Migration status metric per table with load_type dimension
+        if migration_status is not None:
+            status_dimensions = {
+                'TableName': table_name,
+                'LoadType': load_type
+            }
+            
+            # Publish status as numeric values for CloudWatch alarms
+            status_value = 1 if migration_status == 'success' else 0 if migration_status == 'failed' else 0.5
+            self.put_metric('MigrationStatus', status_value, 'None', status_dimensions)
+            
+            # Also publish individual status metrics for easier filtering
+            if migration_status == 'success':
+                self.put_metric('MigrationSuccess', 1, 'Count', status_dimensions)
+            elif migration_status == 'failed':
+                self.put_metric('MigrationFailed', 1, 'Count', status_dimensions)
+            elif migration_status == 'in_progress':
+                self.put_metric('MigrationInProgress', 1, 'Count', status_dimensions)
+        
+        self.structured_logger.debug("Published migration phase metrics", 
+                                   table_name=table_name, 
+                                   phase=phase,
+                                   load_type=load_type,
+                                   duration_seconds=round(duration_seconds, 2),
+                                   rows_count=rows_count,
+                                   migration_status=migration_status)
+    
+    def publish_incremental_load_metrics(self, table_name: str, delta_rows: int,
+                                        incremental_column: str, bookmark_update_status: str,
+                                        processing_rate: float, duration_seconds: float):
+        """
+        Publish metrics specific to incremental load operations.
+        
+        Args:
+            table_name: Name of the table
+            delta_rows: Number of delta rows processed in incremental load
+            incremental_column: Name of the incremental column used for tracking
+            bookmark_update_status: Status of bookmark update (success, failed)
+            processing_rate: Processing rate in rows per second
+            duration_seconds: Total duration of incremental load
+        
+        Requirements:
+            - 8.2: Publish CloudWatch Metrics for incremental load operations
+            - 8.4: Publish final metrics including delta rows and bookmark update status
+            - 8.5: Include load_type='incremental' dimension in all metrics
+        """
+        # Base dimensions with load_type and incremental_column
+        dimensions = {
+            'TableName': table_name,
+            'LoadType': 'incremental',
+            'IncrementalColumn': incremental_column
+        }
+        
+        # Requirement 8.4: Publish delta_rows metric for incremental loads
+        self.put_metric('IncrementalDeltaRows', delta_rows, 'Count', dimensions)
+        
+        # Requirement 8.4: Publish bookmark_update_status metric
+        # Use numeric values for easier alarming: 1 = success, 0 = failed
+        bookmark_status_value = 1 if bookmark_update_status == 'success' else 0
+        self.put_metric('IncrementalBookmarkUpdateStatus', bookmark_status_value, 'None', dimensions)
+        
+        # Also publish named status metrics for easier filtering
+        if bookmark_update_status == 'success':
+            self.put_metric('IncrementalBookmarkUpdateSuccess', 1, 'Count', dimensions)
+        else:
+            self.put_metric('IncrementalBookmarkUpdateFailure', 1, 'Count', dimensions)
+        
+        # Requirement 8.2: Publish processing rate for incremental loads
+        self.put_metric('IncrementalProcessingRate', processing_rate, 'Count/Second', dimensions)
+        
+        # Requirement 8.2: Publish duration for incremental loads
+        self.put_metric('IncrementalLoadDuration', duration_seconds, 'Seconds', dimensions)
+        
+        self.structured_logger.debug("Published incremental load metrics", 
+                                   table_name=table_name,
+                                   delta_rows=delta_rows,
+                                   incremental_column=incremental_column,
+                                   bookmark_update_status=bookmark_update_status,
+                                   processing_rate=round(processing_rate, 2),
+                                   duration_seconds=round(duration_seconds, 2))
 
 
 class PerformanceMonitor:

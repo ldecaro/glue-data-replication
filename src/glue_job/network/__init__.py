@@ -20,6 +20,11 @@ from .retry_handler import (
     ErrorRecoveryManager
 )
 
+from .kerberos_error_handler import (
+    KerberosErrorHandler,
+    KerberosErrorCategory
+)
+
 __all__ = [
     'ErrorCategory',
     'NetworkConnectivityError',
@@ -29,5 +34,7 @@ __all__ = [
     'NetworkErrorHandler',
     'ErrorClassifier',
     'ConnectionRetryHandler',
-    'ErrorRecoveryManager'
+    'ErrorRecoveryManager',
+    'KerberosErrorHandler',
+    'KerberosErrorCategory'
 ]

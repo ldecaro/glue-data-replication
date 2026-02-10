@@ -54,7 +54,7 @@ class ComprehensiveErrorHandler:
     def handle_glue_connection_operation(self, operation: Callable, operation_name: str,
                                        connection_name: Optional[str] = None,
                                        connection_type: Optional[str] = None,
-                                       *args, **kwargs) -> Any:
+                                       **kwargs) -> Any:
         """Handle Glue Connection operation with comprehensive error handling.
         
         Args:
@@ -62,7 +62,6 @@ class ComprehensiveErrorHandler:
             operation_name: Name of the operation for logging
             connection_name: Optional Glue Connection name
             connection_type: Optional connection type ('source' or 'target')
-            *args: Arguments to pass to operation
             **kwargs: Keyword arguments to pass to operation
             
         Returns:
@@ -86,8 +85,10 @@ class ComprehensiveErrorHandler:
             )
             
             # Execute operation with retry logic
+            # Note: We pass connection_name as keyword arg and merge any additional kwargs
+            # We don't pass *args to avoid "multiple values for argument" errors
             result = self.retry_handler.execute_with_retry(
-                operation, operation_name, connection_name, *args, **kwargs
+                operation, operation_name, connection_name=connection_name, **kwargs
             )
             
             # Log successful operation
@@ -117,14 +118,13 @@ class ComprehensiveErrorHandler:
     
     def handle_secrets_manager_operation(self, operation: Callable, operation_name: str,
                                        connection_name: Optional[str] = None,
-                                       *args, **kwargs) -> Any:
+                                       **kwargs) -> Any:
         """Handle Secrets Manager operation with comprehensive error handling.
         
         Args:
             operation: Function to execute
             operation_name: Name of the operation for logging
             connection_name: Optional connection name for context
-            *args: Arguments to pass to operation
             **kwargs: Keyword arguments to pass to operation
             
         Returns:
@@ -149,7 +149,7 @@ class ComprehensiveErrorHandler:
             
             # Execute operation with retry logic for Secrets Manager
             result = self._execute_secrets_manager_with_retry(
-                operation, operation_name, connection_name, *args, **kwargs
+                operation, operation_name, connection_name, **kwargs
             )
             
             # Log successful operation
@@ -327,11 +327,12 @@ class ComprehensiveErrorHandler:
     
     def _execute_secrets_manager_with_retry(self, operation: Callable, operation_name: str,
                                           connection_name: Optional[str],
-                                          *args, **kwargs) -> Any:
+                                          **kwargs) -> Any:
         """Execute Secrets Manager operation with appropriate retry logic."""
         # Use the same retry handler but with Secrets Manager specific classification
+        # Note: We only pass **kwargs to avoid "multiple values for argument" errors
         return self.retry_handler.execute_with_retry(
-            operation, f"secrets_manager_{operation_name}", connection_name, *args, **kwargs
+            operation, f"secrets_manager_{operation_name}", connection_name=connection_name, **kwargs
         )
     
     def _create_error_info(self, error: Exception, operation_context: Dict[str, Any],

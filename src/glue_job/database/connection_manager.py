@@ -60,8 +60,9 @@ from ..config.iceberg_models import (
 class GlueConnectionManager:
     """Manages Glue connections for cross-VPC database access."""
     
-    def __init__(self, glue_context: GlueContext):
+    def __init__(self, glue_context: GlueContext, job_name: Optional[str] = None):
         self.glue_context = glue_context
+        self.job_name = job_name  # Used for connection naming: {job_name}-{source|target}
         # Configure Glue client with aggressive timeout settings
         config = Config(
             read_timeout=30,  # Reduced from 60 to 30 seconds
@@ -82,7 +83,7 @@ class GlueConnectionManager:
         # Initialize Secrets Manager handler for credential storage
         self.secrets_manager_handler = SecretsManagerHandler(
             region_name=None,  # Use default region
-            job_name="glue-data-replication"
+            job_name=job_name or "glue-data-replication"
         )
     
     def get_glue_connection(self, connection_name: str) -> Optional[Dict[str, Any]]:
@@ -119,11 +120,12 @@ class GlueConnectionManager:
             }
             
             # Validate connection configuration with retry logic
+            # The validation function expects (connection_details, connection_name)
+            # We pass them as positional args after the connection_name parameter
             self.retry_handler.validate_connection_with_retry(
                 self._validate_glue_connection_config,
                 connection_name,
-                connection_details,
-                connection_name
+                connection_details
             )
             
             self.structured_logger.info(
@@ -162,7 +164,11 @@ class GlueConnectionManager:
                 )
     
     def _validate_glue_connection_config(self, connection_details: Dict[str, Any], connection_name: str):
-        """Validate Glue connection configuration with enhanced error handling."""
+        """Validate Glue connection configuration with enhanced error handling.
+        
+        Note: Physical connection requirements are only required for cross-VPC access.
+        Connections without physical requirements can still be valid for same-VPC scenarios.
+        """
         connection_type = connection_details.get('connection_type')
         if connection_type not in ['JDBC', 'NETWORK']:
             raise GlueConnectionValidationError(
@@ -174,14 +180,18 @@ class GlueConnectionManager:
             )
         
         physical_reqs = connection_details.get('physical_connection_requirements', {})
-        if not physical_reqs:
-            raise GlueConnectionValidationError(
-                "Connection lacks physical connection requirements for cross-VPC access",
-                connection_name=connection_name,
-                validation_field='physical_connection_requirements'
-            )
         
-        # Check for required network configuration
+        # Physical connection requirements are optional - only needed for cross-VPC access
+        # Log a warning if not present, but don't fail validation
+        if not physical_reqs:
+            self.structured_logger.info(
+                "Glue Connection has no physical connection requirements - using for same-VPC access",
+                connection_name=connection_name,
+                connection_type=connection_type
+            )
+            return  # Valid connection without cross-VPC requirements
+        
+        # If physical requirements are present, validate them
         subnet_id = physical_reqs.get('SubnetId')
         security_groups = physical_reqs.get('SecurityGroupIdList', [])
         
@@ -299,27 +309,36 @@ class GlueConnectionManager:
             connection_properties = connection_details.get('connection_properties', {})
             physical_requirements = connection_details.get('physical_connection_requirements', {})
             
-            # Check if connection has required network configuration
+            # Check if connection has network configuration
+            # Note: Physical requirements are optional for same-VPC scenarios
             subnet_id = physical_requirements.get('SubnetId')
             security_groups = physical_requirements.get('SecurityGroupIdList', [])
             
-            if not subnet_id:
-                raise GlueConnectionError(
-                    f"Glue connection '{connection_name}' missing subnet configuration",
-                    connection_name,
-                    {'error_type': 'missing_subnet', 'physical_requirements': physical_requirements}
+            if not physical_requirements:
+                # No physical requirements - connection is for same-VPC access
+                self.structured_logger.info(
+                    "Glue connection has no physical requirements - valid for same-VPC access",
+                    connection_name=connection_name
                 )
-            
-            if not security_groups:
-                raise GlueConnectionError(
-                    f"Glue connection '{connection_name}' missing security group configuration",
-                    connection_name,
-                    {'error_type': 'missing_security_groups', 'physical_requirements': physical_requirements}
-                )
-            
-            # Perform detailed network validation
-            self._validate_subnet_accessibility(subnet_id, connection_name)
-            self._validate_security_group_rules(security_groups, connection_name)
+            elif not subnet_id or not security_groups:
+                # Partial configuration is invalid
+                if not subnet_id:
+                    raise GlueConnectionError(
+                        f"Glue connection '{connection_name}' has incomplete network config (missing subnet)",
+                        connection_name,
+                        {'error_type': 'incomplete_network_config', 'physical_requirements': physical_requirements}
+                    )
+                
+                if not security_groups:
+                    raise GlueConnectionError(
+                        f"Glue connection '{connection_name}' has incomplete network config (missing security groups)",
+                        connection_name,
+                        {'error_type': 'incomplete_network_config', 'physical_requirements': physical_requirements}
+                    )
+            else:
+                # Full network configuration present - perform detailed validation
+                self._validate_subnet_accessibility(subnet_id, connection_name)
+                self._validate_security_group_rules(security_groups, connection_name)
             
             # Validate that connection URL matches expected format
             stored_url = connection_properties.get('JDBC_CONNECTION_URL', '')
@@ -1092,34 +1111,60 @@ class GlueConnectionManager:
             )
     
     def _setup_jdbc_with_create_strategy(self, connection_config: ConnectionConfig) -> Dict[str, Any]:
-        """Setup JDBC by creating a new Glue Connection.
+        """Setup JDBC expecting a Glue Connection to exist.
+        
+        NOTE: Glue Connections should be created by CloudFormation (IaC), not at runtime.
+        This method will fail if the expected connection doesn't exist.
         
         Args:
             connection_config: Database connection configuration
             
         Returns:
             Dictionary with JDBC connection properties
+            
+        Raises:
+            GlueConnectionError: If the expected connection doesn't exist
         """
-        # Generate a unique connection name if not provided
-        import time
-        import hashlib
+        # Determine connection name using {job_name}-{role}-jdbc-connection pattern
+        # This matches the CloudFormation naming convention
+        connection_role = None
+        if connection_config.glue_connection_config:
+            connection_role = connection_config.glue_connection_config.connection_role
         
-        # Create a deterministic connection name based on config
-        name_base = f"{connection_config.engine_type}_{connection_config.database}_{connection_config.schema}"
-        name_hash = hashlib.md5(name_base.encode()).hexdigest()[:8]
-        connection_name = f"glue-conn-{name_hash}-{int(time.time())}"
+        if self.job_name and connection_role:
+            # Use CloudFormation naming convention: {job_name}-{source|target}-jdbc-connection
+            connection_name = f"{self.job_name}-{connection_role}-jdbc-connection"
+        else:
+            raise GlueConnectionError(
+                "Cannot determine Glue Connection name: job_name or connection_role not set. "
+                "Glue Connections should be created by CloudFormation and referenced via UseSourceConnection/UseTargetConnection parameters.",
+                "unknown",
+                {'error_type': 'missing_connection_config'}
+            )
         
-        self.structured_logger.info(
-            "Creating new Glue Connection for JDBC setup",
-            connection_name=connection_name,
-            engine_type=connection_config.engine_type
-        )
-        
-        # Create the Glue Connection
-        created_name = self.create_glue_connection(connection_config, connection_name)
-        
-        # Now use the created connection
-        return self.setup_jdbc_with_connection(connection_config, created_name)
+        # Check if this connection exists (it should have been created by CloudFormation)
+        try:
+            existing_conn = self.get_glue_connection(connection_name)
+            if existing_conn:
+                self.structured_logger.info(
+                    "Using Glue Connection created by CloudFormation",
+                    connection_name=connection_name,
+                    engine_type=connection_config.engine_type
+                )
+                return self.setup_jdbc_with_connection(connection_config, connection_name)
+        except Exception as e:
+            self.structured_logger.error(
+                "Glue Connection not found. Connections should be created by CloudFormation (IaC), not at runtime.",
+                connection_name=connection_name,
+                error=str(e)
+            )
+            raise GlueConnectionError(
+                f"Glue Connection '{connection_name}' not found. "
+                f"Ensure CloudFormation has created this connection (CreateSourceConnection=true in parameters). "
+                f"The Glue job should not create connections at runtime for security/minimal permissions.",
+                connection_name,
+                {'error_type': 'connection_not_found', 'original_error': str(e)}
+            )
     
     def _setup_jdbc_with_use_strategy(self, connection_config: ConnectionConfig) -> Dict[str, Any]:
         """Setup JDBC using an existing Glue Connection.
@@ -1288,29 +1333,44 @@ class GlueConnectionManager:
             )
     
     def _validate_network_configuration_for_jdbc(self, physical_requirements: Dict[str, Any], connection_name: str):
-        """Validate network configuration for JDBC setup."""
+        """Validate network configuration for JDBC setup.
+        
+        Note: Physical requirements are optional. Connections without them
+        are valid for same-VPC scenarios where cross-VPC access is not needed.
+        """
+        # If no physical requirements, connection is for same-VPC access - skip validation
+        if not physical_requirements:
+            self.structured_logger.info(
+                "No physical connection requirements - using connection for same-VPC access",
+                connection_name=connection_name
+            )
+            return
+        
         subnet_id = physical_requirements.get('SubnetId')
         security_groups = physical_requirements.get('SecurityGroupIdList', [])
         
-        if not subnet_id:
-            raise NetworkConnectivityError(
-                f"Glue connection '{connection_name}' missing subnet configuration for JDBC setup",
-                error_type='missing_subnet',
-                connection_name=connection_name
-            )
-        
-        if not security_groups:
-            raise NetworkConnectivityError(
-                f"Glue connection '{connection_name}' missing security group configuration for JDBC setup",
-                error_type='missing_security_groups',
-                connection_name=connection_name
-            )
+        # Only validate if physical requirements are partially configured
+        # (i.e., some fields present but others missing)
+        if subnet_id or security_groups:
+            if not subnet_id:
+                raise NetworkConnectivityError(
+                    f"Glue connection '{connection_name}' has security groups but missing subnet configuration",
+                    error_type='incomplete_network_config',
+                    connection_name=connection_name
+                )
+            
+            if not security_groups:
+                raise NetworkConnectivityError(
+                    f"Glue connection '{connection_name}' has subnet but missing security group configuration",
+                    error_type='incomplete_network_config',
+                    connection_name=connection_name
+                )
         
         self.structured_logger.debug(
             "Network configuration validation passed for JDBC setup",
             connection_name=connection_name,
             subnet_id=subnet_id,
-            security_groups_count=len(security_groups)
+            security_groups_count=len(security_groups) if security_groups else 0
         )
 
 
@@ -1318,11 +1378,13 @@ class JdbcConnectionManager:
     """Manages JDBC database connections with validation and error handling."""
     
     def __init__(self, spark_session: SparkSession, glue_context: GlueContext, 
-                 retry_handler: Optional[ConnectionRetryHandler] = None):
+                 retry_handler: Optional[ConnectionRetryHandler] = None,
+                 job_name: Optional[str] = None):
         self.spark = spark_session
         self.glue_context = glue_context
         self.retry_handler = retry_handler or ConnectionRetryHandler()
-        self.glue_connection_manager = GlueConnectionManager(glue_context)
+        self.job_name = job_name
+        self.glue_connection_manager = GlueConnectionManager(glue_context, job_name=job_name)
         self._connection_cache = {}
         self.structured_logger = StructuredLogger("JdbcConnectionManager")
     
@@ -1709,9 +1771,27 @@ class JdbcConnectionManager:
     
     def read_table_data(self, connection_config: ConnectionConfig, table_name: str, 
                        query: Optional[str] = None, **options) -> DataFrame:
-        """Read data from database table using Spark DataFrame (not DynamicFrame)."""
+        """Read data from database table using Spark DataFrame (not DynamicFrame).
+        
+        This method respects the Glue connection strategy configured in connection_config:
+        - use_glue: Uses an existing Glue Connection for VPC access
+        - create_glue: Creates a new Glue Connection (not typically used for reads)
+        - direct_jdbc: Uses direct JDBC connection properties
+        """
         def _read_data():
-            properties = self.create_connection_properties(connection_config)
+            # Check if we should use Glue connection strategy
+            if connection_config.glue_connection_config and connection_config.uses_glue_connection():
+                # Use Glue connection strategy to get connection properties
+                self.structured_logger.info(
+                    f"Using Glue Connection strategy for reading {table_name}",
+                    table_name=table_name,
+                    strategy=connection_config.get_glue_connection_strategy(),
+                    connection_name=connection_config.get_glue_connection_name_for_creation()
+                )
+                properties = self.glue_connection_manager.setup_jdbc_with_glue_connection_strategy(connection_config)
+            else:
+                # Use direct JDBC properties
+                properties = self.create_connection_properties(connection_config)
             
             # Add any additional options
             properties.update(options)
@@ -1720,10 +1800,14 @@ class JdbcConnectionManager:
                 # Use Spark DataFrame reader directly (not DynamicFrame)
                 reader = self.spark.read.format('jdbc')
                 
-                # Set connection properties
-                reader = reader.option('url', connection_config.connection_string)
+                # Set connection properties - use URL from properties if available (from Glue connection)
+                url = properties.pop('url', connection_config.connection_string)
+                reader = reader.option('url', url)
+                
                 for key, value in properties.items():
-                    reader = reader.option(key, str(value))
+                    # Skip internal metadata keys
+                    if not key.startswith('_'):
+                        reader = reader.option(key, str(value))
                 
                 if query:
                     # Use custom query
@@ -1745,11 +1829,129 @@ class JdbcConnectionManager:
             f"data reading from {connection_config.schema}.{table_name}"
         )
     
+    def read_table_data_partitioned(
+        self, 
+        connection_config: ConnectionConfig, 
+        table_name: str,
+        partition_column: str,
+        lower_bound: int,
+        upper_bound: int,
+        num_partitions: int,
+        fetch_size: int = 10000,
+        **options
+    ) -> DataFrame:
+        """
+        Read data from database table using parallel JDBC connections.
+        
+        This method creates multiple parallel connections to read different
+        ranges of the partition column, significantly improving read performance
+        for large tables.
+        
+        This method respects the Glue connection strategy configured in connection_config.
+        
+        Args:
+            connection_config: Database connection configuration
+            table_name: Name of the table to read
+            partition_column: Numeric column to partition on (e.g., 'id')
+            lower_bound: Minimum value of partition column
+            upper_bound: Maximum value of partition column
+            num_partitions: Number of parallel read partitions
+            fetch_size: Rows to fetch per JDBC round-trip
+            **options: Additional JDBC options
+            
+        Returns:
+            DataFrame with data distributed across partitions
+        """
+        def _read_data_partitioned():
+            # Check if we should use Glue connection strategy
+            if connection_config.glue_connection_config and connection_config.uses_glue_connection():
+                self.structured_logger.info(
+                    f"Using Glue Connection strategy for partitioned read of {table_name}",
+                    table_name=table_name,
+                    strategy=connection_config.get_glue_connection_strategy(),
+                    connection_name=connection_config.get_glue_connection_name_for_creation()
+                )
+                properties = self.glue_connection_manager.setup_jdbc_with_glue_connection_strategy(connection_config)
+            else:
+                properties = self.create_connection_properties(connection_config)
+            
+            properties.update(options)
+            
+            full_table_name = f"{connection_config.schema}.{table_name}"
+            
+            # Get URL from properties if available (from Glue connection), otherwise use connection_config
+            url = properties.pop('url', connection_config.connection_string)
+            
+            try:
+                self.structured_logger.info(
+                    f"Starting partitioned JDBC read for {table_name}",
+                    table_name=table_name,
+                    partition_column=partition_column,
+                    lower_bound=lower_bound,
+                    upper_bound=upper_bound,
+                    num_partitions=num_partitions,
+                    fetch_size=fetch_size
+                )
+                
+                # Build reader with partitioning options
+                reader = self.spark.read.format('jdbc') \
+                    .option('url', url) \
+                    .option('dbtable', full_table_name) \
+                    .option('partitionColumn', partition_column) \
+                    .option('lowerBound', str(lower_bound)) \
+                    .option('upperBound', str(upper_bound)) \
+                    .option('numPartitions', str(num_partitions)) \
+                    .option('fetchsize', str(fetch_size))
+                
+                # Add connection properties (skip internal metadata keys)
+                for key, value in properties.items():
+                    if not key.startswith('_'):
+                        reader = reader.option(key, str(value))
+                
+                df = reader.load()
+                
+                actual_partitions = df.rdd.getNumPartitions()
+                self.structured_logger.info(
+                    f"Partitioned read complete for {table_name}",
+                    table_name=table_name,
+                    requested_partitions=num_partitions,
+                    actual_partitions=actual_partitions
+                )
+                
+                return df
+                
+            except Exception as e:
+                self.structured_logger.error(
+                    f"Failed partitioned read for {table_name}: {str(e)}",
+                    table_name=table_name,
+                    partition_column=partition_column,
+                    error_type=type(e).__name__
+                )
+                raise
+        
+        return self.retry_handler.execute_with_retry(
+            _read_data_partitioned,
+            f"partitioned data reading from {connection_config.schema}.{table_name}"
+        )
+    
     def write_table_data(self, df: DataFrame, connection_config: ConnectionConfig, 
                         table_name: str, mode: str = 'append', **options) -> None:
-        """Write data to database table using Spark DataFrame."""
+        """Write data to database table using Spark DataFrame.
+        
+        This method respects the Glue connection strategy configured in connection_config.
+        """
         def _write_data():
-            properties = self.create_connection_properties(connection_config)
+            # Check if we should use Glue connection strategy
+            if connection_config.glue_connection_config and connection_config.uses_glue_connection():
+                self.structured_logger.info(
+                    f"Using Glue Connection strategy for writing to {table_name}",
+                    table_name=table_name,
+                    strategy=connection_config.get_glue_connection_strategy(),
+                    connection_name=connection_config.get_glue_connection_name_for_creation()
+                )
+                properties = self.glue_connection_manager.setup_jdbc_with_glue_connection_strategy(connection_config)
+            else:
+                properties = self.create_connection_properties(connection_config)
             
             # Add any additional options
             if options:
@@ -1759,16 +1961,20 @@ class JdbcConnectionManager:
             # Build full table name with schema
             full_table_name = f"{connection_config.schema}.{table_name}"
             
+            # Get URL from properties if available (from Glue connection), otherwise use connection_config
+            url = properties.pop('url', connection_config.connection_string)
+            
             try:
                 # Build writer using Spark DataFrame (not DynamicFrame)
                 writer = df.write.format('jdbc')
-                writer = writer.option('url', connection_config.connection_string)
+                writer = writer.option('url', url)
                 writer = writer.option('dbtable', full_table_name)
                 writer = writer.mode(mode)
                 
-                # Add properties individually
+                # Add properties individually (skip internal metadata keys)
                 for key, value in properties.items():
-                    writer = writer.option(key, str(value))
+                    if not key.startswith('_'):
+                        writer = writer.option(key, str(value))
                 
                 writer.save()
                 
@@ -1836,21 +2042,24 @@ class UnifiedConnectionManager:
     """
     
     def __init__(self, spark_session: SparkSession, glue_context: GlueContext,
-                 retry_handler: Optional[ConnectionRetryHandler] = None):
+                 retry_handler: Optional[ConnectionRetryHandler] = None,
+                 job_name: Optional[str] = None):
         """Initialize the unified connection manager.
         
         Args:
             spark_session: Active Spark session
             glue_context: AWS Glue context
             retry_handler: Optional retry handler for connection operations
+            job_name: Job name used for Glue Connection naming ({job_name}-source/target)
         """
         self.spark = spark_session
         self.glue_context = glue_context
         self.retry_handler = retry_handler or ConnectionRetryHandler()
+        self.job_name = job_name
         
-        # Initialize JDBC connection manager
+        # Initialize JDBC connection manager with job_name for connection naming
         self.jdbc_manager = JdbcConnectionManager(
-            spark_session, glue_context, retry_handler
+            spark_session, glue_context, retry_handler, job_name=job_name
         )
         
         # Initialize Iceberg connection handler
@@ -1863,7 +2072,10 @@ class UnifiedConnectionManager:
         # Connection validation cache
         self._validation_cache = {}
         
-        self.structured_logger.info("Initialized UnifiedConnectionManager with JDBC and Iceberg support")
+        self.structured_logger.info(
+            "Initialized UnifiedConnectionManager with JDBC and Iceberg support",
+            job_name=job_name
+        )
     
     def is_iceberg_engine(self, engine_type: str) -> bool:
         """Check if the engine type is Iceberg.
@@ -2782,3 +2994,51 @@ class UnifiedConnectionManager:
             **options: Additional write options
         """
         self.write_table(df, connection_config, table_name, mode, **options)
+    
+    def read_table_data_partitioned(
+        self,
+        connection_config: ConnectionConfig,
+        table_name: str,
+        partition_column: str,
+        lower_bound: int,
+        upper_bound: int,
+        num_partitions: int,
+        fetch_size: int = 10000,
+        **options
+    ) -> DataFrame:
+        """Compatibility method for migration classes - delegates to JDBC manager for partitioned reads.
+        
+        This method is only supported for JDBC connections, not Iceberg.
+        
+        Args:
+            connection_config: Database connection configuration
+            table_name: Name of the table to read
+            partition_column: Numeric column to partition on (e.g., 'id')
+            lower_bound: Minimum value of partition column
+            upper_bound: Maximum value of partition column
+            num_partitions: Number of parallel read partitions
+            fetch_size: Rows to fetch per JDBC round-trip
+            **options: Additional JDBC options
+            
+        Returns:
+            DataFrame with data distributed across partitions
+            
+        Raises:
+            ValueError: If called for Iceberg engine (not supported)
+        """
+        if self.is_iceberg_engine(connection_config.engine_type):
+            raise ValueError(
+                f"Partitioned reads are not supported for Iceberg engine. "
+                f"Use read_table_data() instead for {connection_config.engine_type}."
+            )
+        
+        return self.jdbc_manager.read_table_data_partitioned(
+            connection_config=connection_config,
+            table_name=table_name,
+            partition_column=partition_column,
+            lower_bound=lower_bound,
+            upper_bound=upper_bound,
+            num_partitions=num_partitions,
+            fetch_size=fetch_size,
+            **options
+        )

@@ -20,38 +20,9 @@ The network connectivity solution consists of several AWS components:
 
 ### Network Flow Diagram
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              AWS Glue Service                               │
-│  ┌─────────────────┐                                                        │
-│  │   Glue Job      │                                                        │
-│  │   (PySpark)     │                                                        │
-│  └─────────────────┘                                                        │
-└─────────────────────────────────────────────────────────────────────────────┘
-           │                                    │
-           │ (via Glue Connection)              │ (via Glue Connection)
-           ▼                                    ▼
-┌─────────────────────┐                ┌─────────────────────┐
-│    Source VPC       │                │    Target VPC       │
-│  ┌───────────────┐  │                │  ┌───────────────┐  │
-│  │ Glue ENI      │  │                │  │ Glue ENI      │  │
-│  │ (Auto-created)│  │                │  │ (Auto-created)│  │
-│  └───────────────┘  │                │  └───────────────┘  │
-│          │          │                │          │          │
-│          ▼          │                │          ▼          │
-│  ┌───────────────┐  │                │  ┌───────────────┐  │
-│  │ Source DB     │  │                │  │ Target DB     │  │
-│  │ (Oracle/SQL/  │  │                │  │ (Oracle/SQL/  │  │
-│  │  PG/DB2)      │  │                │  │  PG/DB2)      │  │
-│  └───────────────┘  │                │  └───────────────┘  │
-│                     │                │                     │
-│  ┌───────────────┐  │                │  ┌───────────────┐  │
-│  │ S3 VPC        │  │                │  │ S3 VPC        │  │
-│  │ Endpoint      │  │                │  │ Endpoint      │  │
-│  │ (Optional)    │  │                │  │ (Optional)    │  │
-│  └───────────────┘  │                │  └───────────────┘  │
-└─────────────────────┘                └─────────────────────┘
-```
+![Network Architecture - Cross-VPC Data Replication](network-architecture.png)
+
+*The diagram shows how AWS Glue connects to databases in different VPCs using Glue Connections and auto-created ENIs, with optional S3 VPC endpoints for private subnet access.*
 
 ## Supported Network Scenarios
 

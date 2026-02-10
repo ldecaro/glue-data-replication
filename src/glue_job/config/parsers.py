@@ -70,13 +70,25 @@ class JobConfigurationParser:
         'TARGET_FORMAT_VERSION'
     ]
     
-    # Glue Connection parameters
+    # Glue Connection parameters (CloudFormation format)
     GLUE_CONNECTION_PARAMS = [
-        'createSourceConnection',
-        'createTargetConnection',
-        'useSourceConnection',
-        'useTargetConnection'
+        'CREATE_SOURCE_CONNECTION',
+        'CREATE_TARGET_CONNECTION',
+        'USE_SOURCE_CONNECTION',
+        'USE_TARGET_CONNECTION',
+        'SOURCE_JDBC_CONNECTION_NAME',
+        'TARGET_JDBC_CONNECTION_NAME',
+        'SOURCE_DATABASE_SECRET_ARN',
+        'TARGET_DATABASE_SECRET_ARN'
     ]
+    
+    # Mapping from CloudFormation parameter names to internal names
+    GLUE_CONNECTION_PARAM_MAPPING = {
+        'CREATE_SOURCE_CONNECTION': 'createSourceConnection',
+        'CREATE_TARGET_CONNECTION': 'createTargetConnection',
+        'USE_SOURCE_CONNECTION': 'useSourceConnection',
+        'USE_TARGET_CONNECTION': 'useTargetConnection'
+    }
     
     # Optional network configuration parameters
     OPTIONAL_NETWORK_PARAMS = [
@@ -99,8 +111,42 @@ class JobConfigurationParser:
         'MANUAL_BOOKMARK_CONFIG'
     ]
     
-    # All optional parameters (network + Iceberg + bookmark + Glue Connection)
-    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS + GLUE_CONNECTION_PARAMS
+    # Optional migration performance configuration parameters
+    OPTIONAL_PERFORMANCE_PARAMS = [
+        'COUNTING_STRATEGY',
+        'SIZE_THRESHOLD_ROWS',
+        'FORCE_IMMEDIATE_COUNTING',
+        'FORCE_DEFERRED_COUNTING',
+        'PROGRESS_UPDATE_INTERVAL_SECONDS',
+        'PROGRESS_BATCH_SIZE_ROWS',
+        'ENABLE_PROGRESS_TRACKING',
+        'ENABLE_PROGRESS_LOGGING',
+        'ENABLE_DETAILED_METRICS',
+        'METRICS_NAMESPACE'
+    ]
+    
+    # Optional partitioned read parameters (for large dataset optimization)
+    OPTIONAL_PARTITIONED_READ_PARAMS = [
+        'ENABLE_PARTITIONED_READS',
+        'PARTITIONED_READ_CONFIG',
+        'DEFAULT_NUM_PARTITIONS',
+        'DEFAULT_FETCH_SIZE'
+    ]
+    
+    # Kerberos authentication parameters (optional)
+    KERBEROS_PARAMS = [
+        'SOURCE_KERBEROS_SPN',
+        'SOURCE_KERBEROS_DOMAIN', 
+        'SOURCE_KERBEROS_KDC',
+        'SOURCE_KERBEROS_KEYTAB_S3_PATH',
+        'TARGET_KERBEROS_SPN',
+        'TARGET_KERBEROS_DOMAIN',
+        'TARGET_KERBEROS_KDC',
+        'TARGET_KERBEROS_KEYTAB_S3_PATH'
+    ]
+    
+    # All optional parameters (network + Iceberg + bookmark + Glue Connection + performance + partitioned reads + Kerberos)
+    ALL_OPTIONAL_PARAMS = OPTIONAL_NETWORK_PARAMS + ICEBERG_PARAMS + OPTIONAL_BOOKMARK_PARAMS + GLUE_CONNECTION_PARAMS + OPTIONAL_PERFORMANCE_PARAMS + OPTIONAL_PARTITIONED_READ_PARAMS + KERBEROS_PARAMS
     
     @classmethod
     def get_required_params_for_engines(cls, source_engine: str, target_engine: str) -> List[str]:
@@ -194,6 +240,9 @@ class JobConfigurationParser:
                 # Fallback to manual parsing if getResolvedOptions fails
                 args = cls._manual_parse_arguments(sys.argv)
             
+            # Map CloudFormation parameter names to internal names for Glue Connection params
+            cls._map_glue_connection_params(args)
+            
             # Validate that all required parameters are present based on engine types
             cls.validate_required_parameters(args)
             
@@ -212,6 +261,44 @@ class JobConfigurationParser:
             logger.error(f"CRITICAL: Failed to parse job arguments: {str(e)}")
             logger.error(f"Command line arguments: {sys.argv}")
             raise RuntimeError(f"Job argument parsing failed: {str(e)}")
+    
+    @classmethod
+    def _map_glue_connection_params(cls, args: Dict[str, str]) -> None:
+        """Map CloudFormation parameter names to internal camelCase names.
+        
+        This ensures compatibility between CloudFormation parameters (uppercase with underscores)
+        and internal code that expects camelCase parameter names.
+        
+        Args:
+            args: Parsed job arguments (modified in place)
+        """
+        for cf_name, internal_name in cls.GLUE_CONNECTION_PARAM_MAPPING.items():
+            if cf_name in args and args[cf_name]:
+                args[internal_name] = args[cf_name]
+                logger.debug(f"Mapped Glue Connection parameter: {cf_name} -> {internal_name} = {args[cf_name]}")
+        
+        # When CloudFormation creates a connection and passes its name via SOURCE_JDBC_CONNECTION_NAME,
+        # the job should USE that connection, not create a new one.
+        # CloudFormation handles creation; the job only uses existing connections.
+        if args.get('SOURCE_JDBC_CONNECTION_NAME'):
+            if not args.get('useSourceConnection'):
+                args['useSourceConnection'] = args['SOURCE_JDBC_CONNECTION_NAME']
+                logger.info(f"Auto-mapped SOURCE_JDBC_CONNECTION_NAME to useSourceConnection: {args['SOURCE_JDBC_CONNECTION_NAME']}")
+            # Disable runtime creation since CloudFormation already created the connection
+            # Use string 'false' to maintain type consistency (validator expects strings)
+            if args.get('createSourceConnection'):
+                args['createSourceConnection'] = 'false'
+                logger.info("Disabled createSourceConnection - connection already created by CloudFormation")
+        
+        if args.get('TARGET_JDBC_CONNECTION_NAME'):
+            if not args.get('useTargetConnection'):
+                args['useTargetConnection'] = args['TARGET_JDBC_CONNECTION_NAME']
+                logger.info(f"Auto-mapped TARGET_JDBC_CONNECTION_NAME to useTargetConnection: {args['TARGET_JDBC_CONNECTION_NAME']}")
+            # Disable runtime creation since CloudFormation already created the connection
+            # Use string 'false' to maintain type consistency (validator expects strings)
+            if args.get('createTargetConnection'):
+                args['createTargetConnection'] = 'false'
+                logger.info("Disabled createTargetConnection - connection already created by CloudFormation")
     
     @classmethod
     def _manual_parse_arguments(cls, argv: List[str]) -> Dict[str, str]:
@@ -322,14 +409,24 @@ class JobConfigurationParser:
                 logger.info(f"Iceberg parameter validation passed for {connection_type} engine")
             else:
                 # JDBC required parameters
+                # Check if keytab authentication is being used
+                keytab_s3_path = args.get(f'{connection_type}_KERBEROS_KEYTAB_S3_PATH', '').strip()
+                has_keytab = bool(keytab_s3_path)
+                
+                # Base required parameters (always needed for JDBC)
                 required_jdbc = [
                     f'{connection_type}_DATABASE',
                     f'{connection_type}_SCHEMA',
                     f'{connection_type}_DB_USER',
-                    f'{connection_type}_DB_PASSWORD',
                     f'{connection_type}_JDBC_DRIVER_S3_PATH',
                     f'{connection_type}_CONNECTION_STRING'
                 ]
+                
+                # Password is only required if NOT using keytab authentication
+                if not has_keytab:
+                    required_jdbc.append(f'{connection_type}_DB_PASSWORD')
+                else:
+                    logger.info(f"Keytab authentication detected for {connection_type} - password not required")
                 
                 missing_jdbc = [param for param in required_jdbc 
                               if param not in args or not args[param].strip()]
@@ -511,6 +608,70 @@ class JobConfigurationParser:
         logger.info("Engine-specific Glue Connection parameter validation completed")
     
     @classmethod
+    def parse_kerberos_config(cls, args: Dict[str, str], connection_type: str) -> Optional[Any]:
+        """Parse Kerberos configuration for source or target connection.
+        
+        Args:
+            args: Parsed job arguments
+            connection_type: 'source' or 'target' to identify which connection to parse
+            
+        Returns:
+            KerberosConfig if all three Kerberos parameters are provided, None otherwise
+        """
+        from .kerberos_config import KerberosConfig
+        
+        # Extract Kerberos parameters (using CloudFormation parameter format with underscores)
+        prefix_upper = connection_type.upper()
+        spn = args.get(f'{prefix_upper}_KERBEROS_SPN', '').strip()
+        domain = args.get(f'{prefix_upper}_KERBEROS_DOMAIN', '').strip()
+        kdc = args.get(f'{prefix_upper}_KERBEROS_KDC', '').strip()
+        
+        # Debug logging for Kerberos parameter detection
+        logger.info(f"Parsing Kerberos parameters for {connection_type} connection:")
+        logger.info(f"  Found SPN: '{spn}' (length: {len(spn)})")
+        logger.info(f"  Found Domain: '{domain}' (length: {len(domain)})")
+        logger.info(f"  Found KDC: '{kdc}' (length: {len(kdc)})")
+        
+        # Only create config if all three parameters are provided
+        if spn and domain and kdc:
+            logger.info(f"✓ COMPLETE KERBEROS CONFIGURATION DETECTED for {connection_type} connection")
+            try:
+                kerberos_config = KerberosConfig(spn=spn, domain=domain, kdc=kdc)
+                logger.info(f"✓ KerberosConfig created successfully for {connection_type} connection")
+                return kerberos_config
+            except Exception as e:
+                logger.error(f"✗ Failed to create KerberosConfig for {connection_type}: {str(e)}")
+                raise
+        
+        # Log warning if partial configuration is detected
+        if spn or domain or kdc:
+            provided_params = []
+            missing_params = []
+            
+            if spn:
+                provided_params.append(f'{prefix_upper}_KERBEROS_SPN')
+            else:
+                missing_params.append(f'{prefix_upper}_KERBEROS_SPN')
+            
+            if domain:
+                provided_params.append(f'{prefix_upper}_KERBEROS_DOMAIN')
+            else:
+                missing_params.append(f'{prefix_upper}_KERBEROS_DOMAIN')
+            
+            if kdc:
+                provided_params.append(f'{prefix_upper}_KERBEROS_KDC')
+            else:
+                missing_params.append(f'{prefix_upper}_KERBEROS_KDC')
+            
+            logger.warning(
+                f"Partial Kerberos configuration detected for {connection_type} connection. "
+                f"Provided: {provided_params}, Missing: {missing_params}. "
+                "All three parameters (SPN, Domain, KDC) are required for Kerberos authentication."
+            )
+        
+        return None
+
+    @classmethod
     def create_connection_config_with_glue_support(cls, args: Dict[str, str], 
                                                   connection_type: str,
                                                   network_config: Optional['NetworkConfig'],
@@ -530,11 +691,37 @@ class JobConfigurationParser:
         
         engine_type = args[f'{connection_type}_ENGINE_TYPE'].lower()
         
+        # Parse Kerberos configuration
+        kerberos_config = cls.parse_kerberos_config(args, connection_type.lower())
+        
         # Parse Glue Connection configuration
         glue_connection_config = None
         if not DatabaseEngineManager.is_iceberg_engine(engine_type):
             # Only parse Glue Connection config for JDBC engines
             glue_connection_config = cls.parse_glue_connection_params(args, connection_type)
+            
+            # If Kerberos is configured and CreateConnection=true, override to use pre-created Kerberos connection
+            if kerberos_config and glue_connection_config and glue_connection_config.create_connection:
+                from .job_config import GlueConnectionConfig
+                # Get the pre-created Kerberos connection name from CloudFormation
+                kerberos_connection_name = args.get(f'{connection_type}_JDBC_CONNECTION_NAME', '').strip()
+                if kerberos_connection_name:
+                    logger.info(f"Overriding Glue Connection config to use pre-created Kerberos connection: {kerberos_connection_name}")
+                    glue_connection_config = GlueConnectionConfig(
+                        create_connection=False,
+                        use_existing_connection=kerberos_connection_name
+                    )
+        
+        # Log Kerberos configuration detection
+        if kerberos_config:
+            logger.info(f"✓ KERBEROS AUTHENTICATION CONFIGURED for {connection_type.lower()} connection")
+            logger.info(f"  Kerberos Config: SPN='{kerberos_config.spn}', Domain='{kerberos_config.domain}', KDC='{kerberos_config.kdc}'")
+        else:
+            logger.info(f"Standard username/password authentication will be used for {connection_type.lower()} connection")
+        
+        # Get keytab S3 path if available
+        keytab_s3_path = args.get(f'{connection_type}_KERBEROS_KEYTAB_S3_PATH', '').strip()
+        keytab_s3_path = keytab_s3_path if keytab_s3_path else None
         
         if DatabaseEngineManager.is_iceberg_engine(engine_type):
             # For Iceberg engines, use Iceberg-specific parameters
@@ -548,20 +735,30 @@ class JobConfigurationParser:
                 jdbc_driver_path='',  # Not used for Iceberg
                 network_config=network_config,
                 iceberg_config=iceberg_config,
-                glue_connection_config=glue_connection_config  # Will be None for Iceberg
+                glue_connection_config=glue_connection_config,  # Will be None for Iceberg
+                kerberos_config=kerberos_config,
+                kerberos_keytab_s3_path=keytab_s3_path
             )
         else:
             # For JDBC engines, use traditional parameters
+            # When using Glue connections, some parameters may be omitted
+            connection_string = args.get(f'{connection_type}_CONNECTION_STRING', '')
+            username = args.get(f'{connection_type}_DB_USER', '')
+            password = args.get(f'{connection_type}_DB_PASSWORD', '')
+            jdbc_driver_path = args.get(f'{connection_type}_JDBC_DRIVER_S3_PATH', '')
+            
             return ConnectionConfig(
                 engine_type=engine_type,
-                connection_string=args[f'{connection_type}_CONNECTION_STRING'],
+                connection_string=connection_string,
                 database=args[f'{connection_type}_DATABASE'],
                 schema=args[f'{connection_type}_SCHEMA'],
-                username=args[f'{connection_type}_DB_USER'],
-                password=args[f'{connection_type}_DB_PASSWORD'],
-                jdbc_driver_path=args[f'{connection_type}_JDBC_DRIVER_S3_PATH'],
+                username=username,
+                password=password,
+                jdbc_driver_path=jdbc_driver_path,
                 network_config=network_config,
-                glue_connection_config=glue_connection_config
+                glue_connection_config=glue_connection_config,
+                kerberos_config=kerberos_config,
+                kerberos_keytab_s3_path=keytab_s3_path
             )
     
     @classmethod
@@ -668,6 +865,114 @@ class JobConfigurationParser:
         )
     
     @classmethod
+    def parse_migration_performance_config(cls, args: Dict[str, str]) -> 'MigrationPerformanceConfig':
+        """Parse migration performance configuration from CloudFormation parameters.
+        
+        Args:
+            args: Parsed job arguments
+            
+        Returns:
+            MigrationPerformanceConfig with parsed values or defaults
+        """
+        from .job_config import MigrationPerformanceConfig
+        
+        # Parse counting strategy parameters
+        counting_strategy = args.get('COUNTING_STRATEGY', 'auto').strip().lower()
+        if counting_strategy not in ['immediate', 'deferred', 'auto']:
+            logger.warning(f"Invalid counting_strategy '{counting_strategy}', defaulting to 'auto'")
+            counting_strategy = 'auto'
+        
+        size_threshold_rows = int(args.get('SIZE_THRESHOLD_ROWS', '1000000'))
+        
+        force_immediate_str = args.get('FORCE_IMMEDIATE_COUNTING', 'false').strip().lower()
+        force_immediate_counting = force_immediate_str in ['true', '1', 'yes']
+        
+        force_deferred_str = args.get('FORCE_DEFERRED_COUNTING', 'false').strip().lower()
+        force_deferred_counting = force_deferred_str in ['true', '1', 'yes']
+        
+        # Parse progress tracking parameters
+        progress_update_interval_seconds = int(args.get('PROGRESS_UPDATE_INTERVAL_SECONDS', '60'))
+        progress_batch_size_rows = int(args.get('PROGRESS_BATCH_SIZE_ROWS', '100000'))
+        
+        enable_progress_tracking_str = args.get('ENABLE_PROGRESS_TRACKING', 'true').strip().lower()
+        enable_progress_tracking = enable_progress_tracking_str in ['true', '1', 'yes']
+        
+        enable_progress_logging_str = args.get('ENABLE_PROGRESS_LOGGING', 'true').strip().lower()
+        enable_progress_logging = enable_progress_logging_str in ['true', '1', 'yes']
+        
+        # Parse metrics parameters
+        enable_detailed_metrics_str = args.get('ENABLE_DETAILED_METRICS', 'true').strip().lower()
+        enable_detailed_metrics = enable_detailed_metrics_str in ['true', '1', 'yes']
+        
+        metrics_namespace = args.get('METRICS_NAMESPACE', 'AWS/Glue/DataReplication').strip()
+        
+        # Create configuration
+        config = MigrationPerformanceConfig(
+            counting_strategy=counting_strategy,
+            size_threshold_rows=size_threshold_rows,
+            force_immediate_counting=force_immediate_counting,
+            force_deferred_counting=force_deferred_counting,
+            progress_update_interval_seconds=progress_update_interval_seconds,
+            progress_batch_size_rows=progress_batch_size_rows,
+            enable_progress_tracking=enable_progress_tracking,
+            enable_progress_logging=enable_progress_logging,
+            enable_detailed_metrics=enable_detailed_metrics,
+            metrics_namespace=metrics_namespace
+        )
+        
+        # Validate configuration
+        try:
+            config.validate()
+            logger.info(f"Migration performance configuration parsed successfully: strategy={counting_strategy}, "
+                       f"progress_tracking={enable_progress_tracking}, detailed_metrics={enable_detailed_metrics}")
+        except ValueError as e:
+            logger.error(f"Invalid migration performance configuration: {str(e)}")
+            raise
+        
+        return config
+    
+    @classmethod
+    def parse_partitioned_read_config(cls, args: Dict[str, str]) -> Optional['PartitionedReadConfig']:
+        """Parse partitioned read configuration from CloudFormation parameters.
+        
+        Args:
+            args: Parsed job arguments
+            
+        Returns:
+            PartitionedReadConfig if enabled, None otherwise
+        """
+        from .partitioned_read_config import PartitionedReadConfig
+        
+        enable_partitioned_reads = args.get('ENABLE_PARTITIONED_READS', 'auto').strip().lower()
+        
+        # If disabled, return None
+        if enable_partitioned_reads == 'disabled':
+            logger.info("Partitioned JDBC reads disabled by configuration")
+            return None
+        
+        # Parse configuration JSON
+        partitioned_read_config_json = args.get('PARTITIONED_READ_CONFIG', '').strip()
+        
+        # Parse default values
+        default_num_partitions = int(args.get('DEFAULT_NUM_PARTITIONS', '0'))
+        default_fetch_size = int(args.get('DEFAULT_FETCH_SIZE', '10000'))
+        
+        # Create configuration
+        config = PartitionedReadConfig.from_args(
+            enable_partitioned_reads=enable_partitioned_reads,
+            partitioned_read_config_json=partitioned_read_config_json,
+            default_num_partitions=default_num_partitions,
+            default_fetch_size=default_fetch_size
+        )
+        
+        logger.info(f"Partitioned read configuration parsed: enabled={config.enabled}, "
+                   f"default_partitions={config.default_num_partitions}, "
+                   f"default_fetch_size={config.default_fetch_size}, "
+                   f"table_configs={len(config.table_configs)}")
+        
+        return config
+    
+    @classmethod
     def parse_network_config(cls, args: Dict[str, str], prefix: str) -> Optional[NetworkConfig]:
         """Parse network configuration from CloudFormation parameters.
         
@@ -737,6 +1042,12 @@ class JobConfigurationParser:
             manual_bookmark_config = args.get('MANUAL_BOOKMARK_CONFIG', '').strip()
             manual_bookmark_config = manual_bookmark_config if manual_bookmark_config else None
             
+            # Parse migration performance configuration
+            migration_performance_config = cls.parse_migration_performance_config(args)
+            
+            # Parse partitioned read configuration
+            partitioned_read_config = cls.parse_partitioned_read_config(args)
+            
             # Create job config
             job_config = JobConfig(
                 job_name=args['JOB_NAME'],
@@ -745,7 +1056,9 @@ class JobConfigurationParser:
                 tables=table_names,
                 validate_connections=validate_connections,
                 connection_timeout_seconds=connection_timeout_seconds,
-                manual_bookmark_config=manual_bookmark_config
+                manual_bookmark_config=manual_bookmark_config,
+                migration_performance_config=migration_performance_config,
+                partitioned_read_config=partitioned_read_config
             )
             
             logger.info(f"Created job configuration for: {job_config.job_name}")
@@ -756,6 +1069,10 @@ class JobConfigurationParser:
                 logger.info(f"Cross-VPC network configuration detected: {network_summary}")
             else:
                 logger.info("Using same-VPC connectivity (no cross-VPC configuration)")
+            
+            # Log performance configuration summary
+            performance_summary = job_config.get_performance_summary()
+            logger.info(f"Migration performance configuration: {performance_summary}")
             
             return job_config
             

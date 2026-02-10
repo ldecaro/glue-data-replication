@@ -880,3 +880,369 @@ class TestSecretsManagerHandler(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class TestMigrationPerformanceConfig(unittest.TestCase):
+    """Test MigrationPerformanceConfig dataclass."""
+    
+    def test_migration_performance_config_default(self):
+        """Test default MigrationPerformanceConfig creation."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig()
+        
+        # Test counting strategy defaults
+        self.assertEqual(config.counting_strategy, "auto")
+        self.assertEqual(config.size_threshold_rows, 1_000_000)
+        self.assertFalse(config.force_immediate_counting)
+        self.assertFalse(config.force_deferred_counting)
+        
+        # Test progress tracking defaults
+        self.assertEqual(config.progress_update_interval_seconds, 60)
+        self.assertEqual(config.progress_batch_size_rows, 100_000)
+        self.assertTrue(config.enable_progress_tracking)
+        self.assertTrue(config.enable_progress_logging)
+        
+        # Test metrics defaults
+        self.assertTrue(config.enable_detailed_metrics)
+        self.assertEqual(config.metrics_namespace, "AWS/Glue/DataReplication")
+    
+    def test_migration_performance_config_custom_values(self):
+        """Test MigrationPerformanceConfig with custom values."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(
+            counting_strategy="deferred",
+            size_threshold_rows=500_000,
+            force_deferred_counting=True,
+            progress_update_interval_seconds=30,
+            progress_batch_size_rows=50_000,
+            enable_progress_tracking=False,
+            enable_detailed_metrics=False,
+            metrics_namespace="Custom/Namespace"
+        )
+        
+        self.assertEqual(config.counting_strategy, "deferred")
+        self.assertEqual(config.size_threshold_rows, 500_000)
+        self.assertTrue(config.force_deferred_counting)
+        self.assertEqual(config.progress_update_interval_seconds, 30)
+        self.assertEqual(config.progress_batch_size_rows, 50_000)
+        self.assertFalse(config.enable_progress_tracking)
+        self.assertFalse(config.enable_detailed_metrics)
+        self.assertEqual(config.metrics_namespace, "Custom/Namespace")
+    
+    def test_migration_performance_config_validation_success(self):
+        """Test successful validation of MigrationPerformanceConfig."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        # Test with valid "auto" strategy
+        config = MigrationPerformanceConfig(counting_strategy="auto")
+        config.validate()  # Should not raise
+        
+        # Test with valid "immediate" strategy
+        config = MigrationPerformanceConfig(counting_strategy="immediate")
+        config.validate()  # Should not raise
+        
+        # Test with valid "deferred" strategy
+        config = MigrationPerformanceConfig(counting_strategy="deferred")
+        config.validate()  # Should not raise
+    
+    def test_migration_performance_config_validation_invalid_strategy(self):
+        """Test validation fails for invalid counting strategy."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(counting_strategy="invalid")
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("Invalid counting_strategy", str(context.exception))
+        self.assertIn("invalid", str(context.exception))
+    
+    def test_migration_performance_config_validation_mutually_exclusive_force_flags(self):
+        """Test validation fails for mutually exclusive force flags."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(
+            force_immediate_counting=True,
+            force_deferred_counting=True
+        )
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("Cannot force both immediate and deferred", str(context.exception))
+    
+    def test_migration_performance_config_validation_negative_threshold(self):
+        """Test validation fails for negative size threshold."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(size_threshold_rows=-1000)
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("size_threshold_rows must be positive", str(context.exception))
+    
+    def test_migration_performance_config_validation_zero_threshold(self):
+        """Test validation fails for zero size threshold."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(size_threshold_rows=0)
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("size_threshold_rows must be positive", str(context.exception))
+    
+    def test_migration_performance_config_validation_negative_update_interval(self):
+        """Test validation fails for negative update interval."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(progress_update_interval_seconds=-30)
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("progress_update_interval_seconds must be positive", str(context.exception))
+    
+    def test_migration_performance_config_validation_zero_update_interval(self):
+        """Test validation fails for zero update interval."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(progress_update_interval_seconds=0)
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("progress_update_interval_seconds must be positive", str(context.exception))
+    
+    def test_migration_performance_config_validation_negative_batch_size(self):
+        """Test validation fails for negative batch size."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(progress_batch_size_rows=-50000)
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("progress_batch_size_rows must be positive", str(context.exception))
+    
+    def test_migration_performance_config_validation_zero_batch_size(self):
+        """Test validation fails for zero batch size."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(progress_batch_size_rows=0)
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("progress_batch_size_rows must be positive", str(context.exception))
+    
+    def test_migration_performance_config_validation_empty_namespace(self):
+        """Test validation fails for empty metrics namespace."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(metrics_namespace="")
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("metrics_namespace cannot be empty", str(context.exception))
+    
+    def test_migration_performance_config_validation_whitespace_namespace(self):
+        """Test validation fails for whitespace-only metrics namespace."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(metrics_namespace="   ")
+        
+        with self.assertRaises(ValueError) as context:
+            config.validate()
+        self.assertIn("metrics_namespace cannot be empty", str(context.exception))
+    
+    @patch('glue_job.config.job_config.logging.getLogger')
+    def test_migration_performance_config_validation_warning_for_metrics_without_tracking(self, mock_logger):
+        """Test validation logs warning when metrics enabled but tracking disabled."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        mock_logger_instance = Mock()
+        mock_logger.return_value = mock_logger_instance
+        
+        config = MigrationPerformanceConfig(
+            enable_detailed_metrics=True,
+            enable_progress_tracking=False
+        )
+        
+        config.validate()
+        
+        # Check that warning was logged
+        mock_logger_instance.warning.assert_called_once()
+        warning_call = mock_logger_instance.warning.call_args[0][0]
+        self.assertIn("Detailed metrics are enabled but progress tracking is disabled", warning_call)
+    
+    def test_migration_performance_config_get_counting_strategy_config(self):
+        """Test getting CountingStrategyConfig from MigrationPerformanceConfig."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        from glue_job.database.counting_strategy import CountingStrategyType
+        
+        config = MigrationPerformanceConfig(
+            counting_strategy="deferred",
+            size_threshold_rows=2_000_000,
+            force_deferred_counting=True
+        )
+        
+        counting_config = config.get_counting_strategy_config()
+        
+        self.assertEqual(counting_config.strategy_type, CountingStrategyType.DEFERRED)
+        self.assertEqual(counting_config.size_threshold_rows, 2_000_000)
+        self.assertTrue(counting_config.force_deferred)
+        self.assertFalse(counting_config.force_immediate)
+    
+    def test_migration_performance_config_get_counting_strategy_config_auto(self):
+        """Test getting CountingStrategyConfig with auto strategy."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        from glue_job.database.counting_strategy import CountingStrategyType
+        
+        config = MigrationPerformanceConfig(counting_strategy="auto")
+        
+        counting_config = config.get_counting_strategy_config()
+        
+        self.assertEqual(counting_config.strategy_type, CountingStrategyType.AUTO)
+    
+    def test_migration_performance_config_get_counting_strategy_config_immediate(self):
+        """Test getting CountingStrategyConfig with immediate strategy."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        from glue_job.database.counting_strategy import CountingStrategyType
+        
+        config = MigrationPerformanceConfig(
+            counting_strategy="immediate",
+            force_immediate_counting=True
+        )
+        
+        counting_config = config.get_counting_strategy_config()
+        
+        self.assertEqual(counting_config.strategy_type, CountingStrategyType.IMMEDIATE)
+        self.assertTrue(counting_config.force_immediate)
+    
+    def test_migration_performance_config_get_streaming_progress_config(self):
+        """Test getting StreamingProgressConfig from MigrationPerformanceConfig."""
+        from glue_job.config.job_config import MigrationPerformanceConfig
+        
+        config = MigrationPerformanceConfig(
+            progress_update_interval_seconds=45,
+            progress_batch_size_rows=75_000,
+            enable_detailed_metrics=False,
+            enable_progress_logging=False
+        )
+        
+        progress_config = config.get_streaming_progress_config()
+        
+        self.assertEqual(progress_config.update_interval_seconds, 45)
+        self.assertEqual(progress_config.batch_size_rows, 75_000)
+        self.assertFalse(progress_config.enable_metrics)
+        self.assertFalse(progress_config.enable_logging)
+
+
+class TestJobConfigWithMigrationPerformance(unittest.TestCase):
+    """Test JobConfig with MigrationPerformanceConfig integration."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.source_config = ConnectionConfig(
+            engine_type="postgresql",
+            connection_string="jdbc:postgresql://source.example.com:5432/sourcedb",
+            database="sourcedb",
+            schema="public",
+            username="sourceuser",
+            password="sourcepass",
+            jdbc_driver_path="s3://bucket/drivers/postgresql.jar"
+        )
+        
+        self.target_config = ConnectionConfig(
+            engine_type="postgresql",
+            connection_string="jdbc:postgresql://target.example.com:5432/targetdb",
+            database="targetdb",
+            schema="public",
+            username="targetuser",
+            password="targetpass",
+            jdbc_driver_path="s3://bucket/drivers/postgresql.jar"
+        )
+    
+    def test_job_config_with_default_migration_performance_config(self):
+        """Test JobConfig with default MigrationPerformanceConfig."""
+        from glue_job.config.job_config import JobConfig
+        
+        job_config = JobConfig(
+            job_name="test-job",
+            source_connection=self.source_config,
+            target_connection=self.target_config,
+            tables=["test_table"]
+        )
+        
+        # Should have default MigrationPerformanceConfig
+        self.assertIsNotNone(job_config.migration_performance_config)
+        self.assertEqual(job_config.migration_performance_config.counting_strategy, "auto")
+        self.assertEqual(job_config.migration_performance_config.size_threshold_rows, 1_000_000)
+    
+    def test_job_config_with_custom_migration_performance_config(self):
+        """Test JobConfig with custom MigrationPerformanceConfig."""
+        from glue_job.config.job_config import JobConfig, MigrationPerformanceConfig
+        
+        perf_config = MigrationPerformanceConfig(
+            counting_strategy="deferred",
+            size_threshold_rows=500_000,
+            progress_update_interval_seconds=30
+        )
+        
+        job_config = JobConfig(
+            job_name="test-job",
+            source_connection=self.source_config,
+            target_connection=self.target_config,
+            tables=["test_table"],
+            migration_performance_config=perf_config
+        )
+        
+        self.assertEqual(job_config.migration_performance_config, perf_config)
+        self.assertEqual(job_config.migration_performance_config.counting_strategy, "deferred")
+        self.assertEqual(job_config.migration_performance_config.size_threshold_rows, 500_000)
+    
+    def test_job_config_validates_migration_performance_config(self):
+        """Test JobConfig validates MigrationPerformanceConfig during initialization."""
+        from glue_job.config.job_config import JobConfig, MigrationPerformanceConfig
+        
+        # Create invalid performance config
+        perf_config = MigrationPerformanceConfig(
+            counting_strategy="invalid_strategy"
+        )
+        
+        # JobConfig should validate and raise error
+        with self.assertRaises(ValueError) as context:
+            job_config = JobConfig(
+                job_name="test-job",
+                source_connection=self.source_config,
+                target_connection=self.target_config,
+                tables=["test_table"],
+                migration_performance_config=perf_config
+            )
+        self.assertIn("Invalid counting_strategy", str(context.exception))
+    
+    def test_job_config_get_performance_summary(self):
+        """Test JobConfig.get_performance_summary() method."""
+        from glue_job.config.job_config import JobConfig, MigrationPerformanceConfig
+        
+        perf_config = MigrationPerformanceConfig(
+            counting_strategy="deferred",
+            size_threshold_rows=2_000_000,
+            enable_progress_tracking=True,
+            progress_update_interval_seconds=45,
+            enable_detailed_metrics=True,
+            metrics_namespace="Custom/Namespace"
+        )
+        
+        job_config = JobConfig(
+            job_name="test-job",
+            source_connection=self.source_config,
+            target_connection=self.target_config,
+            tables=["test_table"],
+            migration_performance_config=perf_config
+        )
+        
+        summary = job_config.get_performance_summary()
+        
+        self.assertEqual(summary['counting_strategy'], "deferred")
+        self.assertEqual(summary['size_threshold_rows'], 2_000_000)
+        self.assertTrue(summary['progress_tracking_enabled'])
+        self.assertEqual(summary['progress_update_interval'], 45)
+        self.assertTrue(summary['detailed_metrics_enabled'])
+        self.assertEqual(summary['metrics_namespace'], "Custom/Namespace")

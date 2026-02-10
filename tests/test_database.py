@@ -256,6 +256,74 @@ class TestFullLoadDataMigrator(unittest.TestCase):
             # For now, just check that the method exists and is callable
             self.assertTrue(hasattr(self.migrator, 'perform_full_load_migration'))
             self.assertTrue(callable(getattr(self.migrator, 'perform_full_load_migration')))
+    
+    def test_full_load_with_deferred_counting(self):
+        """Test full load migration with deferred counting strategy."""
+        from glue_job.database.counting_strategy import CountingStrategy, CountingStrategyConfig, CountingStrategyType
+        
+        # Create a counting strategy configured for deferred counting
+        config = CountingStrategyConfig(strategy_type=CountingStrategyType.DEFERRED)
+        counting_strategy = CountingStrategy(config)
+        
+        # Create migrator with counting strategy
+        migrator = FullLoadDataMigrator(self.mock_spark, self.mock_connection_manager, counting_strategy)
+        
+        # Mock the connection manager methods
+        mock_df = Mock()
+        mock_df.count.return_value = 1000
+        mock_df.rdd.getNumPartitions.return_value = 4
+        
+        # Mock deferred count result
+        count_df = Mock()
+        count_df.collect.return_value = [{'row_count': 1000}]
+        
+        # Set up side_effect to return different values for different calls
+        migrator.connection_manager.read_table_data.side_effect = [mock_df, count_df]
+        migrator.connection_manager.write_table_data.return_value = None
+        
+        # Execute migration
+        result = migrator.perform_full_load_migration(
+            self.source_config,
+            self.target_config,
+            "test_table"
+        )
+        
+        # Verify counting strategy was used
+        self.assertEqual(result.counting_strategy, "deferred")
+        self.assertEqual(result.rows_counted_at, "after_write")
+        self.assertEqual(result.total_rows, 1000)
+        self.assertEqual(result.status, 'completed')
+        self.assertGreater(result.count_duration_seconds, 0)
+    
+    def test_full_load_with_immediate_counting(self):
+        """Test full load migration with immediate counting strategy."""
+        from glue_job.database.counting_strategy import CountingStrategy, CountingStrategyConfig, CountingStrategyType
+        
+        # Create a counting strategy configured for immediate counting
+        config = CountingStrategyConfig(strategy_type=CountingStrategyType.IMMEDIATE)
+        counting_strategy = CountingStrategy(config)
+        
+        # Create migrator with counting strategy
+        migrator = FullLoadDataMigrator(self.mock_spark, self.mock_connection_manager, counting_strategy)
+        
+        # Mock the connection manager methods
+        mock_df = Mock()
+        mock_df.count.return_value = 1000
+        migrator.connection_manager.read_table.return_value = mock_df
+        migrator.connection_manager.read_table_data.return_value = mock_df
+        
+        # Execute migration
+        result = migrator.perform_full_load_migration(
+            self.source_config,
+            self.target_config,
+            "test_table"
+        )
+        
+        # Verify counting strategy was used
+        self.assertEqual(result.counting_strategy, "immediate")
+        self.assertEqual(result.rows_counted_at, "before_write")
+        self.assertEqual(result.total_rows, 1000)
+        self.assertGreater(result.count_duration_seconds, 0)
 
 
 class TestIncrementalDataMigrator(unittest.TestCase):
@@ -268,7 +336,14 @@ class TestIncrementalDataMigrator(unittest.TestCase):
         self.mock_spark = Mock()
         self.mock_connection_manager = Mock(spec=UnifiedConnectionManager)
         self.mock_bookmark_manager = Mock(spec=JobBookmarkManager)
-        self.migrator = IncrementalDataMigrator(self.mock_spark, self.mock_connection_manager, self.mock_bookmark_manager)
+        self.mock_metrics_publisher = Mock()
+        self.migrator = IncrementalDataMigrator(
+            self.mock_spark, 
+            self.mock_connection_manager, 
+            self.mock_bookmark_manager,
+            metrics_publisher=self.mock_metrics_publisher,
+            streaming_progress_config=None
+        )
         
         # Mock source connection config
         self.source_config = ConnectionConfig(

@@ -199,8 +199,14 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
         logger.error(f"Engine configuration validation failed: {str(e)}")
         raise
     
-    # Initialize managers with engine-aware configuration
-    connection_manager = UnifiedConnectionManager(spark, glue_context)
+    # Set connection roles for Glue Connection naming ({job_name}-source/target)
+    if config.source_connection.glue_connection_config:
+        config.source_connection.glue_connection_config.connection_role = "source"
+    if config.target_connection.glue_connection_config:
+        config.target_connection.glue_connection_config.connection_role = "target"
+    
+    # Initialize managers with engine-aware configuration and job_name for connection naming
+    connection_manager = UnifiedConnectionManager(spark, glue_context, job_name=config.job_name)
     
     # Initialize bookmark manager with engine-aware JDBC paths
     # Iceberg engines don't use JDBC drivers, so set paths to None
@@ -226,9 +232,85 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
     else:
         logger.info("No manual_bookmark_configs attribute found on bookmark_manager")
     
-    # Initialize migrators with enhanced error handling for Iceberg
-    full_migrator = FullLoadDataMigrator(spark, connection_manager)
-    incremental_migrator = IncrementalDataMigrator(spark, connection_manager, bookmark_manager)
+    # Get migration performance configuration
+    perf_config = config.migration_performance_config
+    
+    # Initialize CloudWatch metrics publisher if detailed metrics are enabled
+    from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
+    metrics_publisher = None
+    
+    logger.info(f"Performance config - enable_detailed_metrics: {perf_config.enable_detailed_metrics}, "
+               f"metrics_namespace: {perf_config.metrics_namespace}")
+    
+    if perf_config.enable_detailed_metrics:
+        try:
+            logger.info(f"Attempting to initialize CloudWatch metrics publisher for job: {config.job_name}")
+            metrics_publisher = CloudWatchMetricsPublisher(
+                job_name=config.job_name,
+                namespace=perf_config.metrics_namespace
+            )
+            logger.info(f"✓ Successfully initialized CloudWatch metrics publisher with namespace: {perf_config.metrics_namespace}")
+        except Exception as e:
+            logger.error(f"✗ Failed to initialize CloudWatch metrics publisher: {str(e)}", exc_info=True)
+            logger.warning("Continuing without metrics publishing")
+            metrics_publisher = None
+    else:
+        logger.info("CloudWatch metrics publishing disabled by configuration")
+    
+    # Initialize counting strategy with configuration and metrics publisher
+    from glue_job.database.counting_strategy import CountingStrategy
+    counting_strategy = CountingStrategy(
+        config=perf_config.get_counting_strategy_config(),
+        metrics_publisher=metrics_publisher
+    )
+    
+    # Initialize streaming progress configuration
+    streaming_progress_config = perf_config.get_streaming_progress_config()
+    
+    # Log performance configuration being used
+    logger.info(f"Using migration performance configuration: counting_strategy={perf_config.counting_strategy}, "
+               f"progress_tracking={perf_config.enable_progress_tracking}, "
+               f"detailed_metrics={perf_config.enable_detailed_metrics}")
+    
+    # Initialize partitioned read configuration for large dataset optimization
+    from glue_job.config.partitioned_read_config import PartitionedReadConfig
+    partitioned_read_config = config.partitioned_read_config
+    
+    if partitioned_read_config and partitioned_read_config.enabled:
+        table_config_count = len(partitioned_read_config.table_configs)
+        if table_config_count > 0:
+            logger.info(f"Parallel JDBC reads ENABLED with explicit table configurations: "
+                       f"tables_configured={list(partitioned_read_config.table_configs.keys())}, "
+                       f"default_partitions={partitioned_read_config.default_num_partitions}, "
+                       f"default_fetch_size={partitioned_read_config.default_fetch_size}")
+        else:
+            logger.info(f"Parallel JDBC reads ENABLED with auto-detection: "
+                       f"default_partitions={partitioned_read_config.default_num_partitions} (0=auto-calculate), "
+                       f"default_fetch_size={partitioned_read_config.default_fetch_size}. "
+                       f"Partition columns will be auto-detected from primary keys or indexes.")
+    else:
+        logger.info("Parallel JDBC reads DISABLED (default). Using single-connection reads. "
+                   "To enable parallel reads for large datasets, set EnablePartitionedReads=auto and optionally "
+                   "configure PartitionedReadConfig. See docs/PARAMETER_REFERENCE.md for details.")
+    
+    # Initialize migrators with enhanced error handling for Iceberg and performance configuration
+    full_migrator = FullLoadDataMigrator(
+        spark, 
+        connection_manager,
+        counting_strategy=counting_strategy,
+        metrics_publisher=metrics_publisher,
+        streaming_progress_config=streaming_progress_config,
+        partitioned_read_config=partitioned_read_config
+    )
+    incremental_migrator = IncrementalDataMigrator(
+        spark, 
+        connection_manager, 
+        bookmark_manager,
+        counting_strategy=counting_strategy,
+        metrics_publisher=metrics_publisher,
+        streaming_progress_config=streaming_progress_config,
+        partitioned_read_config=partitioned_read_config
+    )
     
     successful_tables = 0
     failed_tables = 0
@@ -259,9 +341,12 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
             # Initialize or use pre-loaded bookmark state with manual configuration support
             try:
                 if table_name in bookmark_states and bookmark_states[table_name] is not None:
+                    logger.info(f"Using pre-loaded bookmark state for {table_name} from parallel S3 read")
                     bookmark_state = JobBookmarkState.from_s3_dict(bookmark_states[table_name])
+                    logger.info(f"Pre-loaded bookmark for {table_name}: is_first_run={bookmark_state.is_first_run}, last_processed_value={bookmark_state.last_processed_value}")
                     bookmark_manager.bookmark_states[table_name] = bookmark_state
                 else:
+                    logger.info(f"No pre-loaded bookmark for {table_name}, will read from S3 via initialize_bookmark_state")
                     # Use the new auto-detection method that considers manual configuration
                     if source_is_iceberg:
                         # For Iceberg tables, use Iceberg-specific initialization
@@ -314,6 +399,9 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
                                 database=config.source_connection.database,
                                 engine_type=config.source_connection.engine_type
                             )
+                    
+                    # Log the bookmark state after initialization
+                    logger.info(f"Bookmark state after initialize_bookmark_state for {table_name}: is_first_run={bookmark_state.is_first_run}, last_processed_value={bookmark_state.last_processed_value}")
             except Exception as e:
                 logger.error(f"Bookmark state initialization failed for {table_name}: {str(e)}")
                 failed_tables += 1
@@ -390,6 +478,15 @@ def execute_migration_workflow(config: JobConfig, glue_context: GlueContext) -> 
         logger.warning(f"Failed to log bookmark detection summary: {e}")
     
     logger.info(f"Job completed: {successful_tables} successful, {failed_tables} failed")
+    
+    # Flush all buffered metrics to CloudWatch before job completion
+    if metrics_publisher is not None:
+        try:
+            logger.info("Flushing buffered metrics to CloudWatch...")
+            metrics_publisher.flush_metrics()
+            logger.info("✓ Successfully flushed all metrics to CloudWatch")
+        except Exception as e:
+            logger.error(f"✗ Failed to flush metrics to CloudWatch: {str(e)}", exc_info=True)
     
     # Fail the job if no tables were successfully processed due to errors
     if successful_tables == 0 and failed_tables > 0:
@@ -608,24 +705,54 @@ def _get_max_incremental_value_after_full_load(connection_manager, target_config
         target_is_iceberg: Whether target engine is Iceberg
         
     Returns:
-        Maximum value of the incremental column from the target database
+        Maximum value of the incremental column from the target database (as string with full precision)
     """
     try:
-        from pyspark.sql.functions import max as spark_max, col
-        
         if target_is_iceberg:
-            # For Iceberg targets, read the table and get max value
-            df = connection_manager.read_table(
-                connection_config=target_config,
-                table_name=table_name
-            )
-            max_value_row = df.agg(spark_max(col(incremental_column)).alias("max_value")).collect()[0]
-            max_value = max_value_row["max_value"]
+            # For Iceberg targets, use Spark SQL to get max value with full timestamp precision
+            # This avoids the warehousePath issue with read_table()
+            iceberg_config = target_config.get_iceberg_config()
+            if iceberg_config:
+                database = iceberg_config.get('database_name', target_config.database)
+                catalog_name = iceberg_config.get('catalog_name', 'glue_catalog')
+                full_table_name = f"{catalog_name}.{database}.{table_name}"
+                
+                # Use CAST to string to preserve full timestamp precision
+                query = f"SELECT CAST(MAX({incremental_column}) AS STRING) as max_value FROM {full_table_name}"
+                logger.info(f"Executing Iceberg max value query: {query}")
+                
+                spark = connection_manager.spark
+                result_df = spark.sql(query)
+                max_value = result_df.collect()[0]["max_value"]
+            else:
+                # Fallback if no Iceberg config - this shouldn't happen
+                logger.warning(f"No Iceberg config found for {table_name}, returning None")
+                return None
         else:
             # For traditional databases, use SQL query to get max value from target
-            query = f"SELECT MAX({incremental_column}) as max_value FROM {target_config.schema}.{table_name}"
+            # Cast to string to preserve full timestamp precision
+            engine_type = target_config.engine_type.lower()
+            
+            if engine_type == 'sqlserver':
+                # SQL Server: Use CONVERT to get full precision string
+                query = f"SELECT CONVERT(VARCHAR(30), MAX({incremental_column}), 121) as max_value FROM {target_config.schema}.{table_name}"
+            elif engine_type == 'oracle':
+                # Oracle: Use TO_CHAR for full precision
+                query = f"SELECT TO_CHAR(MAX({incremental_column}), 'YYYY-MM-DD HH24:MI:SS.FF6') as max_value FROM {target_config.schema}.{table_name}"
+            elif engine_type == 'postgresql':
+                # PostgreSQL: Cast to text
+                query = f"SELECT MAX({incremental_column})::text as max_value FROM {target_config.schema}.{table_name}"
+            else:
+                # Default: standard MAX query
+                query = f"SELECT MAX({incremental_column}) as max_value FROM {target_config.schema}.{table_name}"
+            
+            logger.info(f"Executing max value query: {query}")
             result_df = connection_manager.read_table_data(target_config, table_name, query=query)
             max_value = result_df.collect()[0]["max_value"]
+            
+            # Ensure it's a string
+            if max_value is not None and not isinstance(max_value, str):
+                max_value = str(max_value)
         
         logger.info(f"Retrieved max incremental value from target {table_name}.{incremental_column}: {max_value}")
         return max_value
@@ -714,18 +841,218 @@ def _perform_incremental_load_with_engine_support(incremental_migrator, config: 
             raise
 
 
+def _setup_kerberos_environment_if_needed(job_config: JobConfig, spark_context=None) -> None:
+    """Set up Kerberos environment for source and/or target connections if configured.
+    
+    In AWS Glue, the JVM is ALREADY RUNNING before our Python code executes.
+    We cannot use _JAVA_OPTIONS or environment variables to configure the JVM.
+    
+    This function is called TWICE:
+    1. First call (spark_context=None): Create krb5.conf, jaas.conf, download keytab
+    2. Second call (spark_context provided): Set JVM properties on running JVM
+    
+    Args:
+        job_config: Job configuration containing connection configs
+        spark_context: SparkContext with access to JVM (None for first call, provided for second)
+    """
+    from glue_job.config.kerberos_environment import KerberosEnvironmentManager
+    import os
+    
+    # Check if any Kerberos authentication is configured
+    source_uses_kerberos = job_config.source_connection.uses_kerberos_authentication()
+    target_uses_kerberos = job_config.target_connection.uses_kerberos_authentication()
+    
+    if not source_uses_kerberos and not target_uses_kerberos:
+        return
+    
+    kerberos_manager = KerberosEnvironmentManager()
+    kerberos_config = None
+    krb5_conf_path = None
+    jaas_conf_path = None
+    
+    # Determine which Kerberos config to use (source takes precedence)
+    if source_uses_kerberos:
+        kerberos_config = job_config.source_connection.get_kerberos_config()
+        username = job_config.source_connection.username
+        keytab_s3_path = job_config.source_connection.kerberos_keytab_s3_path
+        connection_type = "SOURCE"
+    elif target_uses_kerberos:
+        kerberos_config = job_config.target_connection.get_kerberos_config()
+        username = job_config.target_connection.username
+        keytab_s3_path = job_config.target_connection.kerberos_keytab_s3_path
+        connection_type = "TARGET"
+    
+    # PHASE 1: Create Kerberos files (when spark_context is None)
+    if spark_context is None:
+        logger.info(f"Phase 1: Creating Kerberos files for {connection_type} connection")
+        logger.info(f"  Domain: {kerberos_config.domain}, KDC: {kerberos_config.kdc}")
+        logger.info(f"  Username: {username}, Keytab S3: {keytab_s3_path}")
+        
+        # Create krb5.conf, jaas.conf, download keytab
+        krb5_conf_path = kerberos_manager.setup_kerberos_environment(
+            kerberos_config=kerberos_config,
+            username=username,
+            password=None,  # Not needed for keytab auth
+            keytab_s3_path=keytab_s3_path
+        )
+        
+        logger.info(f"✓ Kerberos files created:")
+        logger.info(f"  krb5.conf: {krb5_conf_path}")
+        logger.info(f"  jaas.conf: {kerberos_manager._jaas_conf_path}")
+        logger.info(f"  keytab: {kerberos_manager._keytab_path}")
+        return
+    
+    # PHASE 2: Set JVM properties on running JVM (when spark_context is provided)
+    logger.info(f"Phase 2: Setting JVM Kerberos properties for {connection_type} connection")
+    
+    # Get paths from environment (set during Phase 1)
+    krb5_conf_path = os.environ.get('KRB5_CONFIG', '/tmp/krb5.conf')
+    jaas_conf_path = '/tmp/jaas.conf'
+    
+    _set_jvm_kerberos_properties(spark_context, kerberos_config, krb5_conf_path, jaas_conf_path)
+
+
+def _set_jvm_kerberos_properties(spark_context, kerberos_config, krb5_conf_path: str, jaas_conf_path: str = None) -> None:
+    """Set Kerberos properties directly on the running JVM.
+    
+    In AWS Glue, the JVM is already running before our code executes.
+    We must set Java system properties directly using SparkContext._jvm.
+    
+    Args:
+        spark_context: SparkContext with JVM access
+        kerberos_config: Kerberos configuration (domain, KDC)
+        krb5_conf_path: Path to krb5.conf file
+        jaas_conf_path: Path to jaas.conf file (optional)
+    """
+    import os
+    
+    try:
+        if spark_context is None or spark_context._jvm is None:
+            logger.error("SparkContext or JVM not available - cannot set Kerberos properties")
+            return
+        
+        # Log krb5.conf content for debugging
+        logger.info(f"=== krb5.conf content ({krb5_conf_path}) ===")
+        try:
+            with open(krb5_conf_path, 'r') as f:
+                for line in f:
+                    logger.info(f"  {line.rstrip()}")
+        except Exception as e:
+            logger.error(f"Could not read krb5.conf: {e}")
+        
+        # Log jaas.conf content for debugging
+        if jaas_conf_path and os.path.exists(jaas_conf_path):
+            logger.info(f"=== jaas.conf content ({jaas_conf_path}) ===")
+            try:
+                with open(jaas_conf_path, 'r') as f:
+                    for line in f:
+                        logger.info(f"  {line.rstrip()}")
+            except Exception as e:
+                logger.error(f"Could not read jaas.conf: {e}")
+        
+        # Verify keytab exists
+        keytab_path = '/tmp/krb5.keytab'
+        if os.path.exists(keytab_path):
+            keytab_size = os.path.getsize(keytab_path)
+            logger.info(f"Keytab file exists: {keytab_path} ({keytab_size} bytes)")
+        else:
+            logger.error(f"KEYTAB FILE NOT FOUND: {keytab_path}")
+        
+        java_system = spark_context._jvm.java.lang.System
+        
+        # Set Kerberos configuration properties
+        java_system.setProperty('java.security.krb5.conf', krb5_conf_path)
+        java_system.setProperty('java.security.krb5.realm', kerberos_config.domain.upper())
+        java_system.setProperty('java.security.krb5.kdc', kerberos_config.kdc)
+        java_system.setProperty('javax.security.auth.useSubjectCredsOnly', 'false')
+        
+        # Set JAAS configuration if available
+        if jaas_conf_path:
+            java_system.setProperty('java.security.auth.login.config', jaas_conf_path)
+        
+        # CRITICAL: Refresh the Kerberos configuration cache
+        # Without this, the JVM uses cached (empty) configuration
+        try:
+            spark_context._jvm.sun.security.krb5.Config.refresh()
+            logger.info("✓ Refreshed Kerberos configuration cache")
+        except Exception as e:
+            logger.warning(f"Could not refresh Kerberos config cache: {e}")
+        
+        # Verify properties were set by reading them back
+        logger.info("=== JVM Kerberos properties verification ===")
+        logger.info(f"  java.security.krb5.conf = {java_system.getProperty('java.security.krb5.conf')}")
+        logger.info(f"  java.security.krb5.realm = {java_system.getProperty('java.security.krb5.realm')}")
+        logger.info(f"  java.security.krb5.kdc = {java_system.getProperty('java.security.krb5.kdc')}")
+        logger.info(f"  java.security.auth.login.config = {java_system.getProperty('java.security.auth.login.config')}")
+        logger.info(f"  javax.security.auth.useSubjectCredsOnly = {java_system.getProperty('javax.security.auth.useSubjectCredsOnly')}")
+        
+        # Try to verify the Kerberos config was loaded correctly
+        try:
+            krb5_config = spark_context._jvm.sun.security.krb5.Config.getInstance()
+            default_realm = krb5_config.getDefaultRealm()
+            logger.info(f"✓ Kerberos default realm from JVM: {default_realm}")
+        except Exception as e:
+            logger.error(f"✗ Could not get default realm from JVM Config: {e}")
+        
+    except Exception as e:
+        logger.error(f"Failed to set JVM Kerberos properties: {e}")
+        raise
+
+
+def _distribute_kerberos_to_executors(glue_context) -> None:
+    """Distribute Kerberos configuration files to all Spark executors.
+    
+    Executors run in separate JVMs on different nodes. Each executor needs:
+    - /tmp/krb5.conf (Kerberos realm configuration)
+    - /tmp/jaas.conf (JAAS login configuration)
+    - /tmp/krb5.keytab (Kerberos credentials)
+    - JVM system properties set
+    
+    This function runs a Spark job that downloads these files from S3 to each executor.
+    """
+    from glue_job.config.kerberos_environment import KerberosEnvironmentManager
+    
+    logger.info("Distributing Kerberos configuration to executors...")
+    
+    kerberos_manager = KerberosEnvironmentManager()
+    sc = glue_context.spark_session.sparkContext
+    spark_session = glue_context.spark_session
+    
+    success = kerberos_manager.distribute_kerberos_to_executors(sc, spark_session)
+    
+    if success:
+        logger.info("✓ Kerberos configuration distributed to executors")
+    else:
+        logger.warning("⚠ Failed to distribute Kerberos to some executors - writes may fail")
+
+
 def main() -> None:
     """Main entry point for Glue job execution with Iceberg support."""
     try:
-        # Parse job arguments
+        # Parse job arguments FIRST - this doesn't need SparkContext
         args = JobConfigurationParser.parse_job_arguments()
         job_config = JobConfigurationParser.create_job_config(args)
         JobConfigurationParser.validate_configuration(job_config)
         
-        # Initialize Glue context and job
+        # Step 1: Create Kerberos files (krb5.conf, jaas.conf, download keytab)
+        # This prepares the files but doesn't set JVM properties yet
+        _setup_kerberos_environment_if_needed(job_config, spark_context=None)
+        
+        # Step 2: Initialize Glue context and job (creates SparkContext/JVM)
         glue_context, job = setup_glue_context(args)
         
-        # Execute migration workflow with Iceberg support
+        # Step 3: CRITICAL - Set JVM Kerberos properties on the RUNNING JVM
+        # Must be done AFTER SparkContext exists but BEFORE any JDBC connections
+        if job_config.source_connection.uses_kerberos_authentication() or \
+           job_config.target_connection.uses_kerberos_authentication():
+            sc = glue_context.spark_session.sparkContext
+            _setup_kerberos_environment_if_needed(job_config, spark_context=sc)
+            
+            # Step 3b: Distribute Kerberos config to executors
+            # Executors run in separate JVMs and need their own Kerberos setup
+            _distribute_kerberos_to_executors(glue_context)
+        
+        # Step 4: Execute migration workflow with Iceberg support
         execute_migration_workflow(job_config, glue_context)
         
         # Commit job bookmark

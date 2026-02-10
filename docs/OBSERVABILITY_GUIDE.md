@@ -375,4 +375,10 @@ Monitor configuration compliance:
 - **Audit Trail**: Monitor who accesses monitoring data
 - **Cross-account Access**: Carefully control cross-account monitoring
 
+## Related Documentation
+
+- **[Progress Tracking Guide](PROGRESS_TRACKING_GUIDE.md)**: Real-time progress monitoring, metrics configuration, and troubleshooting
+- **[Performance Monitoring Guide](PERFORMANCE_MONITORING_GUIDE.md)**: CloudWatch dashboard setup and performance optimization
+- **[Error Handling Guide](ERROR_HANDLING_GUIDE.md)**: Error classification and recovery mechanisms
+
 This comprehensive observability setup ensures you have full visibility into your Glue data replication jobs, enabling proactive monitoring, quick troubleshooting, and continuous optimization.

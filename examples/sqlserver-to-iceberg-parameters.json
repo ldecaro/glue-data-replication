@@ -46,7 +46,15 @@
   {
     "ParameterKey": "TargetWarehouseLocation",
     "ParameterValue": "s3://decaro-datalake-us/bronze-warehouse/"
-  },
+  },  
+{
+  "ParameterKey": "PartitionedReadConfig",
+  "ParameterValue": "{\"order_items\": {\"partition_column\": \"order_item_id\", \"num_partitions\": 4}}"
+},  
+{
+  "ParameterKey": "CreateSourceConnection",
+  "ParameterValue": "true"
+},
   {
     "ParameterKey": "MaxRetries",
     "ParameterValue": "1"
@@ -61,7 +69,7 @@
   },
   {
     "ParameterKey": "WorkerType",
-    "ParameterValue": "G.2X"
+    "ParameterValue": "G.1X"
   },
   {
     "ParameterKey": "NumberOfWorkers",

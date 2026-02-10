@@ -63,7 +63,13 @@ class DataGenerator:
         customers = []
         base_date = datetime.now() - timedelta(days=365)
         
+        # Progress tracking
+        progress_interval = max(1, count // 10)  # Report every 10%
+        
         for i in range(1, count + 1):
+            if i % progress_interval == 0:
+                print(f"    Generating customers: {i:,} / {count:,} ({i*100//count}%)")
+            
             created_date = base_date + timedelta(days=random.randint(0, 365))
             updated_date = created_date + timedelta(
                 days=random.randint(0, (datetime.now() - created_date).days)
@@ -99,7 +105,13 @@ class DataGenerator:
         orders = []
         base_date = datetime.now() - timedelta(days=180)
         
+        # Progress tracking
+        progress_interval = max(1, count // 10)  # Report every 10%
+        
         for i in range(1, count + 1):
+            if i % progress_interval == 0:
+                print(f"    Generating orders: {i:,} / {count:,} ({i*100//count}%)")
+            
             order_date = base_date + timedelta(days=random.randint(0, 180))
             created_at = order_date + timedelta(hours=random.randint(0, 23), minutes=random.randint(0, 59))
             
@@ -124,7 +136,7 @@ class DataGenerator:
                 'payment_method': random.choice(['credit_card', 'debit_card', 'paypal', 'bank_transfer']),
                 'shipping_method': random.choice(['standard', 'express', 'overnight', 'pickup']),
                 'warehouse_code': random.choice(self.data_distributions['warehouse_codes']),
-                'notes': self.fake.text(max_nb_chars=200) if random.random() < 0.2 else None,
+                'notes': self.fake.text(max_nb_chars=200).replace('\n', ' ').replace('\r', ' ') if random.random() < 0.2 else None,
                 'created_at': created_at,
                 'last_modified': last_modified,
                 'shipped_at': last_modified + timedelta(days=random.randint(1, 5)) if random.random() < 0.7 else None
@@ -143,7 +155,13 @@ class DataGenerator:
         products = []
         base_date = datetime.now() - timedelta(days=730)  # 2 years of products
         
+        # Progress tracking
+        progress_interval = max(1, count // 10)  # Report every 10%
+        
         for i in range(1, count + 1):
+            if i % progress_interval == 0:
+                print(f"    Generating products: {i:,} / {count:,} ({i*100//count}%)")
+            
             created_date = base_date + timedelta(days=random.randint(0, 730))
             category = random.choice(self.data_distributions['product_categories'])
             
@@ -159,8 +177,8 @@ class DataGenerator:
                 'weight_kg': round(random.uniform(0.1, 50.0), 2),
                 'dimensions_cm': f"{random.randint(5, 100)}x{random.randint(5, 100)}x{random.randint(5, 100)}",
                 'color': random.choice(['Black', 'White', 'Red', 'Blue', 'Green', 'Yellow', 'Gray', 'Brown']),
-                'product_size': random.choice(['XS', 'S', 'M', 'L', 'XL', 'XXL']) if category == 'Clothing' else None,
-                'description': self.fake.text(max_nb_chars=500),
+                'size': random.choice(['XS', 'S', 'M', 'L', 'XL', 'XXL']) if category == 'Clothing' else None,
+                'description': self.fake.text(max_nb_chars=500).replace('\n', ' ').replace('\r', ' '),
                 'features': self._generate_product_features(category),
                 'is_active': random.choice([True, False]),
                 'is_featured': random.random() < 0.1,
@@ -225,7 +243,13 @@ class DataGenerator:
         order_items = []
         item_id = 1
         
+        # Progress tracking
+        progress_interval = max(1, order_count // 10)  # Report every 10%
+        
         for order_id in range(1, order_count + 1):
+            if order_id % progress_interval == 0:
+                print(f"    Generating order items: {order_id:,} / {order_count:,} orders ({order_id*100//order_count}%)")
+            
             # Each order has 1-5 items
             num_items = random.randint(1, 5)
             selected_products = random.sample(range(1, product_count + 1), 
@@ -475,21 +499,36 @@ class DataExporter:
     
     def export_to_csv(self, data: Dict[str, List[Dict]], prefix: str = '') -> Dict[str, str]:
         """Export test data to CSV files."""
+        from datetime import time
+        
         file_paths = {}
         
         for table_name, records in data.items():
             if not records:
                 continue
             
+            print(f"    Exporting {table_name} to CSV ({len(records):,} records)...")
+            
             filename = f"{prefix}{table_name}.csv" if prefix else f"{table_name}.csv"
             file_path = os.path.join(self.output_dir, filename)
             
             # Convert datetime objects to strings for CSV export
             processed_records = []
-            for record in records:
+            progress_interval = max(1, len(records) // 10)  # Report every 10%
+            
+            for idx, record in enumerate(records, 1):
+                if idx % progress_interval == 0:
+                    print(f"      Processing: {idx:,} / {len(records):,} ({idx*100//len(records)}%)")
                 processed_record = {}
                 for key, value in record.items():
-                    if isinstance(value, (datetime, date)):
+                    if isinstance(value, datetime):
+                        # Format datetime without microseconds for SQL Server compatibility
+                        processed_record[key] = value.strftime('%Y-%m-%d %H:%M:%S')
+                    elif isinstance(value, time):
+                        # Format time as HH:MM:SS without microseconds
+                        processed_record[key] = value.strftime('%H:%M:%S')
+                    elif isinstance(value, date):
+                        # Format date as YYYY-MM-DD
                         processed_record[key] = value.isoformat()
                     elif value is None:
                         processed_record[key] = ''
@@ -505,37 +544,60 @@ class DataExporter:
         
         return file_paths
     
-    def export_to_json(self, data: Dict[str, List[Dict]], filename: str = 'test_data.json') -> str:
+    def export_to_json(self, data: Dict[str, Any], filename: str = 'test_data.json') -> str:
         """Export test data to JSON format."""
         file_path = os.path.join(self.output_dir, filename)
         
-        # Convert datetime objects to strings for JSON serialization
-        json_data = {}
-        for table_name, records in data.items():
-            json_records = []
-            for record in records:
-                json_record = {}
-                for key, value in record.items():
-                    if isinstance(value, (datetime, date)):
-                        json_record[key] = value.isoformat()
-                    else:
-                        json_record[key] = value
-                json_records.append(json_record)
-            json_data[table_name] = json_records
+        def convert_datetime_to_str(obj):
+            """Recursively convert datetime objects to strings."""
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            elif isinstance(obj, dict):
+                return {key: convert_datetime_to_str(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_datetime_to_str(item) for item in obj]
+            else:
+                return obj
+        
+        # Convert all datetime objects to strings
+        json_data = convert_datetime_to_str(data)
         
         with open(file_path, 'w') as f:
             json.dump(json_data, f, indent=2, default=str)
         
         return file_path
     
-    def export_to_sql(self, data: Dict[str, List[Dict]], engine_type: str = 'postgresql') -> str:
+    def export_to_sql(self, data: Dict[str, List[Dict]], engine_type: str = 'postgresql', filename: str = None) -> str:
         """Export test data as SQL INSERT statements."""
-        filename = f"test_data_{engine_type}.sql"
+        if filename is None:
+            filename = f"test_data_{engine_type}.sql"
         file_path = os.path.join(self.output_dir, filename)
+        
+        def format_datetime_for_engine(dt_value, engine):
+            """Format datetime based on database engine requirements."""
+            from datetime import time
+            
+            if isinstance(dt_value, datetime):
+                if engine == 'sqlserver':
+                    # SQL Server prefers format: 'YYYY-MM-DD HH:MM:SS.mmm'
+                    return dt_value.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # Trim to milliseconds
+                elif engine == 'oracle':
+                    # Oracle: TO_TIMESTAMP format
+                    return f"TO_TIMESTAMP('{dt_value.strftime('%Y-%m-%d %H:%M:%S.%f')}', 'YYYY-MM-DD HH24:MI:SS.FF6')"
+                else:
+                    # PostgreSQL, MySQL, DB2: ISO 8601 format
+                    return dt_value.isoformat()
+            elif isinstance(dt_value, time):
+                # Time only - format as HH:MM:SS for all engines
+                return dt_value.strftime('%H:%M:%S')
+            elif isinstance(dt_value, date):
+                # Date only - all engines support YYYY-MM-DD
+                return dt_value.isoformat()
+            return str(dt_value)
         
         with open(file_path, 'w') as f:
             f.write(f"-- Test data for {engine_type.upper()}\n")
-            f.write(f"-- Generated on {datetime.now().isoformat()}\n\n")
+            f.write(f"-- Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
             for table_name, records in data.items():
                 if not records:
@@ -548,16 +610,24 @@ class DataExporter:
                     values = []
                     
                     for value in record.values():
+                        from datetime import time
+                        
                         if value is None:
                             values.append('NULL')
-                        elif isinstance(value, str):
-                            # Escape single quotes
-                            escaped_value = value.replace("'", "''")
-                            values.append(f"'{escaped_value}'")
-                        elif isinstance(value, (datetime, date)):
-                            values.append(f"'{value.isoformat()}'")
                         elif isinstance(value, bool):
-                            values.append('TRUE' if value else 'FALSE')
+                            # Use 0/1 for boolean values (must check before str since bool is subclass of int)
+                            values.append('1' if value else '0')
+                        elif isinstance(value, str):
+                            # Escape single quotes and remove newlines for SQL compatibility
+                            escaped_value = value.replace("'", "''").replace('\n', ' ').replace('\r', '')
+                            values.append(f"'{escaped_value}'")
+                        elif isinstance(value, (datetime, date, time)):
+                            formatted_dt = format_datetime_for_engine(value, engine_type)
+                            # Oracle TO_TIMESTAMP doesn't need quotes (already included)
+                            if engine_type == 'oracle' and isinstance(value, datetime):
+                                values.append(formatted_dt)
+                            else:
+                                values.append(f"'{formatted_dt}'")
                         else:
                             values.append(str(value))
                     
@@ -571,17 +641,35 @@ class DataExporter:
 
 def main():
     """Main function for generating test data."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Generate test data for database replication testing')
+    parser.add_argument('--db-type', choices=['postgresql', 'oracle', 'sqlserver', 'mysql', 'db2'], 
+                        default='postgresql', help='Database type for SQL export (default: postgresql)')
+    parser.add_argument('--size', choices=['small', 'medium', 'large', 'xlarge', 'all'], 
+                        default='medium', help='Dataset size to generate (default: medium)')
+    args = parser.parse_args()
+    
     print("Generating comprehensive test data for end-to-end testing...")
+    print(f"Database type: {args.db_type}")
+    print(f"Dataset size: {args.size}")
     
     # Initialize generator
     generator = DataGenerator(seed=42)
     
     # Generate datasets of different sizes
-    datasets = {
+    all_datasets = {
         'small': {'customers': 100, 'orders': 500, 'products': 200},
         'medium': {'customers': 1000, 'orders': 5000, 'products': 1000},
-        'large': {'customers': 10000, 'orders': 50000, 'products': 5000}
+        'large': {'customers': 10000, 'orders': 50000, 'products': 5000},
+        'xlarge': {'customers': 1100000, 'orders': 5000000, 'products': 500000}
     }
+    
+    # Filter datasets based on size argument
+    if args.size == 'all':
+        datasets = all_datasets
+    else:
+        datasets = {args.size: all_datasets[args.size]}
     
     exporter = DataExporter()
     
@@ -612,7 +700,7 @@ def main():
         # Export to different formats
         csv_files = exporter.export_to_csv(dataset, f"{dataset_name}_")
         json_file = exporter.export_to_json(dataset, f"{dataset_name}_test_data.json")
-        sql_file = exporter.export_to_sql(dataset, 'postgresql')
+        sql_file = exporter.export_to_sql(dataset, args.db_type, f"{dataset_name}_test_data.sql")
         
         print(f"  - Exported to CSV: {len(csv_files)} files")
         print(f"  - Exported to JSON: {json_file}")

@@ -592,7 +592,7 @@ class GlueConnectionRetryHandler:
         Args:
             validation_func: Function to perform validation
             connection_name: Name of the connection to validate
-            *args: Arguments to pass to validation function
+            *args: Arguments to pass to validation function (connection_name will be appended)
             **kwargs: Keyword arguments to pass to validation function
             
         Returns:
@@ -601,11 +601,15 @@ class GlueConnectionRetryHandler:
         Raises:
             GlueConnectionValidationError: If validation fails after retries
         """
+        # Create a wrapper that includes connection_name in the call
+        # The validation function expects (connection_details, connection_name)
+        def _validation_wrapper():
+            return validation_func(*args, connection_name)
+        
         return self.execute_with_retry(
-            validation_func,
+            _validation_wrapper,
             "validate_glue_connection",
-            connection_name=connection_name,
-            *args, **kwargs
+            connection_name=connection_name
         )
     
     def create_secret_with_retry(self, secrets_manager_handler, connection_name: str,

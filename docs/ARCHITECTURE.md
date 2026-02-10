@@ -30,32 +30,9 @@ The AWS Glue Data Replication system is designed as a modular, scalable solution
 
 ### System Context
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     AWS Glue Environment                        │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │              Glue Data Replication Job                  │    │
-│  │                                                         │    │
-│  │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │    │
-│  │  │   Source    │    │    Glue     │    │   Target    │  │    │
-│  │  │  Database   │───▶│ Processing  │───▶│  Database   │  │    │
-│  │  └─────────────┘    └─────────────┘    └─────────────┘  │    │
-│  │                                                         │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                              │                                  │
-│                              ▼                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                 S3 Bookmark Storage                     │    │
-│  │              (Persistent State)                         │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                              │                                  │
-│                              ▼                                  │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                CloudWatch Monitoring                    │    │
-│  │            (Metrics, Logs, Alerting)                    │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-```
+![System Architecture](architecture-diagram.png)
+
+*The diagram shows the high-level system architecture: source databases connect to AWS Glue for processing, which writes to target databases. S3 provides bookmark storage for incremental processing, and CloudWatch handles monitoring, metrics, and alerting.*
 
 ## Modular Architecture
 

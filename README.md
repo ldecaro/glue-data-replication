@@ -1,751 +1,128 @@
-# AWS Glue Data Replication Solution
+# AWS Glue Data Replication
 
-A comprehensive AWS Glue-based data replication solution that supports full-load and incremental data migration across multiple database types with cross-VPC network connectivity. Built with a modular architecture for maintainability and extensibility.
+A comprehensive AWS Glue-based data replication solution that supports full-load and incremental data migration across multiple database types with cross-VPC network connectivity.
 
 ## Features
 
 - **Multi-Database Support**: Oracle, SQL Server, PostgreSQL, DB2, Apache Iceberg
-- **AWS Glue Connection Support**: Create new or use existing AWS Glue Connections for managed JDBC database connectivity with centralized credential management
-- **Cross-VPC Connectivity**: Secure database access across different VPCs
-- **Incremental Processing**: Uses Glue job bookmarks for efficient data synchronization with automatic incremental column detection and manual bookmark configuration ([details](docs/BOOKMARK_DETAILS.md))
+- **AWS Glue Connection Support**: Create new or use existing AWS Glue Connections with centralized credential management
+- **Cross-VPC Connectivity**: Secure database access across different VPCs using VPC endpoints
+- **Incremental Processing**: Automatic incremental column detection with Glue job bookmarks
+- **Parallel Processing**: Partitioned JDBC reads and automatic write parallelization for large datasets
 - **Comprehensive Monitoring**: CloudWatch metrics, dashboards, and alarms
-- **Network Security**: VPC endpoints for private subnet access to AWS services
-- **Error Handling**: Robust error recovery and retry mechanisms with table-level isolation ([details](docs/ERROR_HANDLING_GUIDE.md))
-- **Performance Optimization**: Configurable worker types and parallel processing
-- **Modular Architecture**: Clean separation of concerns with focused, maintainable modules
+- **Error Handling**: Robust error recovery with table-level isolation
+- **Modular Architecture**: Clean separation of concerns for maintainability
 
 ## Architecture
 
-### High-Level Architecture
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Source DB     │    │   AWS Glue Job   │    │   Target DB     │
-│  (Any VPC)      │◄──►│  (Private Subnet)│◄──►│  (Any VPC)      │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                              │
-                              ▼
-                       ┌──────────────────┐
-                       │  AWS Services    │
-                       │  - Glue API      │
-                       │  - Glue Connections │
-                       │  - S3 (optional) │
-                       └──────────────────┘
-```
+![AWS Glue Data Replication Architecture](docs/architecture-diagram.png)
 
-### Connection Strategy Architecture
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Parameter Processing Layer                    │
-├─────────────────────────────────────────────────────────────────┤
-│  JobConfigurationParser (Enhanced)                              │
-│  - Parse createSourceConnection/createTargetConnection          │
-│  - Parse useSourceConnection/useTargetConnection                │
-│  - Validate parameter combinations                              │
-│  - Route to appropriate connection strategy                     │
-└─────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Connection Management Layer                     │
-├─────────────────────────────────────────────────────────────────┤
-│  UnifiedConnectionManager (Enhanced)                            │
-│  ├─ GlueConnectionManager (Enhanced)                            │
-│  │  ├─ create_glue_connection()                                 │
-│  │  ├─ use_existing_glue_connection()                           │
-│  │  └─ setup_jdbc_with_connection() (existing)                  │
-│  ├─ JdbcConnectionManager (existing)                            │
-│  └─ IcebergConnectionHandler (unchanged)                       │
-└─────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Database Access Layer                        │
-├─────────────────────────────────────────────────────────────────┤
-│  JDBC Databases          │         Iceberg Tables              │
-│  - Oracle                │         - Existing mechanism        │
-│  - SQL Server            │         - No changes required       │
-│  - PostgreSQL            │                                     │
-│  - DB2                   │                                     │
-└─────────────────────────────────────────────────────────────────┘
-```
+The solution connects source databases (Oracle, SQL Server, PostgreSQL, DB2, Iceberg) to target databases through an AWS Glue job running in a private subnet. The job integrates with S3 for scripts and bookmarks, Secrets Manager for credentials, CloudWatch for monitoring, and the Glue Data Catalog for Iceberg tables. VPC endpoints enable secure connectivity in private subnets.
 
-### Modular Code Architecture
-```
-src/glue_job/
-├── main.py                    # Entry point and orchestration
-├── config/                    # Configuration management
-│   ├── job_config.py          # Job configuration dataclasses
-│   ├── database_engines.py    # Database engine management
-│   └── parsers.py             # Configuration parsing
-├── database/                  # Database operations
-│   ├── connection_manager.py  # Connection management
-│   ├── schema_validator.py    # Schema validation
-│   ├── migration.py           # Data migration logic
-│   └── incremental_detector.py # Incremental processing
-├── storage/                   # Storage and bookmarks
-│   ├── s3_bookmark.py         # S3 bookmark operations
-│   └── bookmark_manager.py    # Bookmark lifecycle
-├── monitoring/                # Observability
-│   ├── logging.py             # Structured logging
-│   ├── metrics.py             # CloudWatch metrics
-│   └── progress.py            # Progress tracking
-├── network/                   # Network and error handling
-│   ├── error_handler.py       # Error classification
-│   └── retry_handler.py       # Retry mechanisms
-└── utils/                     # Utilities
-    └── s3_utils.py            # S3 operations
-```
+## Supported Databases
 
-## AWS Glue Connections Support
-
-### Overview
-
-The solution supports three connection strategies for JDBC databases (Oracle, SQL Server, PostgreSQL, DB2):
-
-1. **Create New Glue Connections**: Automatically create AWS Glue Connections during job execution
-2. **Use Existing Glue Connections**: Leverage pre-configured AWS Glue Connections
-3. **Direct JDBC Connections**: Traditional direct database connections (existing behavior)
-
-**Note**: Iceberg connections continue using the existing connection mechanism and are not affected by Glue Connection parameters.
-
-### Connection Strategy Decision Matrix
-
-| Source Engine | Target Engine | Glue Connection Parameters | Strategy |
-|---------------|---------------|---------------------------|----------|
-| JDBC          | JDBC          | createConnection=true     | Create new Glue Connection |
-| JDBC          | JDBC          | useConnection=name        | Use existing Glue Connection |
-| JDBC          | JDBC          | No Glue parameters        | Direct JDBC (existing) |
-| JDBC          | Iceberg       | Any Glue parameters       | Source: Glue/JDBC, Target: Iceberg |
-| Iceberg       | JDBC          | Any Glue parameters       | Source: Iceberg, Target: Glue/JDBC |
-| Iceberg       | Iceberg       | Any Glue parameters       | Both: Iceberg (parameters ignored) |
-
-### Glue Connection Parameters
-
-#### Create New Connections
-```json
-{
-  "createSourceConnection": "true",
-  "createTargetConnection": "true"
-}
-```
-
-#### Use Existing Connections
-```json
-{
-  "useSourceConnection": "my-source-connection",
-  "useTargetConnection": "my-target-connection"
-}
-```
-
-#### Parameter Validation Rules
-- `createSourceConnection` and `useSourceConnection` are mutually exclusive
-- `createTargetConnection` and `useTargetConnection` are mutually exclusive
-- Glue Connection parameters are ignored for Iceberg engines (with warning)
-- When `createConnection=true`, all standard JDBC parameters must be present
-- When `useConnection=name`, only the connection name is required
-
-### Benefits of AWS Glue Connections
-
-#### Centralized Credential Management
-- Store database credentials securely in AWS Glue
-- Centralized management across multiple jobs
-- Integration with AWS Secrets Manager for enhanced security
-
-#### Network Configuration
-- Pre-configured VPC and security group settings
-- Simplified cross-VPC database access
-- Reusable network configurations
-
-#### Operational Efficiency
-- Reduced parameter complexity for jobs
-- Standardized connection configurations
-- Easier credential rotation and management
-
-### AWS Secrets Manager Integration
-
-When creating new Glue Connections (`createSourceConnection=true` or `createTargetConnection=true`), the system automatically integrates with AWS Secrets Manager for enhanced security:
-
-#### Automatic Secret Creation
-- Database credentials are stored in AWS Secrets Manager
-- Secret path: `/aws-glue/{connection-name}`
-- JSON format: `{"username": "db_user", "password": "db_password"}`
-- Glue Connection references the secret instead of storing credentials directly
-
-#### Security Benefits
-- **Encryption at Rest**: Credentials encrypted using AWS KMS
-- **Encryption in Transit**: Secure API calls to Secrets Manager
-- **Access Control**: Fine-grained IAM permissions for secret access
-- **Audit Trail**: CloudTrail logging for all secret operations
-- **Rotation Support**: Native AWS credential rotation capabilities
-
-#### Secret Management
-- **Automatic Cleanup**: Secrets are cleaned up if connection creation fails
-- **Unique Naming**: Timestamp-based naming prevents conflicts
-- **Centralized Storage**: All connection secrets stored under `/aws-glue/` prefix
-- **Cross-Job Reuse**: Secrets can be referenced by multiple Glue jobs
-
-#### Required IAM Permissions for Secrets Manager
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:CreateSecret",
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:DescribeSecret",
-        "secretsmanager:DeleteSecret"
-      ],
-      "Resource": "arn:aws:secretsmanager:*:*:secret:/aws-glue/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "kms:Decrypt",
-        "kms:GenerateDataKey"
-      ],
-      "Resource": "arn:aws:kms:*:*:key/*",
-      "Condition": {
-        "StringEquals": {
-          "kms:ViaService": "secretsmanager.*.amazonaws.com"
-        }
-      }
-    }
-  ]
-}
-```
-
-#### Secret Structure Example
-```json
-{
-  "username": "mydbuser",
-  "password": "mydbpassword"
-}
-```
-
-#### Credential Rotation
-- Use AWS Secrets Manager automatic rotation features
-- Update Glue Connection to reference new secret versions
-- No job parameter changes required for rotation
-
-### Differences: Glue Connections vs Direct JDBC
-
-| Aspect | Glue Connections | Direct JDBC |
-|--------|------------------|-------------|
-| **Credential Storage** | AWS Glue/Secrets Manager | CloudFormation parameters |
-| **Network Configuration** | Pre-configured in connection | Specified per job |
-| **Parameter Complexity** | Minimal (connection name only) | Full JDBC details required |
-| **Reusability** | High (across multiple jobs) | Low (job-specific) |
-| **Security** | Centralized, encrypted | Parameter-based |
-| **Management** | AWS Console/API | CloudFormation templates |
-| **Credential Rotation** | Centralized process | Per-job update required |
+| Database | Engine Type | Notes |
+|----------|-------------|-------|
+| Oracle | `oracle` | JDBC connection with Oracle driver |
+| SQL Server | `sqlserver` | JDBC connection with Microsoft driver |
+| PostgreSQL | `postgresql` | JDBC connection with PostgreSQL driver |
+| IBM DB2 | `db2` | JDBC connection with IBM driver |
+| Apache Iceberg | `iceberg` | Uses Glue Data Catalog and Spark |
 
 ## Quick Start
 
 ### Prerequisites
 
 - AWS CLI configured with appropriate permissions
-- S3 bucket for hosting templates and scripts (will be created automatically if needed)
+- S3 bucket for hosting templates and scripts
 - Database connection details
-- VPC configuration (if using cross-VPC setup)
+- VPC configuration (for cross-VPC setup)
 
-### 1. Clone Repository
+### Deploy
 
 ```bash
+# Clone repository
 git clone <repository-url>
 cd glue-data-replication
-```
 
-### 2. Deploy with Automatic Asset Upload
-
-```bash
-# Single command deployment (uploads assets automatically)
-./deploy.sh -s my-glue-replication -b [your-bucket-name] -p my-parameters.json
-```
-
-**Or manually upload assets first (optional):**
-```bash
-# Upload modular Glue job structure
-./infrastructure/scripts/upload-modular-assets.sh [your-bucket-name] --include-drivers
-
-# Then deploy without upload
-./deploy.sh -s my-glue-replication -b [your-bucket-name] -p my-parameters.json --skip-upload
-```
-
-### 3. Configure Parameters
-
-Copy and modify the example parameter file:
-
-```bash
+# Configure parameters
 cp examples/sqlserver-to-sqlserver-parameters.json my-parameters.json
-# Edit my-parameters.json with your specific values
-```
+# Edit my-parameters.json with your values
 
-**Note**: The `GlueJobScriptS3Path` parameter will be automatically updated by the deploy script to point to the correct S3 location.
+# Deploy (uploads assets automatically)
+./deploy.sh -s my-glue-replication -b my-bucket-name -p my-parameters.json
 
-### 4. Deploy Stack
-
-```bash
-./deploy.sh -s my-glue-replication -b [your-bucket-name] -p my-parameters.json
-```
-
-### 5. Run Job
-
-```bash
+# Run job
 aws glue start-job-run --job-name my-job-name
 ```
 
-## Documentation
+> **Note**: Replace placeholder values like `my-bucket-name` with your actual AWS resource names.
 
-### Core Documentation
-- **[Deployment Guide](DEPLOYMENT_GUIDE.md)**: Complete deployment instructions
-- **[Quick Start Guide](QUICK_START_GUIDE.md)**: Step-by-step setup walkthrough
-- **[Architecture Guide](docs/ARCHITECTURE.md)**: Technical architecture and design decisions
-
-### Configuration and Setup
-- **[Parameter Reference](docs/PARAMETER_REFERENCE.md)**: Complete parameter documentation
-- **[Database Configuration Guide](docs/DATABASE_CONFIGURATION_GUIDE.md)**: Database-specific setup
-- **[Iceberg Usage Guide](docs/ICEBERG_USAGE_GUIDE.md)**: Apache Iceberg configuration and best practices
-- **[Network Configuration Guide](docs/NETWORK_CONFIGURATION_GUIDE.md)**: VPC and networking setup
-- **[Bookmark Details](docs/BOOKMARK_DETAILS.md)**: Job bookmark system and incremental loading strategies
-- **[Manual Bookmark Configuration](docs/MANUAL_BOOKMARK_CONFIGURATION.md)**: Comprehensive guide for manual bookmark configuration
-- **[JDBC Data Type Mapping Reference](docs/JDBC_DATA_TYPE_MAPPING_REFERENCE.md)**: Complete JDBC data type to strategy mapping
-
-
-### Operations and Monitoring
-- **[Error Handling Guide](docs/ERROR_HANDLING_GUIDE.md)**: Comprehensive error handling during data transfer
-- **[Glue Connections Troubleshooting Guide](docs/GLUE_CONNECTIONS_TROUBLESHOOTING_GUIDE.md)**: Comprehensive troubleshooting for Glue Connections and Secrets Manager
-- **[Observability Guide](docs/OBSERVABILITY_GUIDE.md)**: Monitoring and alerting setup
-- **[Testing Guide](docs/TESTING_GUIDE.md)**: Testing procedures and validation
-- **[DevOps Deployment Guide](docs/DEVOPS_DEPLOYMENT_GUIDE.md)**: CI/CD and automation
-
-### API Documentation
-- **[Module API Reference](#module-api-reference)**: Public interfaces for all modules
+For detailed setup instructions, see the [Quick Start Guide](docs/QUICK_START_GUIDE.md).
 
 ## Project Structure
 
 ```
 aws-glue-data-replication/
-├── src/
-│   └── glue_job/                           # Modular Glue job components
-│       ├── main.py                         # Entry point
-│       ├── config/                         # Configuration management
-│       ├── database/                       # Database operations
-│       ├── storage/                        # Storage and bookmarks
-│       ├── monitoring/                     # Observability
-│       ├── network/                        # Network and error handling
-│       └── utils/                          # Utilities
-├── infrastructure/
-│   ├── cloudformation/                     # CloudFormation templates
-│   ├── scripts/                            # Deployment scripts
-│   └── iam/                                # IAM policies
-├── tests/                                  # Test suites
-├── docs/                                   # Documentation
-├── examples/                               # Configuration examples
-└── config/                                 # Static configuration files
+├── src/glue_job/           # Glue job modules (config, database, storage, monitoring, network)
+├── infrastructure/         # CloudFormation templates, deployment scripts, IAM policies
+├── docs/                   # Documentation
+├── examples/               # Parameter file examples
+├── tests/                  # Test suites
+└── config/                 # Static configuration files
 ```
 
-## Module API Reference
+## Documentation
 
-### Configuration Modules (`glue_job.config`)
+### Getting Started
+- [Quick Start Guide](docs/QUICK_START_GUIDE.md) - Step-by-step setup walkthrough
+- [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) - Complete deployment instructions
+- [Parameter Reference](docs/PARAMETER_REFERENCE.md) - CloudFormation parameter documentation
 
-#### JobConfig
-```python
-from glue_job.config.job_config import JobConfig, ConnectionConfig, NetworkConfig
+### Configuration
+- [Database Configuration Guide](docs/DATABASE_CONFIGURATION_GUIDE.md) - Database-specific setup
+- [Network Configuration Guide](docs/NETWORK_CONFIGURATION_GUIDE.md) - VPC and networking
+- [Iceberg Usage Guide](docs/ICEBERG_USAGE_GUIDE.md) - Apache Iceberg configuration
+- [Bookmark Details](docs/BOOKMARK_DETAILS.md) - Incremental loading strategies
+- [Configuration Examples](examples/README.md) - Example parameter files
 
-# Core configuration dataclasses
-config = JobConfig(
-    job_name="my-job",
-    source_config=ConnectionConfig(...),
-    target_config=ConnectionConfig(...)
-)
-```
+### Operations
+- [Observability Guide](docs/OBSERVABILITY_GUIDE.md) - Monitoring and alerting
+- [Progress Tracking Guide](docs/PROGRESS_TRACKING_GUIDE.md) - Real-time progress monitoring
+- [Error Handling Guide](docs/ERROR_HANDLING_GUIDE.md) - Error recovery patterns
+- [Glue Connections Troubleshooting](docs/GLUE_CONNECTIONS_TROUBLESHOOTING_GUIDE.md) - Connection issues
 
-#### DatabaseEngineManager
-```python
-from glue_job.config.database_engines import DatabaseEngineManager
+### Development
+- [Architecture Guide](docs/ARCHITECTURE.md) - Technical design decisions
+- [API Reference](docs/API_REFERENCE.md) - Module interfaces
+- [Testing Guide](docs/TESTING_GUIDE.md) - Testing procedures
+- [DevOps Deployment Guide](docs/DEVOPS_DEPLOYMENT_GUIDE.md) - CI/CD automation
 
-engine_manager = DatabaseEngineManager()
-driver_class = engine_manager.get_driver_class("sqlserver")
-connection_url = engine_manager.build_connection_url(config)
-```
+## Key Capabilities
 
-### Database Modules (`glue_job.database`)
+### Connection Strategies
 
-#### ConnectionManager
-```python
-from glue_job.database.connection_manager import JdbcConnectionManager
+The solution supports three connection strategies for JDBC databases:
 
-conn_manager = JdbcConnectionManager(glue_context)
-df = conn_manager.create_connection(connection_config)
-```
+1. **Create New Glue Connections** - Automatically create connections with Secrets Manager integration
+2. **Use Existing Glue Connections** - Leverage pre-configured connections
+3. **Direct JDBC Connections** - Traditional direct database connections
 
-#### DataMigrator
-```python
-from glue_job.database.migration import FullLoadDataMigrator, IncrementalDataMigrator
+### Network Options
 
-# Full load migration
-full_migrator = FullLoadDataMigrator(glue_context)
-metrics = full_migrator.execute_full_load(source_df, target_config)
+| Configuration | VPC Endpoints Required |
+|---------------|----------------------|
+| Same VPC | None |
+| Cross-VPC | Glue VPC endpoint |
+| Private Subnets | Glue + S3 VPC endpoints |
 
-# Incremental migration
-incr_migrator = IncrementalDataMigrator(glue_context)
-metrics = incr_migrator.execute_incremental_load(source_df, target_config, bookmark)
-```
+### Worker Types
 
-### Storage Modules (`glue_job.storage`)
-
-#### BookmarkManager
-```python
-from glue_job.storage.bookmark_manager import JobBookmarkManager
-
-bookmark_manager = JobBookmarkManager(s3_config)
-state = bookmark_manager.get_bookmark_state("table_name")
-bookmark_manager.update_bookmark_state("table_name", new_state)
-```
-
-#### Manual Bookmark Configuration
-```python
-from glue_job.storage.manual_bookmark_config import ManualBookmarkConfig, BookmarkStrategyResolver
-
-# Create manual configurations
-manual_configs = {
-    "employees": ManualBookmarkConfig("employees", "updated_at"),
-    "orders": ManualBookmarkConfig("orders", "order_id")
-}
-
-# Initialize strategy resolver
-resolver = BookmarkStrategyResolver(manual_configs, structured_logger)
-
-# Resolve strategy for a table
-strategy, column, is_manual = resolver.resolve_strategy("employees", jdbc_connection)
-```
-
-#### S3BookmarkStorage
-```python
-from glue_job.storage.s3_bookmark import S3BookmarkStorage
-
-s3_storage = S3BookmarkStorage(s3_config)
-bookmark = s3_storage.read_bookmark("table_name")
-s3_storage.write_bookmark(bookmark_state)
-```
-
-### Monitoring Modules (`glue_job.monitoring`)
-
-#### StructuredLogger
-```python
-from glue_job.monitoring.logging import StructuredLogger
-
-logger = StructuredLogger("my-job")
-logger.info("Processing started", extra={"table": "users", "rows": 1000})
-```
-
-#### MetricsPublisher
-```python
-from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
-
-metrics = CloudWatchMetricsPublisher()
-metrics.publish_metric("RowsProcessed", 1000, "Count")
-```
-
-### Network Modules (`glue_job.network`)
-
-#### ErrorHandler
-```python
-from glue_job.network.error_handler import NetworkErrorHandler
-from glue_job.network.retry_handler import ConnectionRetryHandler
-
-error_handler = NetworkErrorHandler()
-retry_handler = ConnectionRetryHandler(max_retries=3)
-```
-
-### Utility Modules (`glue_job.utils`)
-
-#### S3Utilities
-```python
-from glue_job.utils.s3_utils import S3PathUtilities, EnhancedS3ParallelOperations
-
-s3_utils = S3PathUtilities()
-valid_path = s3_utils.validate_s3_path("s3://bucket/key")
-
-s3_ops = EnhancedS3ParallelOperations()
-result = s3_ops.parallel_upload(files, bucket)
-```
-
-## Supported Databases
-
-| Database | Engine Type | JDBC Driver Required | Notes |
-|----------|-------------|---------------------|-------|
-| Oracle | `oracle` | Oracle JDBC Driver | Traditional JDBC connection |
-| SQL Server | `sqlserver` | Microsoft JDBC Driver | Traditional JDBC connection |
-| PostgreSQL | `postgresql` | PostgreSQL JDBC Driver | Traditional JDBC connection |
-| IBM DB2 | `db2` | IBM DB2 JDBC Driver | Traditional JDBC connection |
-| Apache Iceberg | `iceberg` | No | Uses Glue Data Catalog and Spark |
-
-## Configuration Options
-
-### Network Configuration
-
-- **Same VPC**: Simple configuration, no VPC endpoints needed
-- **Cross-VPC**: Requires Glue network connections and VPC endpoints
-- **Private Subnets**: Requires VPC endpoints for AWS service access
-
-### VPC Endpoints
-
-For jobs running in private subnets:
-
-- **Glue VPC Endpoint**: Required for Glue API access (`CreateSourceGlueVpcEndpoint: YES`)
-- **S3 VPC Endpoint**: Optional for JDBC driver access (`CreateSourceS3VpcEndpoint: YES`)
-
-### Worker Configuration
-
-| Worker Type | vCPU | Memory | Use Case |
-|-------------|------|--------|----------|
+| Type | vCPU | Memory | Use Case |
+|------|------|--------|----------|
+| G.025X | 2 | 4 GB | Light workloads |
 | G.1X | 4 | 16 GB | Standard workloads |
 | G.2X | 8 | 32 GB | Memory-intensive |
-| G.025X | 2 | 4 GB | Light workloads |
-
-## Monitoring
-
-The solution includes comprehensive monitoring:
-
-- **CloudWatch Logs**: Job execution logs with structured logging
-- **CloudWatch Metrics**: Custom metrics for job performance
-- **CloudWatch Dashboard**: Visual monitoring interface
-- **CloudWatch Alarms**: Automated failure notifications
-
-## Security Features
-
-- **IAM Roles**: Least-privilege access for Glue jobs
-- **VPC Endpoints**: Private connectivity to AWS services
-- **Security Groups**: Network-level access control
-- **Encryption**: Support for encrypted databases and S3 buckets
-
-## Cost Optimization
-
-- **Job Bookmarks**: Incremental processing reduces data transfer
-- **Worker Scaling**: Configurable worker count and type
-- **VPC Endpoints**: Optional based on security requirements
-- **Log Retention**: Configurable retention periods
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Template Size Error**: Use S3-hosted template URL
-2. **Glue API Timeout**: Enable Glue VPC endpoint
-3. **Mock Subnet Error**: Update to latest Glue script
-4. **Permission Denied**: Verify IAM role permissions
-
-### Glue Connection Issues
-
-#### Connection Creation Failures
-```
-Error: Failed to create Glue Connection 'my-connection'
-```
-**Solutions**:
-- Verify IAM permissions for `glue:CreateConnection`
-- Check VPC and subnet configurations
-- Ensure security group allows database access
-- Validate JDBC connection string format
-
-#### Connection Not Found
-```
-Error: Glue Connection 'my-connection' does not exist
-```
-**Solutions**:
-- Verify connection name spelling and case sensitivity
-- Check connection exists in the correct AWS region
-- Ensure IAM permissions for `glue:GetConnection`
-- Validate connection is in the same AWS account
-
-#### Parameter Validation Errors
-```
-Error: Cannot specify both createSourceConnection and useSourceConnection
-```
-**Solutions**:
-- Use only one connection strategy per source/target
-- Remove conflicting parameters from configuration
-- Review parameter validation rules in documentation
-
-#### Iceberg + Glue Connection Warnings
-```
-Warning: Glue Connection parameters ignored for Iceberg engine
-```
-**Expected Behavior**:
-- Iceberg connections use existing mechanism
-- Glue Connection parameters are safely ignored
-- No action required - this is normal behavior
-
-#### Network Connectivity Issues
-```
-Error: Connection timeout when using Glue Connection
-```
-**Solutions**:
-- Verify Glue Connection network configuration
-- Check security group rules allow database port access
-- Ensure VPC routing allows connectivity to database
-- Test connection using AWS Glue console
-
-#### Permission Issues
-```
-Error: Access denied when creating/using Glue Connection
-```
-**Required IAM Permissions**:
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "glue:CreateConnection",
-        "glue:GetConnection",
-        "glue:GetConnections"
-      ],
-      "Resource": "*"
-    }
-  ]
-}
-```
-
-### AWS Secrets Manager Issues
-
-#### Secret Creation Failures
-```
-Error: Failed to create AWS Secrets Manager secret for connection 'my-connection'
-```
-**Solutions**:
-- Verify IAM permissions for `secretsmanager:CreateSecret`
-- Check AWS Secrets Manager service availability in region
-- Ensure secret name doesn't already exist
-- Validate secret name follows AWS naming conventions
-
-#### Secret Access Denied
-```
-Error: Access denied when accessing secret '/aws-glue/my-connection'
-```
-**Required IAM Permissions**:
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "secretsmanager:CreateSecret",
-        "secretsmanager:GetSecretValue",
-        "secretsmanager:DescribeSecret"
-      ],
-      "Resource": "arn:aws:secretsmanager:*:*:secret:/aws-glue/*"
-    }
-  ]
-}
-```
-
-#### Secret Cleanup Issues
-```
-Error: Failed to cleanup secret after connection creation failure
-```
-**Solutions**:
-- Check IAM permissions for `secretsmanager:DeleteSecret`
-- Manually delete orphaned secrets via AWS Console
-- Review CloudWatch logs for detailed error information
-- Ensure proper error handling in job configuration
-
-See the [Deployment Guide](DEPLOYMENT_GUIDE.md) for detailed troubleshooting steps and the [Glue Connections Troubleshooting Guide](docs/GLUE_CONNECTIONS_TROUBLESHOOTING_GUIDE.md) for specific Glue Connection and Secrets Manager issues.
-
-## Examples
-
-### SQL Server to SQL Server
-```bash
-# See examples/sqlserver-to-sqlserver-parameters.json
-```
-
-### Oracle to Oracle
-```bash
-# Configure source as oracle, target as oracle
-# Ensure JDBC driver is uploaded to S3
-# See examples/oracle-to-oracle-parameters.json
-```
-
-### Cross-VPC Replication
-```bash
-# Configure SourceVpcId and TargetVpcId parameters
-# Enable appropriate VPC endpoints (AWS Glue & Amazon S3)
-```
-
-### Iceberg Table Replication
-```bash
-# Iceberg as target (traditional database to Iceberg)
-# Configure target engine as "iceberg" with warehouse location
-# See examples/sqlserver-to-iceberg-parameters.json
-```
-
-### AWS Glue Connection Examples
-
-#### Create New Glue Connections
-```json
-{
-  "ParameterKey": "createSourceConnection",
-  "ParameterValue": "true"
-},
-{
-  "ParameterKey": "createTargetConnection", 
-  "ParameterValue": "true"
-},
-{
-  "ParameterKey": "SOURCE_CONNECTION_STRING",
-  "ParameterValue": "jdbc:oracle:thin:@source-host:1521:ORCL"
-},
-{
-  "ParameterKey": "TARGET_CONNECTION_STRING",
-  "ParameterValue": "jdbc:postgresql://target-host:5432/mydb"
-}
-```
-
-#### Use Existing Glue Connections
-```json
-{
-  "ParameterKey": "useSourceConnection",
-  "ParameterValue": "my-oracle-connection"
-},
-{
-  "ParameterKey": "useTargetConnection",
-  "ParameterValue": "my-postgres-connection"
-}
-```
-
-#### Mixed Connection Strategies
-```json
-{
-  "ParameterKey": "createSourceConnection",
-  "ParameterValue": "true"
-},
-{
-  "ParameterKey": "useTargetConnection",
-  "ParameterValue": "existing-target-connection"
-},
-{
-  "ParameterKey": "SOURCE_CONNECTION_STRING",
-  "ParameterValue": "jdbc:sqlserver://source-host:1433;databaseName=mydb"
-}
-```
-
-### Manual Bookmark Configuration
-```bash
-# SQLServer to SQLServer with manual bookmark configuration
-# See examples/sqlserver-to-sqlserver-parameters-with-manual-bookmarks.json
-
-# Manual bookmark is a configuration in the json file to define which tables and columns are used for bookmark. If not set, automatic column bookmark identification takes place. Example:
-
-#  {
-#    "ParameterKey": "ManualBookmarkConfig",
-#    "ParameterValue": "{\"customers\":\"customer_id\"}"
-#  }
-
-```
 
 ## Contributing
 
@@ -759,14 +136,11 @@ See the [Deployment Guide](DEPLOYMENT_GUIDE.md) for detailed troubleshooting ste
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## Support
-
-For issues or questions:
-1. Check the documentation in the `docs/` directory
-2. Review CloudWatch logs for error details
-3. Verify configuration parameters
-4. Ensure all prerequisites are met
-
 ---
 
-**Important**: Replace `[your-bucket-name]` with your actual S3 bucket name in all commands and configuration files.
+<p align="center">
+  Implemented using
+  <a href="https://kiro.dev">
+    <img src="https://kiro.dev/favicon.ico" alt="Kiro" height="32" style="vertical-align: middle;" />
+  </a>
+</p>

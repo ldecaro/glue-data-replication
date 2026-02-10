@@ -271,6 +271,90 @@ class JobConfigurationParser:
         """Parse network configuration parameters"""
 ```
 
+### MigrationPerformanceConfig
+
+Configuration for migration performance optimizations including counting strategy and progress tracking.
+
+```python
+from glue_job.config.job_config import MigrationPerformanceConfig
+```
+
+#### MigrationPerformanceConfig Class
+
+```python
+@dataclass
+class MigrationPerformanceConfig:
+    """Configuration for migration performance optimizations."""
+    
+    # Counting strategy configuration
+    counting_strategy: str = "auto"  # "immediate", "deferred", or "auto"
+    counting_threshold_rows: int = 1_000_000
+    
+    # Progress tracking configuration
+    progress_update_interval: int = 60  # seconds
+    progress_batch_size: int = 100_000  # rows
+    enable_progress_logging: bool = True
+    
+    # Metrics configuration
+    enable_detailed_metrics: bool = True
+    
+    def validate(self) -> bool:
+        """
+        Validate configuration parameters.
+        
+        Returns:
+            True if configuration is valid
+            
+        Raises:
+            ValueError: If configuration parameters are invalid
+        """
+        
+    def to_counting_strategy_config(self) -> CountingStrategyConfig:
+        """Convert to CountingStrategyConfig for use with CountingStrategy"""
+        
+    def to_streaming_progress_config(self) -> StreamingProgressConfig:
+        """Convert to StreamingProgressConfig for use with StreamingProgressTracker"""
+```
+
+**Configuration Parameters:**
+
+**Counting Strategy:**
+- `counting_strategy`: Strategy selection ("immediate", "deferred", or "auto")
+  - `immediate`: Count rows before write (suitable for small datasets)
+  - `deferred`: Count rows after write from target (optimal for large datasets)
+  - `auto`: Automatically select based on dataset size
+- `counting_threshold_rows`: Row count threshold for auto strategy selection (default: 1,000,000)
+
+**Progress Tracking:**
+- `progress_update_interval`: Seconds between progress updates (default: 60)
+- `progress_batch_size`: Rows to process before checking for update (default: 100,000)
+- `enable_progress_logging`: Enable structured logging of progress (default: True)
+
+**Metrics:**
+- `enable_detailed_metrics`: Enable detailed CloudWatch metrics publishing (default: True)
+
+**Usage Example:**
+
+```python
+from glue_job.config.job_config import MigrationPerformanceConfig
+
+# Create configuration for large dataset migration
+perf_config = MigrationPerformanceConfig(
+    counting_strategy="deferred",
+    counting_threshold_rows=1_000_000,
+    progress_update_interval=30,
+    progress_batch_size=50_000,
+    enable_progress_logging=True,
+    enable_detailed_metrics=True
+)
+
+# Validate configuration
+if perf_config.validate():
+    # Use configuration in migration
+    counting_config = perf_config.to_counting_strategy_config()
+    progress_config = perf_config.to_streaming_progress_config()
+```
+
 ## Database Modules (`glue_job.database`)
 
 ### ConnectionManager
@@ -429,6 +513,183 @@ class IncrementalColumnDetector:
     def get_column_statistics(self, df: DataFrame, column_name: str) -> Dict[str, Any]:
         """Get statistics for incremental column"""
 ```
+
+### CountingStrategy
+
+Determines and executes the optimal row counting strategy based on dataset characteristics and configuration to minimize redundant data reads.
+
+```python
+from glue_job.database.counting_strategy import CountingStrategy, CountingStrategyType, CountingStrategyConfig
+```
+
+#### CountingStrategyType Enum
+
+```python
+class CountingStrategyType(Enum):
+    """Types of counting strategies."""
+    IMMEDIATE = "immediate"  # Count before write (suitable for small datasets)
+    DEFERRED = "deferred"    # Count after write from target (optimal for large datasets)
+    AUTO = "auto"            # Automatically select based on dataset characteristics
+```
+
+#### CountingStrategyConfig Class
+
+```python
+@dataclass
+class CountingStrategyConfig:
+    """Configuration for counting strategy selection."""
+    strategy_type: CountingStrategyType = CountingStrategyType.AUTO
+    size_threshold_rows: int = 1_000_000  # Threshold for auto selection
+    force_immediate: bool = False
+    force_deferred: bool = False
+    
+    def validate(self):
+        """
+        Validate configuration.
+        
+        Raises:
+            ValueError: If both force_immediate and force_deferred are True
+        """
+```
+
+**Configuration Parameters:**
+- `strategy_type`: Strategy selection mode (AUTO, IMMEDIATE, or DEFERRED)
+- `size_threshold_rows`: Row count threshold for automatic strategy selection (default: 1,000,000)
+- `force_immediate`: Force immediate counting regardless of dataset size (default: False)
+- `force_deferred`: Force deferred counting regardless of dataset size (default: False)
+
+#### CountingStrategy Class
+
+```python
+class CountingStrategy:
+    """Manages row counting strategy selection and execution."""
+    
+    def __init__(self, config: CountingStrategyConfig, 
+                 metrics_publisher: CloudWatchMetricsPublisher,
+                 structured_logger: StructuredLogger):
+        """
+        Initialize counting strategy manager.
+        
+        Args:
+            config: Counting strategy configuration
+            metrics_publisher: CloudWatch metrics publisher
+            structured_logger: Structured logger instance
+        """
+        
+    def select_strategy(self, df: Optional[DataFrame], table_name: str, 
+                       engine_type: str, estimated_size: Optional[int] = None) -> CountingStrategyType:
+        """
+        Select the optimal counting strategy based on dataset characteristics.
+        
+        Args:
+            df: Source DataFrame (may be None for deferred-only scenarios)
+            table_name: Name of the table being processed
+            engine_type: Database engine type (e.g., 'oracle', 'iceberg')
+            estimated_size: Estimated dataset size in rows (optional)
+            
+        Returns:
+            Selected counting strategy type
+            
+        Strategy Selection Logic:
+        - If force_immediate is True: Returns IMMEDIATE
+        - If force_deferred is True: Returns DEFERRED
+        - If engine is Iceberg: Returns DEFERRED (optimal for Iceberg metadata)
+        - If estimated_size >= size_threshold_rows: Returns DEFERRED
+        - Otherwise: Returns IMMEDIATE
+        """
+        
+    def execute_immediate_count(self, df: DataFrame, table_name: str) -> int:
+        """
+        Execute immediate counting (before write).
+        
+        Args:
+            df: Source DataFrame to count
+            table_name: Name of the table
+            
+        Returns:
+            Row count
+            
+        Note: Triggers Spark action that reads entire dataset
+        """
+        
+    def execute_deferred_count(self, connection_manager: Any, 
+                              target_config: ConnectionConfig,
+                              table_name: str,
+                              engine_type: str) -> int:
+        """
+        Execute deferred counting (after write from target).
+        
+        Args:
+            connection_manager: Connection manager instance
+            target_config: Target database configuration
+            table_name: Name of the table
+            engine_type: Target engine type
+            
+        Returns:
+            Row count from target database
+            
+        Note: Uses lightweight metadata query on target database
+        """
+        
+    def _count_from_jdbc_target(self, connection_manager: Any,
+                               target_config: ConnectionConfig,
+                               table_name: str) -> int:
+        """Count rows from JDBC target using SELECT COUNT(*) query"""
+        
+    def _count_from_iceberg_target(self, connection_manager: Any,
+                                  target_config: ConnectionConfig,
+                                  table_name: str) -> int:
+        """Count rows from Iceberg target using table metadata or Spark query"""
+```
+
+**Usage Example:**
+
+```python
+from glue_job.database.counting_strategy import CountingStrategy, CountingStrategyType, CountingStrategyConfig
+from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
+from glue_job.monitoring.logging import StructuredLogger
+
+# Configure counting strategy
+config = CountingStrategyConfig(
+    strategy_type=CountingStrategyType.AUTO,
+    size_threshold_rows=1_000_000,
+    force_immediate=False,
+    force_deferred=False
+)
+
+# Initialize strategy manager
+metrics_publisher = CloudWatchMetricsPublisher()
+logger = StructuredLogger("migration-job")
+strategy = CountingStrategy(config, metrics_publisher, logger)
+
+# Select strategy based on dataset
+selected_strategy = strategy.select_strategy(
+    df=source_df,
+    table_name="large_table",
+    engine_type="oracle",
+    estimated_size=5_000_000
+)
+
+# Execute counting based on selected strategy
+if selected_strategy == CountingStrategyType.IMMEDIATE:
+    row_count = strategy.execute_immediate_count(source_df, "large_table")
+else:
+    # Write data first, then count from target
+    # ... perform write operation ...
+    row_count = strategy.execute_deferred_count(
+        connection_manager=conn_mgr,
+        target_config=target_config,
+        table_name="large_table",
+        engine_type="postgresql"
+    )
+```
+
+**Performance Considerations:**
+
+For a 1TB dataset with 1 billion rows:
+- **Immediate Counting**: Read (30 min) + Count (30 min) + Write (30 min) = 90 minutes
+- **Deferred Counting**: Read+Write (30 min) + Target Count (30 sec) = 30.5 minutes
+- **Improvement**: ~66% reduction in total processing time
 
 ## Storage Modules (`glue_job.storage`)
 
@@ -672,6 +933,157 @@ class CloudWatchMetricsPublisher:
         
     def create_dashboard(self, dashboard_name: str, job_name: str) -> bool:
         """Create CloudWatch dashboard for job"""
+        
+    def publish_migration_progress_metrics(self, table_name: str,
+                                          load_type: str,
+                                          rows_processed: int,
+                                          total_rows: Optional[int],
+                                          rows_per_second: float,
+                                          progress_percentage: float):
+        """
+        Publish real-time migration progress metrics.
+        
+        Args:
+            table_name: Name of the table being migrated
+            load_type: Type of load operation ('full' or 'incremental')
+            rows_processed: Number of rows processed so far
+            total_rows: Total rows (if known)
+            rows_per_second: Current processing rate
+            progress_percentage: Progress percentage (0-100)
+            
+        Published Metrics:
+        - MigrationRowsProcessed: Number of rows processed (Count)
+        - MigrationRowsPerSecond: Processing rate (Count/Second)
+        - MigrationProgressPercentage: Progress percentage (Percent)
+        
+        Dimensions:
+        - TableName: Name of the table
+        - LoadType: 'full' or 'incremental'
+        """
+        
+    def publish_counting_strategy_metrics(self, table_name: str,
+                                         strategy_type: str,
+                                         count_duration_seconds: float,
+                                         row_count: int):
+        """
+        Publish metrics about counting strategy execution.
+        
+        Args:
+            table_name: Name of the table
+            strategy_type: Type of strategy used ('immediate' or 'deferred')
+            count_duration_seconds: Time taken to count
+            row_count: Number of rows counted
+            
+        Published Metrics:
+        - CountingStrategyDuration: Time taken to count rows (Seconds)
+        - CountingStrategyRowCount: Number of rows counted (Count)
+        
+        Dimensions:
+        - TableName: Name of the table
+        - StrategyType: 'immediate' or 'deferred'
+        """
+        
+    def publish_migration_phase_metrics(self, table_name: str,
+                                       load_type: str,
+                                       phase: str,
+                                       duration_seconds: float,
+                                       rows_count: Optional[int] = None):
+        """
+        Publish metrics for individual migration phases.
+        
+        Args:
+            table_name: Name of the table
+            load_type: Type of load operation ('full' or 'incremental')
+            phase: Phase name ('read', 'write', or 'count')
+            duration_seconds: Phase duration
+            rows_count: Number of rows (if applicable)
+            
+        Published Metrics:
+        - MigrationPhaseDuration: Duration of the phase (Seconds)
+        - MigrationPhaseRows: Number of rows in phase (Count, if applicable)
+        
+        Dimensions:
+        - TableName: Name of the table
+        - LoadType: 'full' or 'incremental'
+        - Phase: 'read', 'write', or 'count'
+        """
+```
+
+**New CloudWatch Metrics:**
+
+**Migration Progress Metrics:**
+- `MigrationRowsProcessed`: Real-time count of rows processed
+  - Unit: Count
+  - Dimensions: TableName, LoadType
+  - Update Frequency: Configurable (default: every 60 seconds)
+
+- `MigrationRowsPerSecond`: Current processing rate
+  - Unit: Count/Second
+  - Dimensions: TableName, LoadType
+  - Use Case: Monitor throughput and identify performance bottlenecks
+
+- `MigrationProgressPercentage`: Progress percentage (0-100)
+  - Unit: Percent
+  - Dimensions: TableName, LoadType
+  - Use Case: Track completion status and estimate remaining time
+
+**Counting Strategy Metrics:**
+- `CountingStrategyDuration`: Time taken to count rows
+  - Unit: Seconds
+  - Dimensions: TableName, StrategyType
+  - Use Case: Compare performance of immediate vs deferred counting
+
+- `CountingStrategyRowCount`: Number of rows counted
+  - Unit: Count
+  - Dimensions: TableName, StrategyType
+  - Use Case: Validate counting accuracy
+
+**Migration Phase Metrics:**
+- `MigrationPhaseDuration`: Duration of each migration phase
+  - Unit: Seconds
+  - Dimensions: TableName, LoadType, Phase
+  - Phases: read, write, count
+  - Use Case: Identify which phase is the bottleneck
+
+- `MigrationPhaseRows`: Number of rows in each phase
+  - Unit: Count
+  - Dimensions: TableName, LoadType, Phase
+  - Use Case: Validate data consistency across phases
+
+**Usage Example:**
+
+```python
+from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
+
+# Initialize publisher
+metrics = CloudWatchMetricsPublisher(namespace="AWS/Glue/DataReplication")
+
+# Publish progress metrics during migration
+metrics.publish_migration_progress_metrics(
+    table_name="users",
+    load_type="full",
+    rows_processed=500_000,
+    total_rows=1_000_000,
+    rows_per_second=8_333.33,
+    progress_percentage=50.0
+)
+
+# Publish counting strategy metrics
+metrics.publish_counting_strategy_metrics(
+    table_name="users",
+    strategy_type="deferred",
+    count_duration_seconds=0.5,
+    row_count=1_000_000
+)
+
+# Publish phase metrics
+metrics.publish_migration_phase_metrics(
+    table_name="users",
+    load_type="full",
+    phase="write",
+    duration_seconds=120.0,
+    rows_count=1_000_000
+)
 ```
 
 #### PerformanceMonitor Class
@@ -719,6 +1131,138 @@ class ProcessingMetrics:
         
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation"""
+```
+
+### StreamingProgressTracker
+
+Real-time progress tracking during data transfer operations with periodic metric emission for both full load and incremental load operations.
+
+```python
+from glue_job.monitoring.streaming_progress_tracker import StreamingProgressTracker, StreamingProgressConfig
+```
+
+#### StreamingProgressConfig Class
+
+```python
+@dataclass
+class StreamingProgressConfig:
+    """Configuration for streaming progress tracking."""
+    update_interval_seconds: int = 60
+    batch_size_rows: int = 100_000
+    enable_metrics: bool = True
+    enable_logging: bool = True
+    
+    def validate(self) -> bool:
+        """Validate configuration parameters"""
+```
+
+**Configuration Parameters:**
+- `update_interval_seconds`: Interval in seconds between progress updates (default: 60)
+- `batch_size_rows`: Number of rows to process before checking for progress update (default: 100,000)
+- `enable_metrics`: Enable CloudWatch metrics publishing (default: True)
+- `enable_logging`: Enable structured logging of progress (default: True)
+
+#### StreamingProgressTracker Class
+
+```python
+class StreamingProgressTracker:
+    """Tracks real-time progress during data transfer operations."""
+    
+    def __init__(self, table_name: str, load_type: str, config: StreamingProgressConfig,
+                 metrics_publisher: CloudWatchMetricsPublisher):
+        """
+        Initialize streaming progress tracker.
+        
+        Args:
+            table_name: Name of the table being processed
+            load_type: Type of load operation ('full' or 'incremental')
+            config: Streaming progress configuration
+            metrics_publisher: CloudWatch metrics publisher instance
+        """
+        
+    def start_tracking(self, total_rows: Optional[int] = None):
+        """
+        Start progress tracking.
+        
+        Args:
+            total_rows: Total number of rows to process (if known)
+        """
+        
+    def update_progress(self, rows_processed: int):
+        """
+        Update progress with new row count.
+        
+        Args:
+            rows_processed: Number of rows processed so far
+        """
+        
+    def complete_tracking(self, final_row_count: int):
+        """
+        Complete tracking and emit final metrics.
+        
+        Args:
+            final_row_count: Final total row count
+        """
+        
+    def get_progress_percentage(self) -> float:
+        """
+        Get current progress percentage.
+        
+        Returns:
+            Progress percentage (0-100), or 0 if total rows unknown
+        """
+        
+    def get_rows_per_second(self) -> float:
+        """
+        Get current processing rate.
+        
+        Returns:
+            Rows processed per second
+        """
+        
+    def _should_emit_update(self) -> bool:
+        """Check if progress update should be emitted based on interval"""
+        
+    def _emit_progress_update(self):
+        """Emit progress update to CloudWatch and logs"""
+        
+    def _calculate_eta(self) -> Optional[float]:
+        """Calculate estimated time to completion in seconds"""
+```
+
+**Usage Example:**
+
+```python
+from glue_job.monitoring.streaming_progress_tracker import StreamingProgressTracker, StreamingProgressConfig
+from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
+
+# Configure streaming progress
+config = StreamingProgressConfig(
+    update_interval_seconds=60,
+    batch_size_rows=100_000,
+    enable_metrics=True,
+    enable_logging=True
+)
+
+# Initialize tracker
+metrics_publisher = CloudWatchMetricsPublisher()
+tracker = StreamingProgressTracker(
+    table_name="users",
+    load_type="full",  # or "incremental"
+    config=config,
+    metrics_publisher=metrics_publisher
+)
+
+# Start tracking (with or without known total)
+tracker.start_tracking(total_rows=1_000_000)
+
+# Update progress during processing
+for batch in process_batches():
+    # Process batch...
+    tracker.update_progress(rows_processed)
+
+# Complete tracking
+tracker.complete_tracking(final_row_count=1_000_000)
 ```
 
 ## Network Modules (`glue_job.network`)
@@ -955,6 +1499,243 @@ logger.info("Processing started", extra={"table": "users", "mode": "full-load"})
 # Metrics publishing
 metrics = CloudWatchMetricsPublisher()
 metrics.publish_metric("RowsProcessed", 1000, "Count", {"JobName": "my-job"})
+```
+
+### Performance-Optimized Migration (Large Datasets)
+
+Complete example of using the new performance optimization features for large-scale data migrations:
+
+```python
+from glue_job.config.job_config import MigrationPerformanceConfig
+from glue_job.database.counting_strategy import CountingStrategy, CountingStrategyType, CountingStrategyConfig
+from glue_job.monitoring.streaming_progress_tracker import StreamingProgressTracker, StreamingProgressConfig
+from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
+from glue_job.monitoring.logging import StructuredLogger
+from glue_job.database.connection_manager import JdbcConnectionManager
+
+# Step 1: Configure performance optimizations
+perf_config = MigrationPerformanceConfig(
+    counting_strategy="auto",  # Automatically select based on dataset size
+    counting_threshold_rows=1_000_000,
+    progress_update_interval=60,
+    progress_batch_size=100_000,
+    enable_progress_logging=True,
+    enable_detailed_metrics=True
+)
+
+# Step 2: Initialize components
+logger = StructuredLogger("large-migration-job")
+metrics_publisher = CloudWatchMetricsPublisher(namespace="AWS/Glue/DataReplication")
+
+# Step 3: Set up counting strategy
+counting_config = perf_config.to_counting_strategy_config()
+counting_strategy = CountingStrategy(
+    config=counting_config,
+    metrics_publisher=metrics_publisher,
+    structured_logger=logger
+)
+
+# Step 4: Set up streaming progress tracker
+progress_config = perf_config.to_streaming_progress_config()
+progress_tracker = StreamingProgressTracker(
+    table_name="large_table",
+    load_type="full",
+    config=progress_config,
+    metrics_publisher=metrics_publisher
+)
+
+# Step 5: Read source data (single read, no counting yet)
+logger.info("Starting data read", extra={
+    "table": "large_table",
+    "source_engine": "oracle",
+    "target_engine": "postgresql"
+})
+
+source_df = connection_manager.create_connection(
+    source_config,
+    "SELECT * FROM large_table"
+)
+
+# Step 6: Select counting strategy
+selected_strategy = counting_strategy.select_strategy(
+    df=source_df,
+    table_name="large_table",
+    engine_type="oracle",
+    estimated_size=5_000_000  # 5 million rows estimated
+)
+
+logger.info(f"Selected counting strategy: {selected_strategy.value}", extra={
+    "table": "large_table",
+    "strategy": selected_strategy.value,
+    "estimated_size": 5_000_000
+})
+
+# Step 7: Handle counting based on strategy
+row_count = 0
+if selected_strategy == CountingStrategyType.IMMEDIATE:
+    # Count before write (for small datasets)
+    row_count = counting_strategy.execute_immediate_count(source_df, "large_table")
+    progress_tracker.start_tracking(total_rows=row_count)
+else:
+    # Deferred counting - start tracking without total
+    progress_tracker.start_tracking(total_rows=None)
+
+# Step 8: Write data with progress tracking
+logger.info("Starting data write", extra={
+    "table": "large_table",
+    "strategy": selected_strategy.value
+})
+
+# Simulate batch writing with progress updates
+batch_size = 100_000
+rows_written = 0
+
+for batch in source_df.toLocalIterator():
+    # Write batch to target
+    # ... write logic ...
+    
+    rows_written += batch_size
+    progress_tracker.update_progress(rows_written)
+    
+    # Log progress every 100k rows
+    if rows_written % 100_000 == 0:
+        logger.info(f"Progress update", extra={
+            "table": "large_table",
+            "rows_processed": rows_written,
+            "rows_per_second": progress_tracker.get_rows_per_second(),
+            "progress_percentage": progress_tracker.get_progress_percentage()
+        })
+
+# Step 9: Execute deferred counting if needed
+if selected_strategy == CountingStrategyType.DEFERRED:
+    logger.info("Executing deferred count from target", extra={
+        "table": "large_table"
+    })
+    
+    row_count = counting_strategy.execute_deferred_count(
+        connection_manager=connection_manager,
+        target_config=target_config,
+        table_name="large_table",
+        engine_type="postgresql"
+    )
+
+# Step 10: Complete tracking and publish final metrics
+progress_tracker.complete_tracking(final_row_count=row_count)
+
+logger.info("Migration completed", extra={
+    "table": "large_table",
+    "total_rows": row_count,
+    "duration_seconds": progress_tracker.get_rows_per_second(),
+    "strategy_used": selected_strategy.value
+})
+
+# Step 11: Publish phase metrics
+metrics_publisher.publish_migration_phase_metrics(
+    table_name="large_table",
+    load_type="full",
+    phase="write",
+    duration_seconds=120.0,
+    rows_count=row_count
+)
+```
+
+### Incremental Load with Progress Tracking
+
+Example of using streaming progress tracker for incremental loads:
+
+```python
+from glue_job.monitoring.streaming_progress_tracker import StreamingProgressTracker, StreamingProgressConfig
+from glue_job.monitoring.metrics import CloudWatchMetricsPublisher
+
+# Configure progress tracking for incremental load
+progress_config = StreamingProgressConfig(
+    update_interval_seconds=30,  # More frequent updates for incremental
+    batch_size_rows=50_000,
+    enable_metrics=True,
+    enable_logging=True
+)
+
+# Initialize tracker with incremental load type
+metrics_publisher = CloudWatchMetricsPublisher()
+tracker = StreamingProgressTracker(
+    table_name="orders",
+    load_type="incremental",  # Specify incremental load
+    config=progress_config,
+    metrics_publisher=metrics_publisher
+)
+
+# Get bookmark state
+bookmark_state = bookmark_manager.get_bookmark_state("orders")
+last_processed_value = bookmark_state.last_processed_value
+
+# Read incremental data
+incremental_df = connection_manager.create_connection(
+    source_config,
+    f"SELECT * FROM orders WHERE order_date > '{last_processed_value}'"
+)
+
+# Count delta rows (immediate for incremental)
+delta_rows = incremental_df.count()
+
+# Start tracking with known total
+tracker.start_tracking(total_rows=delta_rows)
+
+# Write incremental data with progress tracking
+rows_written = 0
+for batch in incremental_df.toLocalIterator():
+    # Write batch
+    # ... write logic ...
+    
+    rows_written += len(batch)
+    tracker.update_progress(rows_written)
+
+# Complete tracking
+tracker.complete_tracking(final_row_count=delta_rows)
+
+# Update bookmark
+new_max_value = incremental_df.agg({"order_date": "max"}).collect()[0][0]
+bookmark_manager.update_bookmark_state("orders", new_max_value, delta_rows)
+
+# Publish incremental load metrics
+metrics_publisher.publish_migration_progress_metrics(
+    table_name="orders",
+    load_type="incremental",
+    rows_processed=delta_rows,
+    total_rows=delta_rows,
+    rows_per_second=tracker.get_rows_per_second(),
+    progress_percentage=100.0
+)
+```
+
+### Configuration from CloudFormation Parameters
+
+Example of parsing performance configuration from CloudFormation parameters:
+
+```python
+from glue_job.config.parsers import JobConfigurationParser
+from glue_job.config.job_config import MigrationPerformanceConfig
+
+# Parse job arguments from Glue
+parser = JobConfigurationParser()
+job_config = parser.parse_configuration(args)
+
+# Extract performance configuration from parameters
+perf_config = MigrationPerformanceConfig(
+    counting_strategy=args.get('CountingStrategy', 'auto'),
+    counting_threshold_rows=int(args.get('BatchSizeThreshold', 1_000_000)),
+    progress_update_interval=int(args.get('ProgressUpdateInterval', 60)),
+    progress_batch_size=int(args.get('ProgressBatchSize', 100_000)),
+    enable_progress_logging=args.get('EnableProgressLogging', 'true').lower() == 'true',
+    enable_detailed_metrics=args.get('EnableDetailedMetrics', 'true').lower() == 'true'
+)
+
+# Validate configuration
+if not perf_config.validate():
+    raise ValueError("Invalid performance configuration")
+
+# Use configuration in migration
+counting_config = perf_config.to_counting_strategy_config()
+progress_config = perf_config.to_streaming_progress_config()
 ```
 
 ## Error Handling

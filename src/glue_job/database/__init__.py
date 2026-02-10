@@ -9,6 +9,7 @@ from .connection_manager import JdbcConnectionManager, GlueConnectionManager, Un
 from .schema_validator import SchemaCompatibilityValidator, DataTypeMapper
 from .migration import FullLoadDataMigrator, IncrementalDataMigrator
 from .incremental_detector import IncrementalColumnDetector
+from .counting_strategy import CountingStrategy, CountingStrategyType, CountingStrategyConfig
 
 __all__ = [
     'JdbcConnectionManager',
@@ -18,5 +19,8 @@ __all__ = [
     'DataTypeMapper',
     'FullLoadDataMigrator',
     'IncrementalDataMigrator',
-    'IncrementalColumnDetector'
+    'IncrementalColumnDetector',
+    'CountingStrategy',
+    'CountingStrategyType',
+    'CountingStrategyConfig'
 ]
